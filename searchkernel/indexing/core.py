@@ -10,9 +10,9 @@ manifest tracking, and task-submission concerns.
 import logging
 from collections.abc import Callable
 
-from searchkernel.models import Chunk, Document
+from searchkernel.models import Document
 
-from searchkernel.domain import Record
+from searchkernel.domain import Chunk, Record
 from searchkernel.indices.graph import GraphStore
 from searchkernel.indices.hash_store import ChunkHashStore
 from searchkernel.indices.keyword import KeywordIndex
