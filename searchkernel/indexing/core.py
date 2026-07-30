@@ -10,12 +10,13 @@ manifest tracking, and task-submission concerns.
 import logging
 from collections.abc import Callable
 
+from searchkernel.models import Chunk, Document
+
 from searchkernel.domain import Record
 from searchkernel.indices.graph import GraphStore
 from searchkernel.indices.hash_store import ChunkHashStore
 from searchkernel.indices.keyword import KeywordIndex
 from searchkernel.indices.vector import VectorIndex
-from searchkernel.models import Chunk, Document
 from searchkernel.pipeline.stage import SearchContext
 from searchkernel.pipeline.stages.chunk import ChunkStage
 from searchkernel.pipeline.stages.index import IndexStage

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from psycopg2 import sql
+from searchkernel.models import Chunk
 
 from searchkernel.adapters.stores.pgvector import (
     PGVectorStore,
@@ -32,7 +33,6 @@ from searchkernel.adapters.stores.pgvector import (
     _create_schema,
 )
 from searchkernel.domain import Record, RecordStatus, Vector
-from searchkernel.models import Chunk
 from searchkernel.search.types import SearchResultDict
 
 logger = logging.getLogger(__name__)

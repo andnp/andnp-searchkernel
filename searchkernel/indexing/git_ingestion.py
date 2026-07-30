@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from searchkernel.adapters.sources.git import GitContentSource
+
 from searchkernel.domain import Cursor, Record
 
 logger = logging.getLogger(__name__)
