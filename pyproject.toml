@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "andnp-searchkernel"
+version = "0.1.0"
+description = "Source-agnostic search/indexing kernel: domain-agnostic content ingestion, hybrid vector+keyword+graph search, pluggable embedding/LLM/reranker providers."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "llama-index-core>=0.12.0",
+    "llama-index-embeddings-huggingface>=0.4.0",
+    "llama-index-vector-stores-faiss>=0.3.0",
+    "faiss-cpu>=1.9.0",
+    "sentence-transformers>=3.0.0",
+    "tenacity>=9.0.0",
+    "psycopg2-binary>=2.9.0",
+    "pyyaml>=6.0.2",
+    "tomlkit>=0.13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/andnp/andnp-searchkernel"
+Documentation = "https://github.com/andnp/andnp-searchkernel/tree/main/docs"
+Repository = "https://github.com/andnp/andnp-searchkernel.git"
+Issues = "https://github.com/andnp/andnp-searchkernel/issues"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.407",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "pytest-xdist>=3.5.0",
+    "ruff>=0.14.10",
+    "ty>=0.0.12",
+    "import-linter>=2.0",
+]
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["searchkernel"]
+
+[tool.pytest.ini_options]
+pythonpath = "."
+addopts = "-n 4 --dist worksteal"
+markers = [
+    "serial: marks tests that must run serially (not in parallel)",
+    "unit: marks unit tests (fast, isolated)",
+    "integration: marks integration tests (involve multiple components)",
+    "e2e: marks end-to-end tests (full system tests)",
+    "slow: marks slow tests (>5s, load models or process large datasets)",
+    "real_embeddings: marks tests that require real embedding models (not fake deterministic embeddings)",
+]
+
+[tool.importlinter]
+root_packages = ["searchkernel"]
+default_mapping = "searchkernel"
+
+[[tool.importlinter.contracts]]
+name = "domain and ports are inward-only"
+type = "forbidden"
+source_modules = ["searchkernel.domain", "searchkernel.ports"]
+forbidden_modules = [
+    "searchkernel.adapters",
+    "searchkernel.pipeline",
+    "searchkernel.search",
+    "searchkernel.indices",
+    "searchkernel.storage",
+    "searchkernel.runtime",
+    "searchkernel.eval",
+    "searchkernel.compression",
+]
+ignore_imports = []
