@@ -396,3 +396,97 @@ def test_get_neighbors_thread_safe_with_concurrent_modifications(graph_store):
 
     # Verify no exceptions occurred
     assert errors == [], f"Thread safety errors: {errors}"
+
+
+def test_graph_store_rename_node_preserves_metadata_and_edges(graph_store):
+    graph_store.add_node("old", {"title": "Moved"})
+    graph_store.add_node("source", {})
+    graph_store.add_node("target", {})
+    graph_store.add_edge("source", "old", "links_to", "incoming")
+    graph_store.add_edge("old", "target", "implements", "outgoing")
+
+    assert graph_store.rename_node("old", "new") is True
+    assert not graph_store.has_node("old")
+    assert graph_store.get_node_metadata("new") == {"title": "Moved"}
+    assert graph_store.get_edges_to("new")[0]["source"] == "source"
+    assert graph_store.get_edges_from("new")[0]["target"] == "target"
+    assert graph_store.rename_node("missing", "never-created") is False
+
+
+def test_graph_store_bulk_access_and_batch_neighbors(graph_store):
+    graph_store.add_node("doc1", {"kind": "source"})
+    graph_store.add_node("doc2", {"kind": "target"})
+    graph_store.add_node("doc3", {})
+    graph_store.add_edge("doc1", "doc2", "links_to", "context")
+    graph_store.add_edge("doc2", "doc3", "related_to")
+
+    assert set(graph_store.get_neighbors_batch(["doc1", "missing"], depth=2)) == {
+        "doc2",
+        "doc3",
+    }
+    assert graph_store.get_all_node_ids() == ["doc1", "doc2", "doc3"]
+    assert graph_store.get_all_nodes_with_metadata() == [
+        ("doc1", {"kind": "source"}),
+        ("doc2", {"kind": "target"}),
+        ("doc3", {}),
+    ]
+    assert graph_store.get_outgoing_edges("doc1") == [
+        ("doc1", "doc2", {"edge_type": "links_to", "edge_context": "context"})
+    ]
+
+
+def test_graph_store_document_compatibility_methods_and_clear(graph_store):
+    graph_store.add_document("doc1", "searchable body", {"title": "Title"})
+
+    assert len(graph_store) == 1
+    assert graph_store.search("searchable", limit=1)[0].doc_id == "doc1"
+    assert graph_store.search("missing") == []
+
+    graph_store.persist_to(graph_store._db._db_path.parent)
+    assert graph_store.load_from(graph_store._db._db_path.parent) is True
+    graph_store.save(graph_store._db._db_path.parent)
+    graph_store.remove_document("doc1")
+    assert len(graph_store) == 0
+
+    graph_store.add_node("doc2", {})
+    graph_store.clear()
+    assert len(graph_store) == 0
+
+
+def test_graph_store_community_helpers_and_refresh(graph_store):
+    graph_store.add_node("doc1", {})
+    graph_store.add_node("doc2", {})
+    graph_store.add_edge("doc1", "doc2", "links_to")
+
+    communities = graph_store.detect_communities()
+    assert set(communities) == {"doc1", "doc2"}
+    community = graph_store.get_community("doc1")
+    assert community is not None
+    assert set(graph_store.get_community_members(community)) == {"doc1", "doc2"}
+    assert graph_store.get_community_members(9999) == []
+    assert graph_store.boost_by_community(
+        ["doc1", "external"], {"doc1"}, boost_factor=1.5
+    ) == {"doc1": 1.5, "external": 1.0}
+
+    graph_store.refresh_communities()
+    graph_store.add_node("doc3", {})
+    graph_store.refresh_communities(force=True)
+    assert graph_store.get_community("doc3") is not None
+
+
+def test_graph_store_recovers_from_corruption_during_operation(graph_store):
+    from unittest.mock import MagicMock, patch
+
+    original_conn = graph_store._conn
+    corrupt_conn = MagicMock()
+    corrupt_conn.execute.side_effect = RuntimeError(
+        "database disk image is malformed"
+    )
+
+    with patch.object(
+        graph_store, "_conn", side_effect=[corrupt_conn, original_conn]
+    ):
+        graph_store.add_node("lost", {})
+
+    graph_store.add_node("recovered", {})
+    assert graph_store.get_all_node_ids() == ["recovered"]

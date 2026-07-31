@@ -22,13 +22,19 @@ class ChunkHashStore:
         if self._storage_path.exists():
             try:
                 with open(self._storage_path, "r") as f:
-                    self._hashes = json.load(f)
+                    hashes = json.load(f)
+                if not isinstance(hashes, dict) or not all(
+                    isinstance(chunk_id, str) and isinstance(content_hash, str)
+                    for chunk_id, content_hash in hashes.items()
+                ):
+                    raise ValueError("hash store must contain string key/value pairs")
+                self._hashes = hashes
                 logger.info(
                     f"Loaded {len(self._hashes)} chunk hashes from {self._storage_path}"
                 )
                 # Build reverse lookup
                 self._build_reverse_lookup()
-            except (json.JSONDecodeError, OSError) as e:
+            except (json.JSONDecodeError, OSError, TypeError, ValueError) as e:
                 logger.warning(
                     f"Failed to load hash store: {e}. Starting fresh.", exc_info=True
                 )

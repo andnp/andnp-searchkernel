@@ -123,6 +123,50 @@ def test_hash_store_corrupted_json_recovery(tmp_path):
     assert store.get_hash("any_chunk") is None
 
 
+@pytest.mark.parametrize("payload", ["[]", '{"chunk": 42}', "null"])
+def test_hash_store_invalid_json_shape_recovers(tmp_path, payload):
+    storage_path = tmp_path / "chunk_hashes.json"
+    storage_path.write_text(payload)
+
+    store = ChunkHashStore(storage_path)
+
+    assert store.get_hash("chunk") is None
+
+
+def test_hash_store_reverse_lookup_updates_and_lists_document_chunks(
+    temp_hash_store,
+):
+    temp_hash_store.set_hash("doc_chunk_0", "same")
+    temp_hash_store.set_hash("doc#chunk-1", "same")
+    temp_hash_store.set_hash("other#chunk-0", "other")
+
+    assert temp_hash_store.get_chunk_id_by_hash("same") == "doc_chunk_0"
+    assert temp_hash_store.get_chunks_by_document("doc") == [
+        ("doc_chunk_0", "same"),
+        ("doc#chunk-1", "same"),
+    ]
+
+    temp_hash_store.set_hash("doc_chunk_0", "updated")
+    assert temp_hash_store.get_chunk_id_by_hash("same") == "doc#chunk-1"
+    assert temp_hash_store.get_chunk_id_by_hash("updated") == "doc_chunk_0"
+
+
+def test_hash_store_remove_chunk_and_clear_reset_forward_reverse_indexes(
+    temp_hash_store,
+):
+    temp_hash_store.set_hash("doc#chunk-0", "hash")
+    temp_hash_store.remove_chunk("doc#chunk-0")
+    temp_hash_store.remove_chunk("missing")
+
+    assert temp_hash_store.get_hash("doc#chunk-0") is None
+    assert temp_hash_store.get_chunk_id_by_hash("hash") is None
+
+    temp_hash_store.set_hash("doc#chunk-1", "hash-2")
+    temp_hash_store.clear()
+    assert temp_hash_store.get_chunks_by_document("doc") == []
+    assert temp_hash_store.get_chunk_id_by_hash("hash-2") is None
+
+
 def test_hash_store_missing_file(tmp_path):
     """Test initialization when storage file doesn't exist."""
     storage_path = tmp_path / "nonexistent" / "chunk_hashes.json"

@@ -69,6 +69,42 @@ def test_graph_store_load_with_corrupted_communities_json(tmp_path):
     assert graph_store._communities == {}
 
 
+def test_graph_store_migrates_legacy_json_and_archives_files(tmp_path):
+    persist_path = tmp_path / "legacy"
+    persist_path.mkdir()
+    (persist_path / "graph.json").write_text(
+        json.dumps(
+            {
+                "nodes": [{"id": "doc1", "title": "Legacy"}],
+                "links": [
+                    {
+                        "source": "doc1",
+                        "target": "doc2",
+                        "edge_type": "links_to",
+                        "edge_context": "legacy link",
+                    }
+                ],
+            }
+        )
+    )
+    (persist_path / "communities.json").write_text('{"doc1": 1}')
+
+    graph_store = GraphStore(DatabaseManager(tmp_path / "test.db"))
+    graph_store.load(persist_path)
+
+    assert graph_store.get_node_metadata("doc1") == {"title": "Legacy"}
+    assert graph_store.get_edges_from("doc1") == [
+        {
+            "source": "doc1",
+            "target": "doc2",
+            "edge_type": "links_to",
+            "edge_context": "legacy link",
+        }
+    ]
+    assert (persist_path / "graph.json.bak").exists()
+    assert (persist_path / "communities.json.bak").exists()
+
+
 def test_graph_store_load_with_missing_graph_file(tmp_path):
     """
     GraphStore handles missing graph.json file.

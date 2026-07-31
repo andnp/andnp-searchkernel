@@ -1168,3 +1168,98 @@ def test_keyword_index_search_recovers_from_malformed_mid_operation(tmp_path):
     index.add(doc)
     results = index.search("reinforcement learning", top_k=5)
     assert "some-doc" in _extract_chunk_ids(results)
+
+
+def test_keyword_index_batch_mutations_move_and_remove_chunks():
+    from searchkernel.domain import Chunk
+
+    index = KeywordIndex()
+    chunks = [
+        _with_hash(
+            Chunk(
+                chunk_id="doc#chunk-0",
+                record_id="doc",
+                content="alpha content",
+                metadata={"title": "Alpha"},
+            )
+        ),
+        _with_hash(
+            Chunk(
+                chunk_id="doc#chunk-1",
+                record_id="doc",
+                content="beta content",
+                metadata={"title": "Beta"},
+            )
+        ),
+    ]
+
+    index.add_chunks(chunks)
+    assert len(index) == 2
+    assert index.add_chunks([]) is None
+
+    moved = _with_hash(
+        Chunk(
+            chunk_id="doc#chunk-new",
+            record_id="doc",
+            content="renamed content",
+            metadata={"title": "Renamed"},
+        )
+    )
+    assert index.move_chunk("doc#chunk-0", moved) is True
+    assert index.move_chunk("missing", moved) is False
+    assert index.get_chunk_by_id("doc#chunk-0") is None
+    moved_row = index.get_chunk_by_id("doc#chunk-new")
+    assert moved_row is not None
+    assert moved_row["title"] == "Renamed"
+
+    index.remove_chunks(["doc#chunk-1", "missing"])
+    index.remove_chunks([])
+    assert len(index) == 1
+
+
+def test_keyword_index_filters_excluded_files_and_supports_document_methods(tmp_path):
+    from searchkernel.domain import Chunk
+
+    docs_root = tmp_path / "docs"
+    first = _with_hash(
+        Chunk(
+            chunk_id="guide/setup#chunk-0",
+            record_id="guide/setup",
+            content="shared configuration term",
+            metadata={"source_file": str(docs_root / "guide" / "setup.md")},
+        )
+    )
+    second = _with_hash(
+        Chunk(
+            chunk_id="guide/other#chunk-0",
+            record_id="guide/other",
+            content="shared configuration term",
+            metadata={"source_file": str(docs_root / "guide" / "other.md")},
+        )
+    )
+
+    index = KeywordIndex()
+    index.add_chunks([first, second])
+    results = index.search(
+        "configuration", top_k=5, excluded_files={"guide/setup"}, docs_root=docs_root
+    )
+    assert _extract_chunk_ids(results) == ["guide/other#chunk-0"]
+
+    index.add_document("document", "document-only content", {"title": "Document"})
+    assert len(index) == 3
+    assert index.search("document-only")[0]["doc_id"] == "document"
+    index.remove_document("document")
+    index.clear()
+    assert len(index) == 0
+
+
+def test_keyword_index_load_from_valid_snapshot_and_missing_path(tmp_path):
+    index = KeywordIndex()
+    index.add(_make_record("doc", "snapshot content"))
+    snapshot = tmp_path / "snapshot"
+    index.persist_to(snapshot)
+
+    restored = KeywordIndex()
+    assert restored.load_from(snapshot) is True
+    assert restored.search("snapshot content")
+    assert restored.load_from(tmp_path / "missing") is True
