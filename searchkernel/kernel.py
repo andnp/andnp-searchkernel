@@ -21,7 +21,7 @@ class SearchKernel:
         self,
         *,
         registry: SourceRegistry,
-        reranker: Reranker,
+        reranker: Reranker | None = None,
         config: object | None = None,
         embedder: EmbeddingProvider | None = None,
         per_source_timeout_s: float = DEFAULT_PER_SOURCE_TIMEOUT_S,
@@ -56,11 +56,6 @@ class SearchKernel:
                 effective_reranker = config.get("reranker")
             elif config is not None:
                 effective_reranker = getattr(config, "reranker", None)
-        if effective_reranker is None:
-            raise ValueError(
-                "SearchKernel.build requires a reranker or config.reranker"
-            )
-
         source_registry = registry or SourceRegistry()
         if orchestrator is not None:
             source_registry.register(LocalSearchSource(orchestrator))

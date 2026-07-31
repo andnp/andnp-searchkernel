@@ -64,6 +64,26 @@ async def test_search_kernel_delegates_fusion_and_returns_search_results():
 
 
 @pytest.mark.asyncio
+async def test_search_kernel_builds_without_reranker():
+    source = _Source(
+        "memory",
+        ScoredRef(
+            source_id="memory-1",
+            score=0.2,
+            source_kind="memory",
+            metadata={"text": "a memory"},
+        ),
+    )
+    kernel = SearchKernel.build(sources=[source])
+
+    results = await kernel.search_anything("query", k=1)
+
+    assert results[0].record_id == "memory-1"
+    assert results[0].score == pytest.approx(1 / 61)
+    assert results[0].metadata == {"text": "a memory", "source_score": 0.2}
+
+
+@pytest.mark.asyncio
 async def test_local_search_source_preserves_chunk_identity_and_metadata():
     class _Orchestrator:
         def __init__(self):

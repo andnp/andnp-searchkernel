@@ -160,6 +160,118 @@ def test_searchable_source_protocol_conformance_of_stubs():
 
 
 @pytest.mark.asyncio
+async def test_duplicate_results_are_fused_once_with_source_details():
+    class _Source:
+        def __init__(self, source_kind, results):
+            self.source_kind = source_kind
+            self._results = results
+
+        async def search(self, query, k, filters=None):
+            return self._results
+
+    registry = SourceRegistry()
+    registry.register(
+        _Source(
+            "first",
+            [
+                ScoredRef(
+                    source_id="shared",
+                    score=0.9,
+                    source_kind="first",
+                    metadata={"text": "shared result", "origin": "first"},
+                )
+            ],
+        )
+    )
+    registry.register(
+        _Source(
+            "second",
+            [
+                ScoredRef(
+                    source_id="shared",
+                    score=0.2,
+                    source_kind="second",
+                    metadata={"text": "shared result", "origin": "second"},
+                )
+            ],
+        )
+    )
+
+    results = await search_anything("query", registry=registry)
+
+    assert len(results) == 1
+    assert results[0].source_id == "shared"
+    assert results[0].score == pytest.approx(2 / 61)
+    assert results[0].metadata["origin"] == "first"
+    assert results[0].metadata["source_score"] == 0.9
+    assert results[0].metadata["source_scores"] == {
+        "first": 0.9,
+        "second": 0.2,
+    }
+    assert results[0].metadata["source_metadata"]["second"]["origin"] == "second"
+
+
+@pytest.mark.asyncio
+async def test_rrf_preserves_source_order_for_equal_rank_scores():
+    class _Source:
+        def __init__(self, source_kind, source_id):
+            self.source_kind = source_kind
+            self._source_id = source_id
+
+        async def search(self, query, k, filters=None):
+            return [
+                ScoredRef(
+                    source_id=self._source_id,
+                    score=0.1,
+                    source_kind=self.source_kind,
+                )
+            ]
+
+    registry = SourceRegistry()
+    registry.register(_Source("first", "first-1"))
+    registry.register(_Source("second", "second-1"))
+
+    results = await search_anything("query", registry=registry)
+
+    assert [result.source_id for result in results] == ["first-1", "second-1"]
+    assert [result.score for result in results] == pytest.approx([1 / 61, 1 / 61])
+
+
+@pytest.mark.asyncio
+async def test_failed_reranker_falls_back_to_rrf():
+    class _FailingReranker:
+        model_name = "failing-reranker"
+
+        def rerank(self, query, documents):
+            raise RuntimeError("reranker unavailable")
+
+    registry = SourceRegistry()
+    registry.register(_FastSource())
+
+    results = await search_anything(
+        "query",
+        registry=registry,
+        reranker=_FailingReranker(),
+    )
+
+    assert [result.source_id for result in results] == ["fast-1"]
+    assert results[0].score == pytest.approx(1 / 61)
+    assert results[0].metadata["source_score"] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_no_reranker_path_returns_rrf_scores():
+    registry = SourceRegistry()
+    registry.register(_FastSource())
+
+    results = await search_anything("query", registry=registry)
+
+    assert [result.source_id for result in results] == ["fast-1"]
+    assert results[0].score == pytest.approx(1 / 61)
+    assert results[0].metadata["source_score"] == 0.9
+
+
+@pytest.mark.asyncio
 async def test_rerank_once_reorders_by_reranker_not_source_score():
     """The merged set is ordered by the single rerank pass, not each source's
     own score -- a source's high self-reported score should not win if the
