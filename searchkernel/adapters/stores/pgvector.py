@@ -168,7 +168,9 @@ def build_pgvector_filter_sql(
         clauses.append(f"{record_alias}.workspace_id = %s")
         parameters.append(workspace_id)
 
-    source_kinds = _string_filter_values(filters, "source_kinds", "source_kind")
+    source_kinds = _string_filter_values(
+        filters, "source_kinds", "source_kind", "source_filter"
+    )
     if source_kinds is not None:
         if not source_kinds:
             return ["FALSE"], []
@@ -189,7 +191,9 @@ def build_pgvector_filter_sql(
         parameters.extend([sorted(candidate_keys), sorted(candidate_sources)])
 
     project_expr = f"{record_alias}.metadata->>'project_id'"
-    project_values = _string_filter_values(filters, "project_ids", "project_id")
+    project_values = _string_filter_values(
+        filters, "project_ids", "project_id", "project_filter"
+    )
     if project_values is not None:
         if not project_values:
             return ["FALSE"], []

@@ -120,7 +120,9 @@ def record_matches_vector_filters(
     if requested_workspace is not None and workspace_id != requested_workspace:
         return False
 
-    source_kinds = _string_values(filters, "source_kinds", "source_kind")
+    source_kinds = _string_values(
+        filters, "source_kinds", "source_kind", "source_filter"
+    )
     if source_kinds is not None and source_kind not in set(source_kinds):
         return False
 
@@ -135,7 +137,9 @@ def record_matches_vector_filters(
             return False
 
     project_id = metadata.get("project_id")
-    project_values = _string_values(filters, "project_ids", "project_id")
+    project_values = _string_values(
+        filters, "project_ids", "project_id", "project_filter"
+    )
     if project_values is not None and str(project_id) not in set(project_values):
         return False
     excluded_projects = _string_values(
