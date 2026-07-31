@@ -78,6 +78,8 @@ def test_local_store_uses_collision_safe_identity_and_filters(tmp_path) -> None:
         [1.0, 0.0], 10, model_name="test", dim=2, filters={"workspace_id": "one"}
     )
 
+    assert keyword.keyword_index_available
+    assert keyword.check_keyword_index()
     assert [hit.storage_key for hit in hits] == [
         records[1].storage_key,
         records[0].storage_key,
@@ -263,8 +265,8 @@ def test_keyword_migrates_existing_local_records_schema(tmp_path: Path) -> None:
             "migration body",
             timestamp,
             timestamp,
-            '{"tags": ["migration"]}',
-            "legacy.md",
+            '{"tags": ["migration"], "file_path": "docs/legacy.md"}',
+            None,
             "active",
         ),
     )
@@ -273,6 +275,9 @@ def test_keyword_migrates_existing_local_records_schema(tmp_path: Path) -> None:
 
     backend = LocalRecordBackend(db_path)
     assert [hit.source_id for hit in backend.search_keyword("migration", 10)] == [
+        "legacy"
+    ]
+    assert [hit.source_id for hit in backend.search_keyword("legacy.md", 10)] == [
         "legacy"
     ]
     assert backend.check_keyword_index()

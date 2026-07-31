@@ -15,6 +15,8 @@ def test_sanitize_fts_query_removes_match_operators():
     assert sanitize_fts_query('worker.enabled - "debug"') == "worker.enabled debug"
     assert sanitize_fts_query('"alpha beta"') == '"alpha beta"'
     assert sanitize_fts_query("alph*") == "alph*"
+    assert sanitize_fts_query("alpha OR beta") == 'alpha "OR" beta'
+    assert sanitize_fts_query("C++") == "C"
     assert sanitize_fts_query("   ") == '""'
 
 

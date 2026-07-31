@@ -64,8 +64,8 @@ class LocalRecordBackend:
     ) -> None:
         if db_manager is not None and db_path is not None:
             raise ValueError("pass db_path or db_manager, not both")
-        if keyword_overfetch_multiplier < 1.0:
-            raise ValueError("keyword_overfetch_multiplier must be at least 1")
+        if not math.isfinite(keyword_overfetch_multiplier) or keyword_overfetch_multiplier < 1.0:
+            raise ValueError("keyword_overfetch_multiplier must be finite and at least 1")
         self._db = db_manager or (
             DatabaseManager(db_path) if db_path is not None else _EphemeralDatabase()
         )
@@ -83,6 +83,7 @@ class LocalRecordBackend:
 
     def _initialize_schema(self) -> None:
         conn = self._db.get_connection()
+        conn.row_factory = sqlite3.Row
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS local_records (
@@ -150,26 +151,30 @@ class LocalRecordBackend:
             value = metadata.get(key)
             if value is None:
                 continue
-            if isinstance(value, (list, tuple, set)):
+            if isinstance(value, set):
+                values.extend(str(item) for item in sorted(value, key=str))
+            elif isinstance(value, (list, tuple)):
                 values.extend(str(item) for item in value)
             else:
                 values.append(str(value))
         return " ".join(" ".join(value.strip().lower().split()) for value in values if value)
 
     @staticmethod
-    def _record_uri(record: Record) -> str:
-        if record.uri:
-            return record.uri
+    def _metadata_uri(metadata: dict[str, Any]) -> str:
         for key in ("uri", "source_file", "file_path", "path"):
-            value = record.metadata.get(key)
+            value = metadata.get(key)
             if value:
                 return str(value)
         return ""
 
     @classmethod
+    def _record_uri(cls, record: Record) -> str:
+        return record.uri or cls._metadata_uri(record.metadata)
+
+    @classmethod
     def _migrate_keyword_columns(cls, conn: sqlite3.Connection) -> None:
         rows = conn.execute(
-            "SELECT rowid, metadata, keywords FROM local_records"
+            "SELECT rowid, metadata, uri, keywords FROM local_records"
         ).fetchall()
         for row in rows:
             try:
@@ -179,10 +184,11 @@ class LocalRecordBackend:
             if not isinstance(metadata, dict):
                 metadata = {}
             keywords = cls._metadata_keyword_text(metadata)
-            if row["keywords"] != keywords:
+            uri = row["uri"] or cls._metadata_uri(metadata)
+            if row["keywords"] != keywords or row["uri"] != uri:
                 conn.execute(
-                    "UPDATE local_records SET keywords = ? WHERE rowid = ?",
-                    (keywords, row["rowid"]),
+                    "UPDATE local_records SET uri = ?, keywords = ? WHERE rowid = ?",
+                    (uri, keywords, row["rowid"]),
                 )
 
     @staticmethod
@@ -573,6 +579,13 @@ class LocalRecordBackend:
             score = float(row["score"])
             if needs_artifact_rerank:
                 normalized_query = _keyword_scoring.normalize_artifact_value(query)
+                score += _keyword_scoring.score_field_aware_match(
+                    query,
+                    content=row["body"],
+                    title=row["title"],
+                    headers=row["keywords"],
+                    source_file=row["uri"] or "",
+                )
                 score += _keyword_scoring.score_artifact_match(
                     normalized_query,
                     Path(normalized_query).name,
@@ -610,8 +623,9 @@ class LocalRecordBackend:
             SELECT storage_key, workspace_id, source_kind, source_id, title, body
             FROM local_records r
             WHERE {" AND ".join(clause.replace("r.", "") for clause in clauses)}
+            LIMIT ?
             """,
-            parameters,
+            (*parameters, _FALLBACK_SCAN_MAX_ROWS + 1),
         ).fetchall()
         if len(rows) > _FALLBACK_SCAN_MAX_ROWS:
             self._keyword_search_diagnostic = (
@@ -745,30 +759,34 @@ class LocalRecordBackend:
             return
         with self._lock:
             conn = self._db.get_connection()
-            for record_id in record_ids:
-                record = self.hydrate_record(record_id)
-                if record is None:
-                    continue
-                old_row = conn.execute(
-                    """
-                    SELECT rowid, title, body, uri, keywords
-                    FROM local_records
-                    WHERE storage_key = ?
-                    """,
-                    (record.storage_key,),
-                ).fetchone()
-                if old_row is not None and self._fts5_available:
-                    self._delete_fts_row(conn, old_row)
-                conn.execute(
-                    "DELETE FROM local_vectors WHERE storage_key = ?",
-                    (record.storage_key,),
-                )
-                conn.execute(
-                    "DELETE FROM local_records WHERE storage_key = ?",
-                    (record.storage_key,),
-                )
-            self._bump_epoch(conn)
-            conn.commit()
+            try:
+                for record_id in record_ids:
+                    record = self.hydrate_record(record_id)
+                    if record is None:
+                        continue
+                    old_row = conn.execute(
+                        """
+                        SELECT rowid, title, body, uri, keywords
+                        FROM local_records
+                        WHERE storage_key = ?
+                        """,
+                        (record.storage_key,),
+                    ).fetchone()
+                    if old_row is not None and self._fts5_available:
+                        self._delete_fts_row(conn, old_row)
+                    conn.execute(
+                        "DELETE FROM local_vectors WHERE storage_key = ?",
+                        (record.storage_key,),
+                    )
+                    conn.execute(
+                        "DELETE FROM local_records WHERE storage_key = ?",
+                        (record.storage_key,),
+                    )
+                self._bump_epoch(conn)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     @property
     def keyword_index_available(self) -> bool:
@@ -1015,6 +1033,20 @@ class LocalKeywordStore:
         self, query: str, k: int, filters: dict[str, Any] | None = None
     ) -> list[RecordHit]:
         return self._backend.search_keyword(query, k, filters)
+
+    @property
+    def keyword_index_available(self) -> bool:
+        return self._backend.keyword_index_available
+
+    @property
+    def keyword_search_diagnostic(self) -> str:
+        return self._backend.keyword_search_diagnostic
+
+    def check_keyword_index(self) -> bool:
+        return self._backend.check_keyword_index()
+
+    def rebuild_keyword_index(self) -> None:
+        self._backend.rebuild_keyword_index()
 
 
 class LocalGraphStore:

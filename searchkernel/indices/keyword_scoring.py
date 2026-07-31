@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 _ARTIFACT_QUERY_RE = re.compile(r"[./\\_-]")
+_FTS_OPERATORS = frozenset({"AND", "NEAR", "NOT", "OR"})
 
 
 def sanitize_fts_query(query: str) -> str:
@@ -15,7 +16,7 @@ def sanitize_fts_query(query: str) -> str:
         if raw is None:
             continue
         prefix = not quoted and raw.rstrip().endswith("*")
-        sanitized = re.sub(r"[\"\'*\^(){}[\]<>|~!:\-]", " ", raw)
+        sanitized = re.sub(r"[\"\'*\^(){}[\]<>|~!:\-+&]", " ", raw)
         words = sanitized.split()
         if not words:
             continue
@@ -23,7 +24,11 @@ def sanitize_fts_query(query: str) -> str:
             terms.append(f'"{" ".join(words)}"')
         else:
             terms.extend(words[:-1])
-            terms.append(words[-1] + "*" if prefix else words[-1])
+            word = words[-1]
+            if word.upper() in _FTS_OPERATORS:
+                terms.append(f'"{word}"')
+            else:
+                terms.append(word + "*" if prefix else word)
     if not terms:
         return '""'
     return " ".join(terms)
