@@ -7,11 +7,22 @@ readiness or scheduling system.
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from searchkernel.domain import Chunk, Record
 from searchkernel.indexing.semantic import SemanticInput, semantic_input_for_chunk
 from searchkernel.search.edge_types import infer_edge_type
+
+
+@runtime_checkable
+class LinkExtractingParser(Protocol):
+    """Parser surface for link-with-context extraction (e.g. markdown headers).
+
+    Kept as a Protocol so the library never imports a concrete, source-specific
+    parser class (parsers are app-owned adapters).
+    """
+
+    def extract_links_with_context(self, file_path: str) -> list: ...
 
 
 @dataclass
@@ -61,14 +72,12 @@ def build_graph_payload(
     documents: list[PreparedIndexDocument],
 ) -> tuple[list[tuple[str, dict]], list[tuple[str, str, str, str]]]:
     """Shape document, chunk, and link data for the bulk graph APIs."""
-    from searchkernel.parsers.markdown import MarkdownParser
-
     nodes: list[tuple[str, dict]] = []
     edges: list[tuple[str, str, str, str]] = []
     for prepared in documents:
         nodes.append((prepared.record.source_id, prepared.graph_metadata))
         nodes.extend((chunk.chunk_id, chunk.metadata) for chunk in prepared.chunks)
-        if isinstance(prepared.parser, MarkdownParser):
+        if isinstance(prepared.parser, LinkExtractingParser):
             links = prepared.parser.extract_links_with_context(prepared.file_path)
             edges.extend(
                 (
