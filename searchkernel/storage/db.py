@@ -16,9 +16,9 @@ class SQLiteTuning:
 
     busy_timeout_ms: int = 5_000
     page_size: int | None = None
-    cache_size: int | None = -2_000
+    cache_size: int | None = None
     mmap_size: int = 0
-    temp_store: str | int = "memory"
+    temp_store: str | int = "default"
     checkpoint_policy: str = "passive"
     checkpoint_interval: int = 1_000
 
