@@ -19,7 +19,9 @@ doc_id/header_path/file_path/parent_chunk_id/project_id rides in
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -27,6 +29,10 @@ from typing import Any, Protocol, cast
 from psycopg2 import sql
 
 from searchkernel.adapters.stores.pgvector import (
+    DEFAULT_HNSW_EF_SEARCH,
+    DEFAULT_HNSW_ITERATIVE_SCAN,
+    DEFAULT_HNSW_MAX_SCAN_TUPLES,
+    DEFAULT_HNSW_SCAN_MEM_MULTIPLIER,
     PGVectorStore,
     PostgresConnection,
     _create_schema,
@@ -39,7 +45,7 @@ from searchkernel.domain import (
     Vector,
     canonical_storage_key,
 )
-from searchkernel.runtime import QueryEmbeddingCache
+from searchkernel.runtime import QueryEmbeddingCache, get_query_embedding_cache
 from searchkernel.search.types import SearchResultDict
 
 logger = logging.getLogger(__name__)
@@ -67,6 +73,26 @@ def _default_embedder(model_name: str, truncate_dim: int | None = None) -> _Embe
 def _embedding_text(chunk: Chunk) -> str:
     header_path = chunk.metadata.get("header_path", "")
     return f"{header_path}\n\n{chunk.content}" if header_path else chunk.content
+
+
+def _parse_stored_vector(raw: Any, dim: int) -> list[float]:
+    if isinstance(raw, str):
+        try:
+            values = json.loads(raw)
+        except json.JSONDecodeError:
+            values = [value for value in raw.strip("[]").split(",") if value]
+    elif hasattr(raw, "tolist"):
+        values = raw.tolist()
+    elif isinstance(raw, Sequence):
+        values = list(raw)
+    else:
+        raise TypeError("stored vector has an unsupported representation")
+    if not isinstance(values, list) or len(values) != dim:
+        raise ValueError(
+            f"stored vector dimension mismatch: expected {dim}, got "
+            f"{len(values) if isinstance(values, list) else 'unknown'}"
+        )
+    return [float(value) for value in values]
 
 
 def _parse_modified_time(raw: Any) -> datetime:
@@ -156,6 +182,8 @@ class PGVectorIndex:
     query/ingestion path calls on `VectorIndex` today.
     """
 
+    query_expansion_supported = False
+
     def __init__(
         self,
         pg_dsn: str,
@@ -166,15 +194,31 @@ class PGVectorIndex:
         workspace_id: str | None = None,
         query_embedding_cache: QueryEmbeddingCache | None = None,
         encoder_namespace: str | None = None,
+        hnsw_ef_search: int = DEFAULT_HNSW_EF_SEARCH,
+        hnsw_iterative_scan: str = DEFAULT_HNSW_ITERATIVE_SCAN,
+        hnsw_max_scan_tuples: int = DEFAULT_HNSW_MAX_SCAN_TUPLES,
+        hnsw_scan_mem_multiplier: float = DEFAULT_HNSW_SCAN_MEM_MULTIPLIER,
+        overfetch_multiplier: float = 2.0,
+        max_scan_rounds: int = 4,
     ):
         self._conn_pool = PostgresConnection(pg_dsn)
         _create_schema(self._conn_pool)
-        self._store = PGVectorStore(self._conn_pool)
+        self._store = PGVectorStore(
+            self._conn_pool,
+            hnsw_ef_search=hnsw_ef_search,
+            hnsw_iterative_scan=hnsw_iterative_scan,
+            hnsw_max_scan_tuples=hnsw_max_scan_tuples,
+            hnsw_scan_mem_multiplier=hnsw_scan_mem_multiplier,
+            overfetch_multiplier=overfetch_multiplier,
+            max_scan_rounds=max_scan_rounds,
+        )
         self._embedder = embedder or _default_embedder(embedding_model_name, truncate_dim=truncate_dim)
         self._workspace_id = workspace_id
         self._model_name = self._embedder.model_name
         self._dim = self._embedder.dim
-        self._query_embedding_cache = query_embedding_cache or QueryEmbeddingCache()
+        self._query_embedding_cache = (
+            query_embedding_cache or get_query_embedding_cache()
+        )
         self._encoder_namespace = (
             encoder_namespace
             or getattr(self._embedder, "encoder_namespace", None)
@@ -217,28 +261,34 @@ class PGVectorIndex:
         top_k: int = 10,
         excluded_files: set[str] | None = None,
         docs_root: Path | None = None,
+        *,
+        filters: dict[str, Any] | None = None,
     ) -> list[SearchResultDict]:
         if not query.strip():
             return []
 
-        fetch_k = top_k * 2 if excluded_files else top_k
         query_vector = self._query_embedding_cache.get_or_compute(
             encoder_namespace=self._encoder_namespace,
             query=query,
             compute=lambda: self._embedder.embed_query(query),
         )
+        search_filters = dict(filters or {})
+        search_filters["source_kind"] = _SOURCE_KIND
+        if self._workspace_id is not None:
+            search_filters["workspace_id"] = self._workspace_id
+        if excluded_files:
+            existing_exclusions = search_filters.get("excluded_files", ())
+            search_filters["excluded_files"] = sorted(
+                set(existing_exclusions) | set(excluded_files)
+            )
         hits = cast(
             list[RecordHit],
             self._store.search(
             query_vector,
-            fetch_k,
+            top_k,
             model_name=self._model_name,
             dim=self._dim,
-            filters=(
-                {"workspace_id": self._workspace_id}
-                if self._workspace_id is not None
-                else None
-            ),
+            filters=search_filters,
             ),
         )
         if not hits:
@@ -252,14 +302,6 @@ class PGVectorIndex:
             if row is None:
                 continue
             source_id, body, metadata = row
-
-            if excluded_files and docs_root:
-                file_path = metadata.get("file_path", "")
-                if file_path:
-                    from searchkernel.search.path_utils import matches_any_excluded
-
-                    if matches_any_excluded(file_path, excluded_files, docs_root):
-                        continue
 
             results.append(_row_to_result(source_id, body, metadata, hit.score))
             if len(results) >= top_k:
@@ -279,13 +321,33 @@ class PGVectorIndex:
         return chunk.get("content") if chunk else None
 
     def get_embedding_for_chunk(self, chunk_id: str) -> list[float] | None:
-        chunk = self.get_chunk_by_id(chunk_id)
-        if chunk is None:
+        row = self._fetch_records([chunk_id]).get(chunk_id)
+        if row is None or not row[1]:
             return None
-        content = chunk.get("content")
-        if not content:
-            return None
-        return self._embedder.embed([content])[0]
+        record_key = self._storage_key(chunk_id)
+        conn = self._conn_pool.get_connection()
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            table_name = self._own_vector_table_name(cursor)
+            if table_name is None:
+                return None
+            cursor.execute(
+                sql.SQL(
+                    "SELECT v.embedding FROM {table} v "
+                    "JOIN records r ON r.record_id = v.record_id "
+                    "WHERE v.record_id = %s AND r.source_kind = %s;"
+                ).format(table=sql.Identifier(table_name)),
+                (record_key, _SOURCE_KIND),
+            )
+            result = cursor.fetchone()
+            if result is None:
+                return None
+            return _parse_stored_vector(result[0], self._dim)
+        finally:
+            if cursor is not None:
+                cursor.close()
+            self._conn_pool.put_connection(conn)
 
     def get_chunk_ids_for_document(self, doc_id: str) -> list[str]:
         conn = self._conn_pool.get_connection()
@@ -354,14 +416,12 @@ class PGVectorIndex:
         top_k: int = 3,
         similarity_threshold: float = 0.5,
     ) -> str:
-        """No-op: vocabulary-based query expansion is not implemented here.
-
-        FAISS's `VectorIndex.expand_query` is itself a passthrough until its
-        concept vocabulary has warmed up, so a cold pgvector index behaves
-        identically; building the equivalent vocabulary machinery for
-        pgvector is deferred (not required for the index+search cutover).
-        """
+        """Return the input for compatibility; expansion is explicitly unsupported."""
         return query
+
+    @property
+    def last_search_diagnostics(self) -> dict[str, Any]:
+        return self._store.last_search_diagnostics
 
     def remove(self, document_id: str) -> None:
         chunk_ids = self.get_chunk_ids_for_document(document_id)

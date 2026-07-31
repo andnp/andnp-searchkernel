@@ -51,6 +51,16 @@ class _StubEmbedder:
         return [float(len(text) % 7 + 1), 0.0, 0.0, 0.0]
 
 
+class _CountingEmbedder(_StubEmbedder):
+    def __init__(self, model_name: str):
+        super().__init__(model_name)
+        self.embed_calls = 0
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        self.embed_calls += 1
+        return super().embed(texts)
+
+
 @pytest.fixture
 def pg_dsn():
     dsn = os.environ.get("SEARCHKERNEL_PG_DSN")
@@ -281,13 +291,17 @@ def test_expand_query_is_a_passthrough(index):
     assert index.expand_query("hello world") == "hello world"
 
 
-def test_get_embedding_for_chunk_recomputes_from_content(index, prefix):
+def test_get_embedding_for_chunk_uses_stored_vector(pg_dsn, prefix):
+    embedder = _CountingEmbedder(f"stored-{prefix}")
+    index = PGVectorIndex(pg_dsn=pg_dsn, embedder=embedder)
     chunk_id = f"{prefix}_doc1_chunk_0"
     index.add_chunks([_chunk(chunk_id, f"{prefix}_doc1", "hello")])
+    calls_after_insert = embedder.embed_calls
 
     embedding = index.get_embedding_for_chunk(chunk_id)
 
-    assert embedding == index._embedder.embed(["hello"])[0]
+    assert embedding == [6.0, 0.0, 0.0, 0.0]
+    assert embedder.embed_calls == calls_after_insert
 
 
 def test_get_embedding_for_chunk_missing_returns_none(index, prefix):

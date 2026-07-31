@@ -767,6 +767,9 @@ class RecordSearchPipeline:
             diagnostics.append(f"expansion:fallback:unsupported:{strategy}")
             return None
         vector_store = self._vector_store
+        if getattr(vector_store, "query_expansion_supported", True) is False:
+            diagnostics.append("expansion:skip:unsupported")
+            return None
         expand_query = getattr(vector_store, "expand_query", None)
         if not callable(expand_query):
             diagnostics.append("expansion:skip:unsupported")

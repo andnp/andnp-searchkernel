@@ -761,6 +761,36 @@ async def test_conditional_expansion_obeys_latency_budget() -> None:
     assert "expansion:fallback:timeout" in outcome.diagnostics
 
 
+async def test_unsupported_expansion_is_reported_without_backend_call() -> None:
+    class AnyEmbedder(FakeEmbedder):
+        def embed_query(self, query: str) -> list[float]:
+            return [1.0, 0.0]
+
+    class UnsupportedVector(FakeVectorStore):
+        query_expansion_supported = False
+
+        def expand_query(
+            self,
+            query: str,
+            *,
+            top_k: int,
+            similarity_threshold: float,
+        ) -> str:
+            raise AssertionError("unsupported expansion must be bypassed")
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([]),
+        vector_store=UnsupportedVector([]),
+        embedding_provider=AnyEmbedder(),
+        hydrator=_hydrator({}),
+        config=RecordSearchConfig(expansion_enabled=True),
+    )
+
+    outcome = await pipeline.async_search("what is thing?", limit=1)
+
+    assert "expansion:skip:unsupported" in outcome.diagnostics
+
+
 async def test_trace_is_redacted_and_contains_routing_diagnostics() -> None:
     pipeline = RecordSearchPipeline(
         keyword_store=FakeKeywordStore([("a", 1.0)]),
