@@ -2,8 +2,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
-
-from searchkernel.domain import Record, RecordHit, RecordIdentity
+from searchkernel.domain import GraphNeighbor, Record, RecordHit, RecordIdentity
 from searchkernel.search.record_pipeline import (
     RecordSearchConfig,
     RecordSearchError,
@@ -251,6 +250,28 @@ async def test_graph_expansion_is_bounded_and_missing_records_are_reported() -> 
     assert outcome.degraded
 
 
+async def test_graph_expansion_reads_only_bounded_seed_neighbors() -> None:
+    records = {record_id: _record(record_id) for record_id in ("a", "b", "c")}
+    calls: list[RecordIdentity] = []
+
+    class Graph:
+        def neighbors(self, identity, edge_types=None, depth=1):
+            calls.append(identity)
+            return [("missing", "related", 1.0)]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0), ("b", 0.9), ("c", 0.8)]),
+        graph_store=Graph(),
+        hydrator=_hydrator(records),
+        config=RecordSearchConfig(max_graph_seeds=2),
+        continue_on_error=True,
+    )
+
+    await pipeline.search("query", limit=3)
+
+    assert [identity.source_id for identity in calls] == ["a", "b"]
+
+
 async def test_callable_embedding_provider_accepts_explicit_vector_metadata() -> None:
     records = {"a": _record("a")}
     pipeline = RecordSearchPipeline(
@@ -351,3 +372,50 @@ async def test_composite_identity_reaches_async_hydrator() -> None:
 
     assert outcome.results[0].storage_key == identity.storage_key
     assert outcome.results[0].provenance.record_identity == identity
+
+
+@pytest.mark.asyncio
+async def test_graph_neighbors_preserve_canonical_identity() -> None:
+    seed = RecordIdentity("workspace-a", "note", "seed")
+    target = RecordIdentity("workspace-b", "commit", "target")
+    records = {
+        "seed": Record(
+            workspace_id=seed.workspace_id,
+            source_kind=seed.source_kind,
+            source_id=seed.source_id,
+            title="seed",
+            body="seed",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+        "target": Record(
+            workspace_id=target.workspace_id,
+            source_kind=target.source_kind,
+            source_id=target.source_id,
+            title="target",
+            body="target",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+    }
+
+    class Store:
+        def search(self, query, k, filters=None):
+            return [RecordHit(seed, 1.0)]
+
+    class Graph:
+        def neighbors(self, identity, edge_types=None, depth=1):
+            return [GraphNeighbor(target, "related", 1.0)]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=Store(),
+        graph_store=Graph(),
+        hydrator=lambda record_id: records.get(record_id),
+    )
+
+    outcome = await pipeline.search("query", limit=2)
+
+    assert [result.storage_key for result in outcome.results] == [
+        seed.storage_key,
+        target.storage_key,
+    ]

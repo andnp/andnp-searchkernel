@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
 
 from searchkernel.domain import (
+    GraphNeighbor,
     Record,
     RecordHit,
     RecordIdentity,
@@ -463,20 +464,23 @@ class RecordSearchPipeline:
         graph_store = self._graph_store
         if graph_store is None:
             return []
+        graph_seeds = self._sort_candidates(candidates)[
+            : self._config.max_graph_seeds
+        ]
         seed_scores = {
             candidate.storage_key: candidate.score
-            for candidate in self._sort_candidates(candidates)
+            for candidate in graph_seeds
         }
         edges_by_seed: dict[str, list[TypedGraphEdge[str, tuple[str, float]]]] = {}
         discounts: dict[tuple[str, float], float] = {}
         seed_by_key = {
             candidate.storage_key: candidate
-            for candidate in self._sort_candidates(candidates)
+            for candidate in graph_seeds
         }
         for seed_key in seed_scores:
             seed = seed_by_key[seed_key]
-            neighbors = cast(
-                list[tuple[str, str, float]],
+            raw_neighbors = cast(
+                list[GraphNeighbor | tuple[str, str, float]],
                 await _maybe_await(
                     graph_store.neighbors(
                         seed.identity,
@@ -484,9 +488,9 @@ class RecordSearchPipeline:
                     )
                 ),
             )
-            if not neighbors:
-                neighbors = cast(
-                    list[tuple[str, str, float]],
+            if not raw_neighbors:
+                raw_neighbors = cast(
+                    list[GraphNeighbor | tuple[str, str, float]],
                     await _maybe_await(
                         graph_store.neighbors(
                             seed.record_id,
@@ -495,7 +499,10 @@ class RecordSearchPipeline:
                     ),
                 )
             sorted_neighbors = sorted(
-                neighbors,
+                (
+                    _normalize_graph_neighbor(neighbor, seed.identity)
+                    for neighbor in raw_neighbors
+                ),
                 key=lambda item: (-item[2], item[0], item[1]),
             )
             edges: list[TypedGraphEdge[str, tuple[str, float]]] = []
@@ -649,11 +656,34 @@ def _normalize_hits(
 
 def _graph_hit(record_id: str, expansion: Any, seed_by_key: Mapping[str, RecordSearchCandidate]) -> RecordHit:
     seed = seed_by_key[expansion.provenance.seed_id]
-    source_id = seed.record_id if record_id == seed.storage_key else record_id
+    if record_id == seed.storage_key:
+        identity = seed.identity
+    elif record_id.startswith("record:"):
+        identity = RecordIdentity.from_storage_key(record_id)
+    else:
+        identity = RecordIdentity(seed.workspace_id, seed.source_kind, record_id)
     return RecordHit(
-        RecordIdentity(seed.workspace_id, seed.source_kind, source_id),
+        identity,
         expansion.contribution,
     )
+
+
+def _normalize_graph_neighbor(
+    neighbor: GraphNeighbor | tuple[str, str, float],
+    seed_identity: RecordIdentity,
+) -> tuple[str, str, float]:
+    if isinstance(neighbor, GraphNeighbor):
+        return neighbor.identity.storage_key, neighbor.edge_type, neighbor.weight
+    target_id, edge_type, weight = neighbor
+    if target_id.startswith("record:"):
+        target_id = RecordIdentity.from_storage_key(target_id).storage_key
+    else:
+        target_id = RecordIdentity(
+            seed_identity.workspace_id,
+            seed_identity.source_kind,
+            target_id,
+        ).storage_key
+    return target_id, edge_type, weight
 
 
 async def _maybe_await[T](value: T | Awaitable[T]) -> T:
