@@ -46,10 +46,10 @@ class _StubEmbedder:
         self.dim = 4
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        return [[float(len(t) % 7), 0.0, 0.0, 0.0] for t in texts]
+        return [[float(len(t) % 7 + 1), 0.0, 0.0, 0.0] for t in texts]
 
     def embed_query(self, text: str) -> list[float]:
-        return [float(len(text) % 7), 0.0, 0.0, 0.0]
+        return [float(len(text) % 7 + 1), 0.0, 0.0, 0.0]
 
 
 @pytest.fixture
