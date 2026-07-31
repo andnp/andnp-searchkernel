@@ -3,7 +3,7 @@
 This is the primary outbound port for the kernel. Content sources implement one
 of two flavors:
   - Ingestible: the kernel stores and indexes the content
-  - Searchable: the source runs its own search; kernel fuses results
+  - Searchable: the source runs its own search; kernel merges results
 """
 
 from collections.abc import Iterable
@@ -63,10 +63,14 @@ class RecordIngestor(Protocol):
 
 @runtime_checkable
 class SearchableSource(Protocol):
-    """Federated source: source runs its own retrieval; kernel fuses results.
+    """Federated source: source runs its own retrieval; kernel merges results.
 
     The source already owns embeddings and ranking. The kernel never stores
-    the source's content; it only merges ranked results from multiple sources.
+    the source's content; it merges ranked results from multiple sources and
+    may perform one late rerank according to the federation entrypoint.
+
+    Source scores are source-local, are not assumed comparable across sources,
+    and are retained as provenance metadata.
 
     Attributes:
         source_kind: Stable identifier for this source type
@@ -87,8 +91,8 @@ class SearchableSource(Protocol):
             filters: Optional source-specific filters (opaque to the kernel).
 
         Yields:
-            ScoredRefs in descending score order. The kernel will use RRF
-            to fuse these with results from other sources, so scores do not
-            need to be normalized across sources.
+            ScoredRefs in descending source-local score order. The kernel
+            merges candidates and applies the optional or required late
+            rerank defined by ``runtime.federation.search_anything``.
         """
         ...

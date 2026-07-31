@@ -16,8 +16,8 @@ class SearchAPI(Protocol):
     - Fanning out to registered ContentSources (ingestible)
     - Querying the kernel's unified index (VectorStore + KeywordStore + GraphStore)
     - Federating to registered SearchableSources (federated)
-    - Fusing and ranking results with RRF (Reciprocal Rank Fusion)
-    - Optional reranking (retrieve-then-rerank-once)
+    - Merging candidates, then applying the late rerank defined by the
+      federation entrypoint
     """
 
     async def search_anything(
@@ -39,8 +39,9 @@ class SearchAPI(Protocol):
             k: Maximum number of results to return.
 
         Returns:
-            Ranked list of SearchResults. Scores are normalized across sources
-            via RRF fusion (and optional reranking). Results are in descending
-            score order.
+            Ranked list of SearchResults. Source-local scores are retained as
+            provenance metadata rather than assumed comparable across sources.
+            Candidate merging and optional or required late reranking are
+            defined by ``runtime.federation.search_anything``.
         """
         ...
