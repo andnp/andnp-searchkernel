@@ -1015,6 +1015,39 @@ class LocalRecordBackend:
                 status=RecordStatus(row["status"]),
             )
 
+    def hydrate_records(
+        self,
+        identities: Sequence[RecordIdentity],
+    ) -> dict[str, Record | None]:
+        """Hydrate canonical identities with one record query."""
+        keys = list(dict.fromkeys(identity.storage_key for identity in identities))
+        if not keys:
+            return {}
+        placeholders = ",".join("?" for _ in keys)
+        with self._lock:
+            conn = self._db.get_connection()
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM local_records WHERE storage_key IN ({placeholders})",
+                keys,
+            ).fetchall()
+        records = {
+            row["storage_key"]: Record(
+                workspace_id=row["workspace_id"],
+                source_kind=row["source_kind"],
+                source_id=row["source_id"],
+                title=row["title"],
+                body=row["body"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+                metadata=json.loads(row["metadata"]),
+                uri=row["uri"],
+                status=RecordStatus(row["status"]),
+            )
+            for row in rows
+        }
+        return {key: records.get(key) for key in keys}
+
     def delete(self, record_ids: list[str]) -> None:
         if not record_ids:
             return
@@ -1244,6 +1277,77 @@ class LocalRecordBackend:
             key=lambda item: (-item.weight, item.identity.storage_key, item.edge_type),
         )
 
+    def neighbors_many(
+        self,
+        identities: Sequence[RecordIdentity],
+        *,
+        depth: int,
+    ) -> dict[str, list[GraphNeighbor]]:
+        """Retrieve neighbors for multiple seeds with one query per hop."""
+        if depth < 1:
+            raise ValueError("depth must be positive")
+        seed_keys = list(dict.fromkeys(identity.storage_key for identity in identities))
+        frontiers = {seed_key: {seed_key} for seed_key in seed_keys}
+        best_by_seed: dict[str, dict[str, tuple[str, float]]] = {
+            seed_key: {} for seed_key in seed_keys
+        }
+        with self._lock:
+            conn = self._db.get_connection()
+            for hop in range(depth):
+                owners: dict[str, list[str]] = {}
+                for seed_key, frontier in frontiers.items():
+                    for source_key in frontier:
+                        owners.setdefault(source_key, []).append(seed_key)
+                if not owners:
+                    break
+                placeholders = ",".join("?" for _ in owners)
+                rows = conn.execute(
+                    f"""
+                    SELECT source_id, target_id, edge_type, weight
+                    FROM local_graph_edges
+                    WHERE source_id IN ({placeholders})
+                    """,
+                    tuple(owners),
+                ).fetchall()
+                next_frontiers = {seed_key: set() for seed_key in seed_keys}
+                for row in rows:
+                    for seed_key in owners.get(row["source_id"], ()):
+                        if row["target_id"] == seed_key:
+                            continue
+                        if hop:
+                            parent_weight = best_by_seed[seed_key].get(
+                                row["source_id"], ("", 1.0)
+                            )[1]
+                            weight = float(row["weight"]) * parent_weight
+                        else:
+                            weight = float(row["weight"])
+                        current = best_by_seed[seed_key].get(row["target_id"])
+                        if current is None or weight > current[1]:
+                            best_by_seed[seed_key][row["target_id"]] = (
+                                row["edge_type"],
+                                weight,
+                            )
+                        next_frontiers[seed_key].add(row["target_id"])
+                frontiers = next_frontiers
+        return {
+            seed_key: sorted(
+                (
+                    GraphNeighbor(
+                        self._identity_from_storage_key(target_id),
+                        edge_type,
+                        weight,
+                    )
+                    for target_id, (edge_type, weight) in best.items()
+                ),
+                key=lambda item: (
+                    -item.weight,
+                    item.identity.storage_key,
+                    item.edge_type,
+                ),
+            )
+            for seed_key, best in best_by_seed.items()
+        }
+
     @staticmethod
     def _identity_from_storage_key(storage_key: str) -> RecordIdentity:
         if storage_key.startswith("record:"):
@@ -1412,6 +1516,14 @@ class LocalGraphStore:
         depth: int = 1,
     ) -> list[GraphNeighbor]:
         return self._backend.neighbors(record_id, edge_types, depth)
+
+    def neighbors_many(
+        self,
+        identities: Sequence[RecordIdentity],
+        *,
+        depth: int,
+    ) -> dict[str, list[GraphNeighbor]]:
+        return self._backend.neighbors_many(identities, depth=depth)
 
 
 FAISSVectorStore = FAISSLocalVectorStore
