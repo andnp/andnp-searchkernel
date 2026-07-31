@@ -8,11 +8,25 @@ _ARTIFACT_QUERY_RE = re.compile(r"[./\\_-]")
 
 def sanitize_fts_query(query: str) -> str:
     """Sanitize a query string for safe use in FTS5 MATCH."""
-    sanitized = re.sub(r"[\"\'*\^(){}[\]<>|~!:\-]", " ", query)
-    sanitized = sanitized.strip()
-    if not sanitized:
+    terms: list[str] = []
+    for match in re.finditer(r'"([^"]*)"|(\S+)', query):
+        quoted = match.group(1) is not None
+        raw = match.group(1) if quoted else match.group(2)
+        if raw is None:
+            continue
+        prefix = not quoted and raw.rstrip().endswith("*")
+        sanitized = re.sub(r"[\"\'*\^(){}[\]<>|~!:\-]", " ", raw)
+        words = sanitized.split()
+        if not words:
+            continue
+        if quoted and len(words) > 1:
+            terms.append(f'"{" ".join(words)}"')
+        else:
+            terms.extend(words[:-1])
+            terms.append(words[-1] + "*" if prefix else words[-1])
+    if not terms:
         return '""'
-    return " ".join(sanitized.split())
+    return " ".join(terms)
 
 
 def normalize_artifact_value(value: str) -> str:

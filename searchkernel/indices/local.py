@@ -8,6 +8,7 @@ the ingestion surface, but query execution uses canonical record identities.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 import threading
@@ -27,6 +28,7 @@ from searchkernel.domain import (
     RecordStatus,
     Vector,
 )
+from searchkernel.indices import keyword_scoring as _keyword_scoring
 from searchkernel.storage.db import DatabaseManager
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -58,13 +60,17 @@ class LocalRecordBackend:
         db_path: Path | None = None,
         *,
         db_manager: DatabaseManager | None = None,
+        keyword_overfetch_multiplier: float = 4.0,
     ) -> None:
         if db_manager is not None and db_path is not None:
             raise ValueError("pass db_path or db_manager, not both")
+        if keyword_overfetch_multiplier < 1.0:
+            raise ValueError("keyword_overfetch_multiplier must be at least 1")
         self._db = db_manager or (
             DatabaseManager(db_path) if db_path is not None else _EphemeralDatabase()
         )
         self._lock = threading.RLock()
+        self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
         self._fts5_available = False
         self._keyword_search_diagnostic = (
             "FTS5 indexed lexical search has not been initialized"
@@ -418,8 +424,22 @@ class LocalRecordBackend:
     def _status_values(filters: dict[str, Any] | None) -> set[str]:
         if filters and filters.get("include_inactive"):
             return {"active", "stale", "archived"}
+        if filters and filters.get("status") is not None:
+            value = filters["status"]
+            return {value.value if isinstance(value, RecordStatus) else str(value)}
         values = filters.get("statuses") if filters else None
-        return {str(value) for value in values} if values is not None else {"active"}
+        if values is None:
+            return {"active"}
+        return {
+            value.value if isinstance(value, RecordStatus) else str(value)
+            for value in LocalRecordBackend._filter_values(values)
+        }
+
+    @staticmethod
+    def _filter_values(value: Any) -> list[Any]:
+        if isinstance(value, (str, RecordStatus)):
+            return [value]
+        return list(value)
 
     @classmethod
     def _matches(
@@ -434,10 +454,21 @@ class LocalRecordBackend:
         if workspace_id is not None and row["workspace_id"] != workspace_id:
             return False
         source_kinds = filters.get("source_kinds")
-        if source_kinds is not None and row["source_kind"] not in source_kinds:
-            return False
+        if source_kinds is None and filters.get("source_kind") is not None:
+            source_kinds = [filters["source_kind"]]
+        if source_kinds is not None:
+            source_values = {
+                value.value if isinstance(value, RecordStatus) else str(value)
+                for value in cls._filter_values(source_kinds)
+            }
+            if row["source_kind"] not in source_values:
+                return False
         candidate_ids = filters.get("candidate_ids")
-        return candidate_ids is None or row["storage_key"] in candidate_ids
+        if candidate_ids is None:
+            candidate_ids = filters.get("candidate_storage_keys")
+        if candidate_ids is None:
+            return True
+        return row["storage_key"] in cls._filter_values(candidate_ids)
 
     def _record_rows(self) -> list[sqlite3.Row]:
         conn = self._db.get_connection()
@@ -452,27 +483,157 @@ class LocalRecordBackend:
     ) -> list[RecordHit]:
         if k < 1 or not query.strip():
             return []
+        with self._lock:
+            if self._fts5_available:
+                return self._search_keyword_fts(query, k, filters)
+            return self._search_keyword_fallback(query, k, filters)
+
+    @staticmethod
+    def _keyword_filter_sql(
+        filters: dict[str, Any] | None,
+    ) -> tuple[list[str], list[Any]]:
+        filters = filters or {}
+        statuses = sorted(LocalRecordBackend._status_values(filters))
+        clauses = ["r.status IN ({})".format(
+            ", ".join("?" for _ in statuses)
+        )]
+        parameters: list[Any] = statuses
+
+        workspace_id = filters.get("workspace_id")
+        if workspace_id is not None:
+            clauses.append("r.workspace_id = ?")
+            parameters.append(workspace_id)
+
+        source_kinds = filters.get("source_kinds")
+        if source_kinds is None and filters.get("source_kind") is not None:
+            source_kinds = [filters["source_kind"]]
+        if source_kinds is not None:
+            source_kinds = LocalRecordBackend._filter_values(source_kinds)
+            if not source_kinds:
+                return ["0"], []
+            clauses.append("r.source_kind IN ({})".format(
+                ", ".join("?" for _ in source_kinds)
+            ))
+            parameters.extend(source_kinds)
+
+        candidate_keys = filters.get("candidate_ids")
+        if candidate_keys is None:
+            candidate_keys = filters.get("candidate_storage_keys")
+        if candidate_keys is not None:
+            candidate_keys = LocalRecordBackend._filter_values(candidate_keys)
+            if not candidate_keys:
+                return ["0"], []
+            clauses.append("r.storage_key IN ({})".format(
+                ", ".join("?" for _ in candidate_keys)
+            ))
+            parameters.extend(candidate_keys)
+        return clauses, parameters
+
+    def _search_keyword_fts(
+        self,
+        query: str,
+        k: int,
+        filters: dict[str, Any] | None,
+    ) -> list[RecordHit]:
+        match_query = _keyword_scoring.sanitize_fts_query(query)
+        if match_query == '""':
+            return []
+        if _keyword_scoring.looks_like_artifact_query(query):
+            match_query = '"' + match_query.replace('"', "") + '"'
+        clauses, parameters = self._keyword_filter_sql(filters)
+        clauses.insert(0, f"{_LOCAL_FTS_TABLE} MATCH ?")
+        parameters.insert(0, match_query)
+        needs_artifact_rerank = _keyword_scoring.looks_like_artifact_query(query)
+        limit = k
+        if needs_artifact_rerank:
+            limit = max(k, math.ceil(k * self._keyword_overfetch_multiplier))
+        conn = self._db.get_connection()
+        rows = conn.execute(
+            f"""
+            SELECT
+                r.storage_key,
+                r.workspace_id,
+                r.source_kind,
+                r.source_id,
+                r.title,
+                r.body,
+                r.uri,
+                r.keywords,
+                -bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0) AS score
+            FROM {_LOCAL_FTS_TABLE}
+            JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
+            WHERE {" AND ".join(clauses)}
+            ORDER BY score DESC, r.storage_key ASC
+            LIMIT ?
+            """,
+            (*parameters, limit),
+        ).fetchall()
+        hits: list[RecordHit] = []
+        for row in rows:
+            score = float(row["score"])
+            if needs_artifact_rerank:
+                normalized_query = _keyword_scoring.normalize_artifact_value(query)
+                score += _keyword_scoring.score_artifact_match(
+                    normalized_query,
+                    Path(normalized_query).name,
+                    row["body"],
+                    row["title"],
+                    row["keywords"],
+                    row["uri"] or "",
+                )
+            hits.append(
+                RecordHit(
+                    RecordIdentity(
+                        row["workspace_id"],
+                        row["source_kind"],
+                        row["source_id"],
+                    ),
+                    score,
+                )
+            )
+        hits.sort(key=lambda item: (-item.score, item.storage_key))
+        return hits[:k]
+
+    def _search_keyword_fallback(
+        self,
+        query: str,
+        k: int,
+        filters: dict[str, Any] | None,
+    ) -> list[RecordHit]:
         terms = [term.lower() for term in _TOKEN_RE.findall(query)]
         if not terms:
             return []
+        clauses, parameters = self._keyword_filter_sql(filters)
+        conn = self._db.get_connection()
+        rows = conn.execute(
+            f"""
+            SELECT storage_key, workspace_id, source_kind, source_id, title, body
+            FROM local_records r
+            WHERE {" AND ".join(clause.replace("r.", "") for clause in clauses)}
+            """,
+            parameters,
+        ).fetchall()
+        if len(rows) > _FALLBACK_SCAN_MAX_ROWS:
+            self._keyword_search_diagnostic = (
+                "FTS5 indexed lexical search is unavailable; "
+                f"scan fallback refuses corpora over {_FALLBACK_SCAN_MAX_ROWS} rows"
+            )
+            return []
         hits: list[RecordHit] = []
-        with self._lock:
-            for row in self._record_rows():
-                if not self._matches(row, filters):
-                    continue
-                haystack = f"{row['title']} {row['body']}".lower()
-                score = sum(haystack.count(term) for term in terms)
-                if score:
-                    hits.append(
-                        RecordHit(
-                            RecordIdentity(
-                                row["workspace_id"],
-                                row["source_kind"],
-                                row["source_id"],
-                            ),
-                            float(score),
-                        )
+        for row in rows:
+            haystack = f"{row['title']} {row['body']}".lower()
+            score = sum(haystack.count(term) for term in terms)
+            if score:
+                hits.append(
+                    RecordHit(
+                        RecordIdentity(
+                            row["workspace_id"],
+                            row["source_kind"],
+                            row["source_id"],
+                        ),
+                        float(score),
                     )
+                )
         hits.sort(key=lambda item: (-item.score, item.storage_key))
         return hits[:k]
 
@@ -628,24 +789,45 @@ class LocalRecordBackend:
                     f"INSERT INTO {_LOCAL_FTS_TABLE}({_LOCAL_FTS_TABLE}) "
                     "VALUES ('integrity-check')"
                 )
+                conn.execute("DROP TABLE IF EXISTS local_records_fts_vocab")
+                conn.execute(
+                    """
+                    CREATE VIRTUAL TABLE local_records_fts_vocab
+                    USING fts5vocab('local_records_fts', 'instance')
+                    """
+                )
                 missing = conn.execute(
-                    f"""
+                    """
                     SELECT EXISTS(
                         SELECT 1
                         FROM local_records r
-                        LEFT JOIN {_LOCAL_FTS_TABLE} f ON f.rowid = r.rowid
-                        WHERE f.rowid IS NULL
+                        WHERE (
+                            r.title != ''
+                            OR r.body != ''
+                            OR COALESCE(r.uri, '') != ''
+                            OR r.keywords != ''
+                        )
+                        AND NOT EXISTS(
+                            SELECT 1
+                            FROM local_records_fts_vocab v
+                            WHERE CAST(v.doc AS INTEGER) = r.rowid
+                        )
                     )
                     OR EXISTS(
                         SELECT 1
-                        FROM {_LOCAL_FTS_TABLE} f
-                        LEFT JOIN local_records r ON r.rowid = f.rowid
-                        WHERE r.rowid IS NULL
+                        FROM local_records_fts_vocab v
+                        WHERE NOT EXISTS(
+                            SELECT 1
+                            FROM local_records r
+                            WHERE r.rowid = CAST(v.doc AS INTEGER)
+                        )
                     )
                     """
                 ).fetchone()[0]
             except sqlite3.DatabaseError:
                 return False
+            finally:
+                conn.execute("DROP TABLE IF EXISTS local_records_fts_vocab")
             return not bool(missing)
 
     def rebuild_keyword_index(self) -> None:

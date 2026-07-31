@@ -63,16 +63,6 @@ class DatabaseManager:
                 value TEXT
             );
 
-            CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-                chunk_id UNINDEXED,
-                doc_id UNINDEXED,
-                content,
-                title,
-                headers,
-                tags,
-                source_file UNINDEXED
-            );
-
             CREATE TABLE IF NOT EXISTS graph_nodes (
                 node_id TEXT PRIMARY KEY,
                 metadata TEXT DEFAULT '{}'
@@ -108,6 +98,24 @@ class DatabaseManager:
                 value TEXT
             );
         """)
+        try:
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+                    chunk_id UNINDEXED,
+                    doc_id UNINDEXED,
+                    content,
+                    title,
+                    headers,
+                    tags,
+                    source_file UNINDEXED
+                )
+                """
+            )
+        except sqlite3.OperationalError as exc:
+            if "fts5" not in str(exc).lower():
+                raise
+            logger.info("SQLite FTS5 is unavailable; legacy keyword index is disabled")
         conn.commit()
 
     def initialize_schema(self) -> None:
