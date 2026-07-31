@@ -113,6 +113,20 @@ def test_keyword_only_hydrates_records_with_deterministic_ties() -> None:
     assert outcome.results[0].provenance.strategies == ("keyword",)
 
 
+def test_minimum_candidate_limit_applies_to_store_acquisition() -> None:
+    records = {"a": _record("a")}
+    keyword_store = FakeKeywordStore([("a", 1.0)])
+    pipeline = RecordSearchPipeline(
+        keyword_store=keyword_store,
+        hydrator=_hydrator(records),
+        config=RecordSearchConfig(minimum_candidate_limit=50),
+    )
+
+    pipeline.search("query", limit=1)
+
+    assert keyword_store.queries[0][1] == 50
+
+
 def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b", "c")}
     pipeline = RecordSearchPipeline(

@@ -121,6 +121,7 @@ class RecordSearchConfig:
     """Deterministic limits and optional graph/adaptive retrieval settings."""
 
     candidate_multiplier: int = 5
+    minimum_candidate_limit: int = 1
     rrf_k: float = 60.0
     graph_depth: int = 1
     max_graph_seeds: int = 10
@@ -188,7 +189,10 @@ class RecordSearchPipeline:
         failures: list[RecordSearchFailure] = []
         missing_record_ids: list[str] = []
         filters = dict(filters or {})
-        acquisition_limit = max(limit, 1) * self._config.candidate_multiplier
+        acquisition_limit = max(
+            max(limit, 1) * self._config.candidate_multiplier,
+            self._config.minimum_candidate_limit,
+        )
         rankings: dict[str, list[tuple[str, float]]] = {}
 
         if self._keyword_store is not None:
@@ -420,6 +424,8 @@ class RecordSearchPipeline:
     def _validate_config(self) -> None:
         if self._config.candidate_multiplier < 1:
             raise ValueError("candidate_multiplier must be positive")
+        if self._config.minimum_candidate_limit < 1:
+            raise ValueError("minimum_candidate_limit must be positive")
         if self._config.rrf_k <= 0:
             raise ValueError("rrf_k must be positive")
         if self._config.graph_depth < 1:
