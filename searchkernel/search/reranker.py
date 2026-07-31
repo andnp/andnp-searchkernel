@@ -14,7 +14,7 @@ import logging
 import math
 import threading
 from collections.abc import Iterable
-from typing import Protocol
+from typing import Protocol, TypeGuard
 
 from searchkernel.utils.circuit_breaker import (
     CircuitBreaker,
@@ -34,14 +34,35 @@ class ContentProvider(Protocol):
     def __call__(self, chunk_id: str, /) -> str | None: ...
 
 
+class CrossEncoderModelProtocol(Protocol):
+    def predict(self, inputs: list[tuple[str, str]]) -> object: ...
+
+
 class CrossEncoderProtocol(Protocol):
-    def predict(
-        self,
-        sentences: list[tuple[str, str]]
-        | list[list[str]]
-        | tuple[str, str]
-        | list[str],
-    ) -> Iterable[float]: ...
+    def predict(self, inputs: list[tuple[str, str]]) -> Iterable[object]: ...
+
+
+def _is_iterable_scores(value: object) -> TypeGuard[Iterable[object]]:
+    return isinstance(value, Iterable)
+
+
+class FloatScore(Protocol):
+    def __float__(self) -> float: ...
+
+
+def _is_float_score(value: object) -> TypeGuard[FloatScore]:
+    return callable(getattr(value, "__float__", None))
+
+
+class _CrossEncoderAdapter:
+    def __init__(self, model: CrossEncoderModelProtocol):
+        self._model = model
+
+    def predict(self, inputs: list[tuple[str, str]]) -> Iterable[object]:
+        predictions = self._model.predict(inputs)
+        if not _is_iterable_scores(predictions):
+            raise TypeError("Cross-encoder returned a non-iterable score result")
+        return predictions
 
 
 class ReRanker:
@@ -75,15 +96,25 @@ class ReRanker:
             def load_model():
                 from sentence_transformers import CrossEncoder
 
-                return CrossEncoder(self._model_name)
+                return _CrossEncoderAdapter(CrossEncoder(self._model_name))
 
             self._model = self._circuit_breaker.call(load_model)
 
     def _protected_predict(self, pairs: list[tuple[str, str]]) -> list[float]:
         """Run prediction with circuit breaker protection."""
         self._ensure_model_loaded()
-        assert self._model is not None
-        return list(self._circuit_breaker.call(lambda: self._model.predict(pairs)))  # type: ignore[union-attr]
+        model = self._model
+        assert model is not None
+        predictions = self._circuit_breaker.call(
+            lambda: model.predict(pairs)
+        )
+        scores: list[float] = []
+        for score in predictions:
+            if isinstance(score, (str, bytes)) or _is_float_score(score):
+                scores.append(float(score))
+            else:
+                raise TypeError("Cross-encoder returned a non-numeric score")
+        return scores
 
     def rerank(
         self,
