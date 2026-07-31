@@ -24,6 +24,7 @@ _IDENT_RE = re.compile(r"[^a-z0-9_]+")
 
 # Default HNSW query-time recall knob. Higher = better recall, more latency.
 DEFAULT_HNSW_EF_SEARCH = 100
+_SCHEMA_ADVISORY_LOCK_KEY = 907341005
 
 
 def _sanitize_model_name(model_name: str) -> str:
@@ -105,6 +106,10 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
     conn = conn_pool.get_connection()
     try:
         cursor = conn.cursor()
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(%s);",
+            (_SCHEMA_ADVISORY_LOCK_KEY,),
+        )
         # Create pgvector extension
         cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
 
