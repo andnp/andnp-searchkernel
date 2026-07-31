@@ -140,6 +140,8 @@ def record_matches_vector_filters(
     project_values = _string_values(
         filters, "project_ids", "project_id", "project_filter"
     )
+    if project_values == [] and "project_filter" in filters:
+        project_values = None
     if project_values is not None and str(project_id) not in set(project_values):
         return False
     excluded_projects = _string_values(

@@ -194,6 +194,8 @@ def build_pgvector_filter_sql(
     project_values = _string_filter_values(
         filters, "project_ids", "project_id", "project_filter"
     )
+    if project_values == [] and "project_filter" in filters:
+        project_values = None
     if project_values is not None:
         if not project_values:
             return ["FALSE"], []
@@ -205,8 +207,6 @@ def build_pgvector_filter_sql(
     if excluded_projects:
         clauses.append(f"({project_expr} IS NULL OR {project_expr} <> ALL(%s))")
         parameters.append(excluded_projects)
-    elif excluded_projects == []:
-        return ["FALSE"], []
 
     path_expr = (
         f"COALESCE(NULLIF({record_alias}.metadata->>'file_path', ''), "
@@ -249,15 +249,14 @@ def build_pgvector_filter_sql(
         expanded = sorted(
             set().union(*(_path_variants(value) for value in excluded_paths))
         )
-        if not expanded:
-            return ["FALSE"], []
-        clauses.append(
-            f"(COALESCE({path_expr}, '') <> ALL(%s) "
-            f"AND {document_expr} <> ALL(%s) "
-            f"AND regexp_replace(COALESCE({path_expr}, ''), '^.*/', '') "
-            f"<> ALL(%s))"
-        )
-        parameters.extend([expanded, expanded, expanded])
+        if expanded:
+            clauses.append(
+                f"(COALESCE({path_expr}, '') <> ALL(%s) "
+                f"AND {document_expr} <> ALL(%s) "
+                f"AND regexp_replace(COALESCE({path_expr}, ''), '^.*/', '') "
+                f"<> ALL(%s))"
+            )
+            parameters.extend([expanded, expanded, expanded])
 
     document_values = _string_filter_values(
         filters, "document_ids", "document_id", "doc_ids", "doc_id"
@@ -277,12 +276,11 @@ def build_pgvector_filter_sql(
         expanded = sorted(
             set().union(*(_path_variants(value) for value in excluded_documents))
         )
-        if not expanded:
-            return ["FALSE"], []
-        clauses.append(
-            f"{document_expr} <> ALL(%s) AND {record_alias}.source_id <> ALL(%s)"
-        )
-        parameters.extend([expanded, expanded])
+        if expanded:
+            clauses.append(
+                f"{document_expr} <> ALL(%s) AND {record_alias}.source_id <> ALL(%s)"
+            )
+            parameters.extend([expanded, expanded])
 
     return clauses, parameters
 
