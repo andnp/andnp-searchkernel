@@ -383,18 +383,77 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
             CREATE TABLE IF NOT EXISTS index_epoch (
                 id INT PRIMARY KEY DEFAULT 1,
                 epoch INT DEFAULT 0,
+                keyword_epoch INT DEFAULT 0,
+                vector_epoch INT DEFAULT 0,
+                graph_epoch INT DEFAULT 0,
                 CONSTRAINT only_one_row CHECK (id = 1)
             );
         """)
+        cursor.execute(
+            "ALTER TABLE index_epoch ADD COLUMN IF NOT EXISTS keyword_epoch INT DEFAULT 0;"
+        )
+        cursor.execute(
+            "ALTER TABLE index_epoch ADD COLUMN IF NOT EXISTS vector_epoch INT DEFAULT 0;"
+        )
+        cursor.execute(
+            "ALTER TABLE index_epoch ADD COLUMN IF NOT EXISTS graph_epoch INT DEFAULT 0;"
+        )
 
         # Initialize epoch if not present
         cursor.execute("SELECT COUNT(*) FROM index_epoch;")
         row = cursor.fetchone()
         if row is not None and row[0] == 0:
-            cursor.execute("INSERT INTO index_epoch (epoch) VALUES (0);")
+            cursor.execute(
+                "INSERT INTO index_epoch "
+                "(epoch, keyword_epoch, vector_epoch, graph_epoch) "
+                "VALUES (0, 0, 0, 0);"
+            )
 
         conn.commit()
         logger.info("pgvector schema initialized successfully")
+    finally:
+        if cursor is not None:
+            cursor.close()
+        conn_pool.put_connection(conn)
+
+
+def _bump_epochs(
+    cursor: Any,
+    *,
+    keyword: bool = False,
+    vector: bool = False,
+    graph: bool = False,
+) -> None:
+    if not any((keyword, vector, graph)):
+        return
+    cursor.execute(
+        """
+        UPDATE index_epoch
+        SET epoch = epoch + 1,
+            keyword_epoch = keyword_epoch + %s,
+            vector_epoch = vector_epoch + %s,
+            graph_epoch = graph_epoch + %s;
+        """,
+        (int(keyword), int(vector), int(graph)),
+    )
+
+
+def _read_epochs(conn_pool: PostgresConnection) -> dict[str, int]:
+    conn = conn_pool.get_connection()
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT keyword_epoch, vector_epoch, graph_epoch FROM index_epoch LIMIT 1;"
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return {"keyword": 0, "vector": 0, "graph": 0}
+        return {
+            "keyword": int(row[0]),
+            "vector": int(row[1]),
+            "graph": int(row[2]),
+        }
     finally:
         if cursor is not None:
             cursor.close()
@@ -573,8 +632,7 @@ class PGVectorStore:
                     vector_rows,
                 )
 
-            # Increment epoch
-            cursor.execute("UPDATE index_epoch SET epoch = epoch + 1;")
+            _bump_epochs(cursor, keyword=True, vector=bool(vector_rows))
 
             conn.commit()
             logger.debug(f"Upserted {len(records)} records for model {model_name}")
@@ -713,8 +771,7 @@ class PGVectorStore:
                 "DELETE FROM records WHERE record_id = ANY(%s);", (storage_ids,)
             )
 
-            # Increment epoch
-            cursor.execute("UPDATE index_epoch SET epoch = epoch + 1;")
+            _bump_epochs(cursor, keyword=True, vector=True)
 
             conn.commit()
             logger.debug(f"Deleted {len(record_ids)} records")
@@ -776,7 +833,7 @@ class PGVectorStore:
                     (storage_ids,),
                 )
 
-            cursor.execute("UPDATE index_epoch SET epoch = epoch + 1;")
+            _bump_epochs(cursor, keyword=True, vector=True)
             conn.commit()
         finally:
             if cursor is not None:
@@ -796,6 +853,12 @@ class PGVectorStore:
             if cursor is not None:
                 cursor.close()
             self.conn_pool.put_connection(conn)
+
+    def vector_epoch(self) -> int:
+        return _read_epochs(self.conn_pool)["vector"]
+
+    def epochs(self) -> dict[str, int]:
+        return _read_epochs(self.conn_pool)
 
 
 class PGKeywordStore:
@@ -837,12 +900,32 @@ class PGKeywordStore:
                 ],
             )
 
+            _bump_epochs(cursor, keyword=True)
             conn.commit()
             logger.debug(f"Indexed {len(records)} records for keyword search")
         finally:
             if cursor is not None:
                 cursor.close()
             self.conn_pool.put_connection(conn)
+
+    def keyword_epoch(self) -> int:
+        return _read_epochs(self.conn_pool)["keyword"]
+
+    def epoch(self) -> int:
+        conn = self.conn_pool.get_connection()
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT epoch FROM index_epoch LIMIT 1;")
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            if cursor is not None:
+                cursor.close()
+            self.conn_pool.put_connection(conn)
+
+    def epochs(self) -> dict[str, int]:
+        return _read_epochs(self.conn_pool)
 
     def search(
         self, query: str, k: int, filters: dict[str, Any] | None = None
@@ -978,12 +1061,19 @@ class PGGraphStore:
                 rows,
             )
 
+            _bump_epochs(cursor, graph=True)
             conn.commit()
             logger.debug(f"Upserted {len(edges)} edges")
         finally:
             if cursor is not None:
                 cursor.close()
             self.conn_pool.put_connection(conn)
+
+    def graph_epoch(self) -> int:
+        return _read_epochs(self.conn_pool)["graph"]
+
+    def epochs(self) -> dict[str, int]:
+        return _read_epochs(self.conn_pool)
 
     def neighbors(
         self,

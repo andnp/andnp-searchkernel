@@ -375,13 +375,30 @@ class LocalRecordBackend:
         if self._fts5_available:
             self._keyword_search_diagnostic = "FTS5 indexed lexical search is active"
 
-    def _bump_epoch(self, conn: sqlite3.Connection) -> None:
-        conn.execute(
-            """
-            INSERT INTO system_state (key, value) VALUES ('local_record_epoch', '1')
-            ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
-            """
-        )
+    @staticmethod
+    def _bump_epoch(
+        conn: sqlite3.Connection,
+        *,
+        keyword: bool = False,
+        vector: bool = False,
+        graph: bool = False,
+    ) -> None:
+        lanes = {
+            "local_record_epoch": True,
+            "local_keyword_epoch": keyword,
+            "local_vector_epoch": vector,
+            "local_graph_epoch": graph,
+        }
+        for key, enabled in lanes.items():
+            if not enabled:
+                continue
+            conn.execute(
+                """
+                INSERT INTO system_state (key, value) VALUES (?, '1')
+                ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
+                """,
+                (key,),
+            )
 
     @staticmethod
     def _record_values(record: Record) -> tuple[Any, ...]:
@@ -428,6 +445,55 @@ class LocalRecordBackend:
             (row["rowid"], row["title"], row["body"], row["uri"], row["keywords"]),
         )
 
+    def _write_records(
+        self,
+        conn: sqlite3.Connection,
+        rows: list[Record],
+    ) -> None:
+        for record in rows:
+            old_row = conn.execute(
+                """
+                SELECT rowid, title, body, uri, keywords
+                FROM local_records
+                WHERE storage_key = ?
+                """,
+                (record.storage_key,),
+            ).fetchone()
+            if old_row is not None and self._fts5_available:
+                self._delete_fts_row(conn, old_row)
+            conn.execute(
+                """
+                INSERT INTO local_records (
+                    storage_key, workspace_id, source_kind, source_id, title, body,
+                    created_at, updated_at, metadata, uri, keywords, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(storage_key) DO UPDATE SET
+                    workspace_id = excluded.workspace_id,
+                    source_kind = excluded.source_kind,
+                    source_id = excluded.source_id,
+                    title = excluded.title,
+                    body = excluded.body,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    metadata = excluded.metadata,
+                    uri = excluded.uri,
+                    keywords = excluded.keywords,
+                    status = excluded.status
+                """,
+                self._record_values(record),
+            )
+            if self._fts5_available:
+                new_row = conn.execute(
+                    """
+                    SELECT rowid, title, body, uri, keywords
+                    FROM local_records
+                    WHERE storage_key = ?
+                    """,
+                    (record.storage_key,),
+                ).fetchone()
+                assert new_row is not None
+                self._insert_fts_row(conn, new_row)
+
     def _upsert_records(self, records: Iterable[Record]) -> None:
         rows = list(records)
         if not rows:
@@ -435,50 +501,8 @@ class LocalRecordBackend:
         with self._lock:
             conn = self._db.get_connection()
             try:
-                for record in rows:
-                    old_row = conn.execute(
-                        """
-                        SELECT rowid, title, body, uri, keywords
-                        FROM local_records
-                        WHERE storage_key = ?
-                        """,
-                        (record.storage_key,),
-                    ).fetchone()
-                    if old_row is not None and self._fts5_available:
-                        self._delete_fts_row(conn, old_row)
-                    conn.execute(
-                        """
-                        INSERT INTO local_records (
-                            storage_key, workspace_id, source_kind, source_id, title, body,
-                            created_at, updated_at, metadata, uri, keywords, status
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(storage_key) DO UPDATE SET
-                            workspace_id = excluded.workspace_id,
-                            source_kind = excluded.source_kind,
-                            source_id = excluded.source_id,
-                            title = excluded.title,
-                            body = excluded.body,
-                            created_at = excluded.created_at,
-                            updated_at = excluded.updated_at,
-                            metadata = excluded.metadata,
-                            uri = excluded.uri,
-                            keywords = excluded.keywords,
-                            status = excluded.status
-                        """,
-                        self._record_values(record),
-                    )
-                    if self._fts5_available:
-                        new_row = conn.execute(
-                            """
-                            SELECT rowid, title, body, uri, keywords
-                            FROM local_records
-                            WHERE storage_key = ?
-                            """,
-                            (record.storage_key,),
-                        ).fetchone()
-                        assert new_row is not None
-                        self._insert_fts_row(conn, new_row)
-                self._bump_epoch(conn)
+                self._write_records(conn, rows)
+                self._bump_epoch(conn, keyword=True)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -506,36 +530,44 @@ class LocalRecordBackend:
                         ),
                     )
                 )
-        self._upsert_records(rows)
         if not rows:
             return
         with self._lock:
             conn = self._db.get_connection()
-            conn.executemany(
-                """
-                INSERT INTO local_vectors_v2 (
-                    storage_key, encoder_namespace, dim, embedding,
-                    format_version, normalization_policy
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(storage_key, encoder_namespace, dim) DO UPDATE SET
-                    embedding = excluded.embedding,
-                    format_version = excluded.format_version,
-                    normalization_policy = excluded.normalization_policy
-                """,
-                [
-                    (
-                        storage_key,
-                        model_name,
-                        dim,
-                        embedding,
-                        VECTOR_FORMAT_VERSION,
-                        NORMALIZATION_POLICY,
-                    )
-                    for storage_key, embedding in packed_vectors
-                ],
-            )
-            self._bump_epoch(conn)
-            conn.commit()
+            try:
+                self._write_records(conn, rows)
+                conn.executemany(
+                    """
+                    INSERT INTO local_vectors_v2 (
+                        storage_key, encoder_namespace, dim, embedding,
+                        format_version, normalization_policy
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(storage_key, encoder_namespace, dim) DO UPDATE SET
+                        embedding = excluded.embedding,
+                        format_version = excluded.format_version,
+                        normalization_policy = excluded.normalization_policy
+                    """,
+                    [
+                        (
+                            storage_key,
+                            model_name,
+                            dim,
+                            embedding,
+                            VECTOR_FORMAT_VERSION,
+                            NORMALIZATION_POLICY,
+                        )
+                        for storage_key, embedding in packed_vectors
+                    ],
+                )
+                self._bump_epoch(
+                    conn,
+                    keyword=True,
+                    vector=bool(packed_vectors),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     @staticmethod
     def _status_values(filters: dict[str, Any] | None) -> set[str]:
@@ -1054,10 +1086,21 @@ class LocalRecordBackend:
         with self._lock:
             conn = self._db.get_connection()
             try:
+                existing_records = 0
+                existing_vectors = 0
                 for record_id in record_ids:
                     record = self.hydrate_record(record_id)
                     if record is None:
                         continue
+                    existing_records += 1
+                    existing_vectors += int(
+                        conn.execute(
+                            "SELECT EXISTS("
+                            "SELECT 1 FROM local_vectors_v2 WHERE storage_key = ?"
+                            ")",
+                            (record.storage_key,),
+                        ).fetchone()[0]
+                    )
                     old_row = conn.execute(
                         """
                         SELECT rowid, title, body, uri, keywords
@@ -1080,7 +1123,11 @@ class LocalRecordBackend:
                         "DELETE FROM local_records WHERE storage_key = ?",
                         (record.storage_key,),
                     )
-                self._bump_epoch(conn)
+                self._bump_epoch(
+                    conn,
+                    keyword=existing_records > 0,
+                    vector=existing_vectors > 0,
+                )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -1187,10 +1234,41 @@ class LocalRecordBackend:
             conn = self._db.get_connection()
             return self._epoch_locked(conn)
 
+    def keyword_epoch(self) -> int:
+        return self._lane_epoch("local_keyword_epoch")
+
+    def vector_epoch(self) -> int:
+        return self._lane_epoch("local_vector_epoch")
+
+    def graph_epoch(self) -> int:
+        return self._lane_epoch("local_graph_epoch")
+
+    def epochs(self) -> dict[str, int]:
+        with self._lock:
+            conn = self._db.get_connection()
+            return {
+                "keyword": self._lane_epoch_locked(conn, "local_keyword_epoch"),
+                "vector": self._lane_epoch_locked(conn, "local_vector_epoch"),
+                "graph": self._lane_epoch_locked(conn, "local_graph_epoch"),
+            }
+
     @staticmethod
     def _epoch_locked(conn: sqlite3.Connection) -> int:
         row = conn.execute(
             "SELECT value FROM system_state WHERE key = 'local_record_epoch'"
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def _lane_epoch(self, key: str) -> int:
+        with self._lock:
+            conn = self._db.get_connection()
+            return self._lane_epoch_locked(conn, key)
+
+    @staticmethod
+    def _lane_epoch_locked(conn: sqlite3.Connection, key: str) -> int:
+        row = conn.execute(
+            "SELECT value FROM system_state WHERE key = ?",
+            (key,),
         ).fetchone()
         return int(row[0]) if row else 0
 
@@ -1209,18 +1287,25 @@ class LocalRecordBackend:
             else edge
             for edge in edges
         ]
+        if not rows:
+            return
         with self._lock:
             conn = self._db.get_connection()
-            conn.executemany(
-                """
-                INSERT INTO local_graph_edges (source_id, target_id, edge_type, weight)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(source_id, target_id, edge_type) DO UPDATE SET
-                    weight = excluded.weight
-                """,
-                rows,
-            )
-            conn.commit()
+            try:
+                conn.executemany(
+                    """
+                    INSERT INTO local_graph_edges (source_id, target_id, edge_type, weight)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(source_id, target_id, edge_type) DO UPDATE SET
+                        weight = excluded.weight
+                    """,
+                    rows,
+                )
+                self._bump_epoch(conn, graph=True)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def neighbors(
         self,
@@ -1460,6 +1545,12 @@ class LocalVectorStore:
     def epoch(self) -> int:
         return self._backend.epoch()
 
+    def vector_epoch(self) -> int:
+        return self._backend.vector_epoch()
+
+    def epochs(self) -> dict[str, int]:
+        return self._backend.epochs()
+
 
 class SQLiteExactVectorStore(LocalVectorStore):
     """Truthful name for the default packed exact vector engine."""
@@ -1496,6 +1587,12 @@ class LocalKeywordStore:
     def rebuild_keyword_index(self) -> None:
         self._backend.rebuild_keyword_index()
 
+    def keyword_epoch(self) -> int:
+        return self._backend.keyword_epoch()
+
+    def epochs(self) -> dict[str, int]:
+        return self._backend.epochs()
+
 
 class LocalGraphStore:
     """GraphStore implementation backed by SQLite graph rows."""
@@ -1508,6 +1605,12 @@ class LocalGraphStore:
         edges: Sequence[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
         self._backend.upsert_edges(edges)
+
+    def graph_epoch(self) -> int:
+        return self._backend.graph_epoch()
+
+    def epochs(self) -> dict[str, int]:
+        return self._backend.epochs()
 
     def neighbors(
         self,
