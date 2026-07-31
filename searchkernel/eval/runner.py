@@ -701,12 +701,6 @@ def run_benchmark(
     if effective_hooks.before_warm is not None:
         effective_hooks.before_warm()
     warm = run_eval(golden_set, search_fn, k, config=effective_config, mode="warm")
-    metadata.update(
-        {
-            "cold": cold.to_dict(),
-            "warm": warm.to_dict(),
-        }
-    )
     cold.metadata.update(metadata)
     warm.metadata.update(metadata)
     return BenchmarkReport(cold=cold, warm=warm, metadata=metadata)

@@ -1,5 +1,7 @@
 """Unit tests for evaluation runner."""
 
+import json
+
 from searchkernel.eval.golden import GoldenEntry, GoldenSet
 from searchkernel.eval.runner import (
     BenchmarkConfig,
@@ -269,6 +271,7 @@ def test_run_benchmark_reports_cold_warm_and_metadata():
     assert report.metadata["environment_fingerprint"]
     assert report.metadata["index_size_bytes"] == 123
     assert report.metadata["rss_before_index_load_bytes"] == 456
+    json.dumps(report.to_dict())
 
 
 def test_run_eval_empty_golden_set():
