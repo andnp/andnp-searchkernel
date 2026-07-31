@@ -19,6 +19,8 @@ import psycopg2.pool
 from psycopg2 import sql
 
 from searchkernel.domain import (
+    GraphEdge,
+    GraphNeighbor,
     Record,
     RecordHit,
     RecordIdentity,
@@ -146,6 +148,83 @@ def _migrate_records_schema(cursor) -> None:
     )
 
 
+def _migrate_graph_schema(cursor) -> None:
+    """Upgrade legacy graph IDs to endpoint composite identities."""
+    for column in (
+        "source_workspace_id",
+        "source_kind",
+        "target_workspace_id",
+        "target_kind",
+    ):
+        cursor.execute(
+            sql.SQL(
+                "ALTER TABLE graph_edges ADD COLUMN IF NOT EXISTS {} TEXT "
+                "DEFAULT '';"
+            ).format(
+                sql.Identifier(column)
+            )
+        )
+    cursor.execute(
+        """
+        UPDATE graph_edges
+        SET source_kind = COALESCE(NULLIF(source_kind, ''), 'legacy'),
+            target_kind = COALESCE(NULLIF(target_kind, ''), 'legacy')
+        WHERE source_kind IS NULL OR source_kind = ''
+           OR target_kind IS NULL OR target_kind = '';
+        """
+    )
+    cursor.execute(
+        """
+        UPDATE graph_edges
+        SET source_workspace_id = COALESCE(source_workspace_id, ''),
+            target_workspace_id = COALESCE(target_workspace_id, '');
+        """
+    )
+    cursor.execute(
+        "ALTER TABLE graph_edges ALTER COLUMN source_workspace_id SET NOT NULL;"
+    )
+    cursor.execute(
+        "ALTER TABLE graph_edges ALTER COLUMN target_workspace_id SET NOT NULL;"
+    )
+    cursor.execute(
+        """
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'graph_edges'::regclass
+          AND contype = 'p';
+        """
+    )
+    primary = cursor.fetchone()
+    if primary is not None and primary[0] != "graph_edges_identity_pkey":
+        cursor.execute(
+            sql.SQL("ALTER TABLE graph_edges DROP CONSTRAINT {};").format(
+                sql.Identifier(primary[0])
+            )
+        )
+    cursor.execute(
+        """
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'graph_edges'::regclass
+          AND conname = 'graph_edges_identity_unique';
+        """
+    )
+    if cursor.fetchone() is None:
+        cursor.execute(
+            """
+            ALTER TABLE graph_edges
+            ADD CONSTRAINT graph_edges_identity_unique UNIQUE (
+                source_workspace_id, source_kind, source_id,
+                target_workspace_id, target_kind, target_id, edge_type
+            );
+            """
+        )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_identity "
+        "ON graph_edges (source_workspace_id, source_kind, source_id);"
+    )
+
+
 class PostgresConnection:
     """Thread-safe Postgres connection pool."""
 
@@ -255,14 +334,22 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
         # Graph edges table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS graph_edges (
+                source_workspace_id TEXT NOT NULL DEFAULT '',
+                source_kind TEXT NOT NULL DEFAULT 'legacy',
                 source_id TEXT NOT NULL,
+                target_workspace_id TEXT NOT NULL DEFAULT '',
+                target_kind TEXT NOT NULL DEFAULT 'legacy',
                 target_id TEXT NOT NULL,
                 edge_type TEXT NOT NULL,
                 weight REAL DEFAULT 1.0,
                 updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (source_id, target_id, edge_type)
+                CONSTRAINT graph_edges_identity_unique UNIQUE (
+                    source_workspace_id, source_kind, source_id,
+                    target_workspace_id, target_kind, target_id, edge_type
+                )
             );
         """)
+        _migrate_graph_schema(cursor)
 
         # Graph edges index
         cursor.execute("""
@@ -835,7 +922,7 @@ class PGGraphStore:
 
     def upsert_edges(
         self,
-        edges: list[tuple[str, str, str, float]],
+        edges: list[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
         """Upsert edges in the graph.
 
@@ -850,16 +937,44 @@ class PGGraphStore:
         try:
             cursor = conn.cursor()
 
+            rows = [
+                (
+                    edge.source.workspace_id or "",
+                    edge.source.source_kind,
+                    edge.source.source_id,
+                    edge.target.workspace_id or "",
+                    edge.target.source_kind,
+                    edge.target.source_id,
+                    edge.edge_type,
+                    edge.weight,
+                )
+                if isinstance(edge, GraphEdge)
+                else (
+                    "",
+                    "legacy",
+                    edge[0],
+                    "",
+                    "legacy",
+                    edge[1],
+                    edge[2],
+                    edge[3],
+                )
+                for edge in edges
+            ]
             psycopg2.extras.execute_values(
                 cursor,
                 """
-                INSERT INTO graph_edges (source_id, target_id, edge_type, weight)
+                INSERT INTO graph_edges (
+                    source_workspace_id, source_kind, source_id,
+                    target_workspace_id, target_kind, target_id,
+                    edge_type, weight
+                )
                 VALUES %s
-                ON CONFLICT (source_id, target_id, edge_type) DO UPDATE SET
+                ON CONFLICT ON CONSTRAINT graph_edges_identity_unique DO UPDATE SET
                     weight = EXCLUDED.weight,
                     updated_at = CURRENT_TIMESTAMP;
                 """,
-                edges,
+                rows,
             )
 
             conn.commit()
@@ -874,7 +989,7 @@ class PGGraphStore:
         record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> list[tuple[str, str, float]]:
+    ) -> list[GraphNeighbor | tuple[str, str, float]]:
         """Retrieve neighbors of a record.
 
         Args:
@@ -892,9 +1007,16 @@ class PGGraphStore:
         try:
             cursor = conn.cursor()
 
+            identity = (
+                record_id
+                if isinstance(record_id, RecordIdentity)
+                else RecordIdentity(None, "legacy", record_id)
+            )
             edge_filter = ""
             params: list[Any] = [
-                record_id.source_id if isinstance(record_id, RecordIdentity) else record_id
+                identity.workspace_id or "",
+                identity.source_kind,
+                identity.source_id,
             ]
             if edge_types:
                 placeholders = ",".join(["%s"] * len(edge_types))
@@ -906,36 +1028,67 @@ class PGGraphStore:
 
             sql = f"""
                 WITH RECURSIVE walk AS (
-                    SELECT source_id, target_id, edge_type, weight, 1 AS hop,
-                           ARRAY[source_id, target_id] AS path
+                    SELECT source_workspace_id, source_kind, source_id,
+                           target_workspace_id, target_kind, target_id,
+                           edge_type, weight, 1 AS hop,
+                           ARRAY[
+                               source_kind || chr(31) || source_id,
+                               target_kind || chr(31) || target_id
+                           ] AS path
                     FROM graph_edges
-                    WHERE source_id = %s {edge_filter}
+                    WHERE source_workspace_id IS NOT DISTINCT FROM %s
+                      AND source_kind = %s
+                      AND source_id = %s
+                      {edge_filter}
                     UNION ALL
-                    SELECT walk.source_id, edge.target_id, edge.edge_type,
+                    SELECT walk.source_workspace_id, walk.source_kind,
+                           walk.source_id, edge.target_workspace_id,
+                           edge.target_kind, edge.target_id, edge.edge_type,
                            walk.weight * edge.weight, walk.hop + 1,
-                           walk.path || edge.target_id
+                           walk.path || (
+                               edge.target_kind || chr(31) || edge.target_id
+                           )
                     FROM walk
-                    JOIN graph_edges edge ON edge.source_id = walk.target_id
+                    JOIN graph_edges edge
+                      ON edge.source_workspace_id IS NOT DISTINCT FROM
+                         walk.target_workspace_id
+                     AND edge.source_kind = walk.target_kind
+                     AND edge.source_id = walk.target_id
                     WHERE walk.hop < %s
-                      AND NOT edge.target_id = ANY(walk.path)
-                      {edge_filter.replace("edge_type", "edge.edge_type")}
+                      AND NOT (
+                          edge.target_kind || chr(31) || edge.target_id
+                      ) = ANY(walk.path)
+                      AND TRUE {edge_filter.replace("edge_type", "edge.edge_type")}
                 ),
                 ranked AS (
-                    SELECT target_id, edge_type, weight,
+                    SELECT target_workspace_id, target_kind, target_id,
+                           edge_type, weight,
                            ROW_NUMBER() OVER (
-                               PARTITION BY target_id ORDER BY weight DESC
+                               PARTITION BY target_workspace_id, target_kind,
+                                            target_id
+                               ORDER BY weight DESC
                            ) AS row_number
                     FROM walk
                 )
-                SELECT target_id, edge_type, weight
+                SELECT target_workspace_id, target_kind, target_id,
+                       edge_type, weight
                 FROM ranked
                 WHERE row_number = 1
-                ORDER BY weight DESC, target_id;
+                ORDER BY weight DESC, target_kind, target_id;
             """
 
             cursor.execute(sql, params)
             results = cursor.fetchall()
-            return [(row[0], row[1], float(row[2])) for row in results]
+            if isinstance(record_id, RecordIdentity):
+                return [
+                    GraphNeighbor(
+                        RecordIdentity(row[0] or None, row[1], row[2]),
+                        row[3],
+                        float(row[4]),
+                    )
+                    for row in results
+                ]
+            return [(row[2], row[3], float(row[4])) for row in results]
         finally:
             if cursor is not None:
                 cursor.close()

@@ -2,7 +2,7 @@
 
 from typing import Protocol
 
-from searchkernel.domain import Record
+from searchkernel.domain import Record, RecordIdentity
 
 
 class AsyncRecordHydrator(Protocol):
@@ -10,9 +10,6 @@ class AsyncRecordHydrator(Protocol):
 
     async def hydrate_record(
         self,
-        record_id: str,
-        *,
-        source_kind: str | None = None,
-        workspace_id: str | None = None,
+        identity: RecordIdentity,
     ) -> Record | None:
         ...

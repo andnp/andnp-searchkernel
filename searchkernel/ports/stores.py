@@ -6,7 +6,14 @@ uses Postgres + pgvector; legacy FAISS/SQLite adapters are kept as fallbacks.
 
 from typing import Any, Protocol, runtime_checkable
 
-from searchkernel.domain import Record, RecordHit, RecordIdentity, Vector
+from searchkernel.domain import (
+    GraphEdge,
+    GraphNeighbor,
+    Record,
+    RecordHit,
+    RecordIdentity,
+    Vector,
+)
 
 
 @runtime_checkable
@@ -108,7 +115,7 @@ class GraphStore(Protocol):
 
     def upsert_edges(
         self,
-        edges: list[tuple[str, str, str, float]],
+        edges: list[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
         """
         Upsert edges in the graph.
@@ -124,7 +131,7 @@ class GraphStore(Protocol):
         record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> list[tuple[str, str, float]]:
+    ) -> list[GraphNeighbor | tuple[str, str, float]]:
         """
         Retrieve neighbors of a record in the graph.
 
@@ -188,7 +195,7 @@ class AsyncGraphStore(Protocol):
         record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> list[tuple[str, str, float]]:
+    ) -> list[GraphNeighbor | tuple[str, str, float]]:
         ...
 
     def set(self, key: str, value: Any, epoch: int) -> None:

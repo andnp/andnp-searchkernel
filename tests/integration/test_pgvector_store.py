@@ -567,6 +567,41 @@ class TestGraphStore:
         assert "test:2" in neighbor_ids
         assert "test:3" not in neighbor_ids
 
+    def test_schema_migrates_legacy_graph_edges(self, pg_conn):
+        conn = pg_conn.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DROP TABLE graph_edges;")
+        cursor.execute(
+            """
+            CREATE TABLE graph_edges (
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                edge_type TEXT NOT NULL,
+                weight REAL DEFAULT 1.0,
+                updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (source_id, target_id, edge_type)
+            );
+            """
+        )
+        cursor.execute(
+            "INSERT INTO graph_edges (source_id, target_id, edge_type, weight) "
+            "VALUES ('source', 'target', 'related', 0.7);"
+        )
+        conn.commit()
+        cursor.close()
+        pg_conn.put_connection(conn)
+
+        _create_schema(pg_conn)
+
+        assert pg_conn.execute_one(
+            "SELECT source_kind FROM graph_edges WHERE source_id = %s;",
+            ("source",),
+        ) == ("legacy",)
+        assert pg_conn.execute_one(
+            "SELECT target_kind FROM graph_edges WHERE target_id = %s;",
+            ("target",),
+        ) == ("legacy",)
+
 
 class TestCacheStore:
     """Tests for CacheStore port implementation."""

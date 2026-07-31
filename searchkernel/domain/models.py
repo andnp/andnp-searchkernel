@@ -71,6 +71,20 @@ class RecordIdentity:
             self.source_id,
         )
 
+    @classmethod
+    def from_storage_key(cls, storage_key: str) -> "RecordIdentity":
+        if not storage_key.startswith("record:"):
+            raise ValueError("storage key must start with 'record:'")
+        value = json.loads(storage_key.removeprefix("record:"))
+        if not isinstance(value, list) or len(value) != 3:
+            raise ValueError("invalid record storage key")
+        workspace_id, source_kind, source_id = value
+        if not isinstance(workspace_id, (str, type(None))):
+            raise TypeError("invalid workspace_id in storage key")
+        if not isinstance(source_kind, str) or not isinstance(source_id, str):
+            raise TypeError("invalid record identity in storage key")
+        return cls(workspace_id, source_kind, source_id)
+
 
 @dataclass(frozen=True, slots=True)
 class RecordHit:
@@ -105,6 +119,34 @@ class RecordHit:
 
     def __len__(self) -> int:
         return 2
+
+
+@dataclass(frozen=True, slots=True)
+class GraphNeighbor:
+    """A graph result retaining the neighbor's complete identity."""
+
+    identity: RecordIdentity
+    edge_type: str
+    weight: float
+
+    @property
+    def source_id(self) -> str:
+        return self.identity.source_id
+
+    def __iter__(self):
+        yield self.source_id
+        yield self.edge_type
+        yield self.weight
+
+
+@dataclass(frozen=True, slots=True)
+class GraphEdge:
+    """A weighted graph edge retaining both endpoint identities."""
+
+    source: RecordIdentity
+    target: RecordIdentity
+    edge_type: str
+    weight: float
 
 
 # ===== Core domain types =====

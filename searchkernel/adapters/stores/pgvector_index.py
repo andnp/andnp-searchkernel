@@ -194,7 +194,10 @@ class PGVectorIndex:
                     f"embedding dimension mismatch for {chunk.chunk_id}: "
                     f"expected {self._dim}, got {len(vector)}"
                 )
-            record = _chunk_to_record(chunk, self._workspace_id)
+            record = _chunk_to_record(
+                chunk,
+                self._effective_workspace_id(chunk),
+            )
             record.embedding = vector
             records.append(record)
         self._store.upsert(records, self._model_name, self._dim)
@@ -430,9 +433,13 @@ class PGVectorIndex:
             if table_name is None:
                 return
             cursor.execute(
-                sql.SQL("SELECT record_id FROM {table};").format(
-                    table=sql.Identifier(table_name)
-                )
+                sql.SQL(
+                    "SELECT v.record_id FROM {table} v "
+                    "JOIN records r ON r.record_id = v.record_id "
+                    "WHERE r.source_kind = %s "
+                    "AND r.workspace_id IS NOT DISTINCT FROM %s;"
+                ).format(table=sql.Identifier(table_name)),
+                (_SOURCE_KIND, self._workspace_id),
             )
             record_ids = [r[0] for r in cursor.fetchall()]
         finally:
@@ -442,8 +449,23 @@ class PGVectorIndex:
         if record_ids:
             self._store.delete_for_model(record_ids, self._model_name, self._dim)
 
+    def _effective_workspace_id(self, chunk: Chunk) -> str | None:
+        if self._workspace_id is not None:
+            return self._workspace_id
+        raw_workspace_id = chunk.metadata.get("workspace_id")
+        return raw_workspace_id if isinstance(raw_workspace_id, str) else None
+
     def _storage_key(self, chunk_id: str) -> str:
-        return canonical_storage_key(self._workspace_id, _SOURCE_KIND, chunk_id)
+        if chunk_id.startswith("record:"):
+            return chunk_id
+        if self._workspace_id is not None:
+            return canonical_storage_key(self._workspace_id, _SOURCE_KIND, chunk_id)
+        row = self._fetch_records([chunk_id]).get(chunk_id)
+        if row is not None:
+            workspace_id = row[2].get("workspace_id")
+            if isinstance(workspace_id, str):
+                return canonical_storage_key(workspace_id, _SOURCE_KIND, chunk_id)
+        return canonical_storage_key(None, _SOURCE_KIND, chunk_id)
 
     def _fetch_records(
         self, record_ids: list[str]
@@ -457,40 +479,56 @@ class PGVectorIndex:
             table_name = self._own_vector_table_name(cursor)
             if table_name is None:
                 return {}
-            storage_ids = [
-                record_id
-                if record_id.startswith("record:")
-                else self._storage_key(record_id)
-                for record_id in record_ids
+            canonical_ids = [
+                record_id for record_id in record_ids if record_id.startswith("record:")
             ]
-            cursor.execute(
-                sql.SQL(
-                    "SELECT r.record_id, r.source_id, r.workspace_id, "
-                    "r.source_kind, r.body, r.metadata "
-                    "FROM records r JOIN {table} v ON v.record_id = r.record_id "
-                    "WHERE r.record_id = ANY(%s);"
-                ).format(table=sql.Identifier(table_name)),
-                (storage_ids,),
-            )
-            return {
-                requested_id: (
-                    row[1],
-                    row[4],
-                    {
-                        **(row[5] or {}),
-                        "workspace_id": row[2],
-                        "source_kind": row[3],
-                    },
+            bare_ids = [
+                record_id
+                for record_id in record_ids
+                if not record_id.startswith("record:")
+            ]
+            if self._workspace_id is None and bare_ids:
+                cursor.execute(
+                    sql.SQL(
+                        "SELECT r.record_id, r.source_id, r.workspace_id, "
+                        "r.source_kind, r.body, r.metadata "
+                        "FROM records r JOIN {table} v ON v.record_id = r.record_id "
+                        "WHERE r.source_kind = %s "
+                        "AND (r.record_id = ANY(%s) OR r.source_id = ANY(%s));"
+                    ).format(table=sql.Identifier(table_name)),
+                    (_SOURCE_KIND, canonical_ids, bare_ids),
                 )
-                for row in cursor.fetchall()
-                for requested_id in record_ids
-                if row[0]
-                == (
-                    requested_id
-                    if requested_id.startswith("record:")
-                    else self._storage_key(requested_id)
+            else:
+                storage_ids = canonical_ids + [
+                    canonical_storage_key(self._workspace_id, _SOURCE_KIND, record_id)
+                    for record_id in bare_ids
+                ]
+                cursor.execute(
+                    sql.SQL(
+                        "SELECT r.record_id, r.source_id, r.workspace_id, "
+                        "r.source_kind, r.body, r.metadata "
+                        "FROM records r JOIN {table} v ON v.record_id = r.record_id "
+                        "WHERE r.record_id = ANY(%s);"
+                    ).format(table=sql.Identifier(table_name)),
+                    (storage_ids,),
                 )
-            }
+            rows = cursor.fetchall()
+            result: dict[str, tuple[str, str, dict[str, Any]]] = {}
+            for row in rows:
+                metadata = {
+                    **(row[5] or {}),
+                    "workspace_id": row[2],
+                    "source_kind": row[3],
+                }
+                for requested_id in record_ids:
+                    if requested_id == row[0] or requested_id == row[1]:
+                        if requested_id in result and result[requested_id][0] != row[1]:
+                            raise ValueError(
+                                f"ambiguous chunk identity {requested_id!r}; "
+                                "provide workspace_id"
+                            )
+                        result[requested_id] = (row[1], row[4], metadata)
+            return result
         finally:
             if cursor is not None:
                 cursor.close()

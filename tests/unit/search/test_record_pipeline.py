@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
+
 from searchkernel.domain import GraphNeighbor, Record, RecordHit, RecordIdentity
 from searchkernel.search.record_pipeline import (
     RecordSearchConfig,

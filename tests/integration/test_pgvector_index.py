@@ -336,4 +336,7 @@ def test_workspace_scopes_hydration_and_delete(pg_dsn, prefix):
 
     assert first.get_chunk_by_id(chunk.chunk_id) is None
     assert second.get_chunk_by_id(chunk.chunk_id) is not None
+    first.add_chunk(chunk)
+    first.clear()
+    assert first.get_chunk_by_id(chunk.chunk_id) is None
     second.clear()
