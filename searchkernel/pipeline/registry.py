@@ -72,6 +72,14 @@ class StageDeps:
 StageFactory = Callable[[dict[str, Any], StageDeps], "SearchStage | AsyncSearchStage"]
 
 
+def _require_dependency[DependencyT](
+    value: DependencyT | None, name: str
+) -> DependencyT:
+    if value is None:
+        raise ValueError(f"missing required stage dependency: {name}")
+    return value
+
+
 def _make_routing(config: dict[str, Any], deps: StageDeps) -> SearchStage:
     return RoutingStage()
 
@@ -81,7 +89,10 @@ def _make_effective_top_k(config: dict[str, Any], deps: StageDeps) -> SearchStag
 
 
 def _make_retrieve(config: dict[str, Any], deps: StageDeps) -> AsyncSearchStage:
-    return RetrieveStage(deps.search_vector, deps.search_keyword)
+    return RetrieveStage(
+        _require_dependency(deps.search_vector, "search_vector"),
+        _require_dependency(deps.search_keyword, "search_keyword"),
+    )
 
 
 def _make_seed_bookkeeping(config: dict[str, Any], deps: StageDeps) -> SearchStage:
@@ -89,7 +100,10 @@ def _make_seed_bookkeeping(config: dict[str, Any], deps: StageDeps) -> SearchSta
 
 
 def _make_graph_expand(config: dict[str, Any], deps: StageDeps) -> SearchStage:
-    return GraphExpandStage(deps.rank_neighbors, deps.build_chunk_candidates)
+    return GraphExpandStage(
+        _require_dependency(deps.rank_neighbors, "rank_neighbors"),
+        _require_dependency(deps.build_chunk_candidates, "build_chunk_candidates"),
+    )
 
 
 def _make_strategy_results(config: dict[str, Any], deps: StageDeps) -> SearchStage:
@@ -106,8 +120,8 @@ def _make_dedup_rerank(config: dict[str, Any], deps: StageDeps) -> SearchStage:
 
 def _make_rag_fusion(config: dict[str, Any], deps: StageDeps) -> AsyncSearchStage:
     return RAGFusionStage(
-        deps.generate_query_variants,
-        deps.rag_fusion_retrieve,
+        _require_dependency(deps.generate_query_variants, "generate_query_variants"),
+        _require_dependency(deps.rag_fusion_retrieve, "rag_fusion_retrieve"),
         RAGFusionConfig(**config),
     )
 
@@ -117,31 +131,43 @@ def _make_provenance(config: dict[str, Any], deps: StageDeps) -> SearchStage:
 
 
 def _make_hydrate(config: dict[str, Any], deps: StageDeps) -> SearchStage:
-    return HydrateStage(deps.hydrate_chunk_result)
+    return HydrateStage(
+        _require_dependency(deps.hydrate_chunk_result, "hydrate_chunk_result")
+    )
 
 
 def _make_tag_expansion(config: dict[str, Any], deps: StageDeps) -> SearchStage:
-    return TagExpansionStage(deps.expand_query_with_tags)
+    return TagExpansionStage(
+        _require_dependency(deps.expand_query_with_tags, "expand_query_with_tags")
+    )
 
 
 def _make_community_boost(config: dict[str, Any], deps: StageDeps) -> SearchStage:
-    return CommunityBoostStage(deps.boost_by_community)
+    return CommunityBoostStage(
+        _require_dependency(deps.boost_by_community, "boost_by_community")
+    )
 
 
 def _make_project_uplift(config: dict[str, Any], deps: StageDeps) -> SearchStage:
-    return ProjectUpliftStage(deps.get_chunk, config.get("uplift", 1.2))
+    return ProjectUpliftStage(
+        _require_dependency(deps.get_chunk, "get_chunk"),
+        config.get("uplift", 1.2),
+    )
 
 
 def _make_project_filter(config: dict[str, Any], deps: StageDeps) -> SearchStage:
-    return ProjectFilterStage(deps.get_chunk)
+    return ProjectFilterStage(_require_dependency(deps.get_chunk, "get_chunk"))
 
 
 def _make_source_filter(config: dict[str, Any], deps: StageDeps) -> SearchStage:
-    return SourceFilterStage(deps.get_chunk)
+    return SourceFilterStage(_require_dependency(deps.get_chunk, "get_chunk"))
 
 
 def _make_parent_expansion(config: dict[str, Any], deps: StageDeps) -> SearchStage:
-    return ParentExpansionStage(deps.get_chunk, deps.get_parent_chunk)
+    return ParentExpansionStage(
+        _require_dependency(deps.get_chunk, "get_chunk"),
+        _require_dependency(deps.get_parent_chunk, "get_parent_chunk"),
+    )
 
 
 DEFAULT_QUERY_STAGE_REGISTRY: dict[str, StageFactory] = {

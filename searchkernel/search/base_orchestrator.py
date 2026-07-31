@@ -113,7 +113,7 @@ class BaseSearchOrchestrator[ResultT](ABC):
             "keyword": self._config.search.keyword_weight,
         }
 
-    def _apply_score_pipeline(
+    async def _apply_score_pipeline(
         self,
         strategy_results: dict[str, list[tuple[str, float]]],
         weights: dict[str, float],
