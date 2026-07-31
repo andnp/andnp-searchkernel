@@ -10,7 +10,7 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -27,6 +27,11 @@ from searchkernel.domain import (
     RecordIdentity,
     Vector,
     canonical_storage_key,
+)
+from searchkernel.domain.vector_filters import (
+    filter_values,
+    identity_filter_values,
+    status_values,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,6 +68,166 @@ def _vector_table_name(model_name: str, dim: int) -> str:
 def _vector_literal(vec: Vector) -> str:
     """Serialize a Python vector to pgvector's `[v1,v2,...]` text format."""
     return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+
+
+def _string_filter_values(
+    filters: Mapping[str, Any],
+    *names: str,
+) -> list[str] | None:
+    for name in names:
+        if name in filters and filters[name] is not None:
+            return [
+                value.value if hasattr(value, "value") else str(value)
+                for value in filter_values(filters[name])
+            ]
+    return None
+
+
+def _path_variants(value: Any) -> set[str]:
+    normalized = str(value).replace("\\", "/")
+    variants = {normalized}
+    leaf = normalized.rsplit("/", 1)[-1]
+    if "." in leaf:
+        stem = leaf.rsplit(".", 1)[0]
+        variants.add(normalized[: -len(leaf) - 1] + stem)
+        variants.add(stem)
+    variants.add(leaf)
+    return variants
+
+
+def build_pgvector_filter_sql(
+    filters: Mapping[str, Any] | None,
+    *,
+    record_alias: str = "r",
+) -> tuple[list[str], list[Any]]:
+    """Build SQL predicates for the canonical vector filter contract."""
+    filters = filters or {}
+    clauses: list[str] = []
+    parameters: list[Any] = []
+    status_filter = sorted(status_values(filters))
+    if not status_filter:
+        return ["FALSE"], []
+    clauses.append(f"{record_alias}.status = ANY(%s)")
+    parameters.append(status_filter)
+
+    workspace_id = filters.get("workspace_id")
+    if workspace_id is not None:
+        clauses.append(f"{record_alias}.workspace_id = %s")
+        parameters.append(workspace_id)
+
+    source_kinds = _string_filter_values(filters, "source_kinds", "source_kind")
+    if source_kinds is not None:
+        if not source_kinds:
+            return ["FALSE"], []
+        clauses.append(f"{record_alias}.source_kind = ANY(%s)")
+        parameters.append(source_kinds)
+
+    candidate_value = filters.get("candidate_ids")
+    if candidate_value is None:
+        candidate_value = filters.get("candidate_storage_keys")
+    if candidate_value is not None:
+        candidate_keys, candidate_sources = identity_filter_values(candidate_value)
+        if not candidate_keys and not candidate_sources:
+            return ["FALSE"], []
+        clauses.append(
+            f"({record_alias}.record_id = ANY(%s) "
+            f"OR {record_alias}.source_id = ANY(%s))"
+        )
+        parameters.extend([sorted(candidate_keys), sorted(candidate_sources)])
+
+    project_expr = f"{record_alias}.metadata->>'project_id'"
+    project_values = _string_filter_values(filters, "project_ids", "project_id")
+    if project_values is not None:
+        if not project_values:
+            return ["FALSE"], []
+        clauses.append(f"{project_expr} = ANY(%s)")
+        parameters.append(project_values)
+    excluded_projects = _string_filter_values(
+        filters, "excluded_projects", "excluded_project_ids"
+    )
+    if excluded_projects:
+        clauses.append(f"({project_expr} IS NULL OR {project_expr} <> ALL(%s))")
+        parameters.append(excluded_projects)
+    elif excluded_projects == []:
+        return ["FALSE"], []
+
+    path_expr = (
+        f"COALESCE(NULLIF({record_alias}.metadata->>'file_path', ''), "
+        f"NULLIF({record_alias}.metadata->>'path', ''), "
+        f"NULLIF({record_alias}.metadata->>'source_file', ''), "
+        f"NULLIF({record_alias}.uri, ''))"
+    )
+    document_expr = (
+        f"COALESCE(NULLIF({record_alias}.metadata->>'doc_id', ''), "
+        f"{record_alias}.source_id)"
+    )
+    path_values = _string_filter_values(
+        filters,
+        "paths",
+        "file_paths",
+        "source_files",
+        "path",
+        "file_path",
+        "source_file",
+    )
+    if path_values is not None:
+        expanded = sorted(
+            set().union(*(_path_variants(value) for value in path_values))
+        )
+        if not expanded:
+            return ["FALSE"], []
+        clauses.append(
+            f"({path_expr} = ANY(%s) OR {document_expr} = ANY(%s))"
+        )
+        parameters.extend([expanded, expanded])
+
+    excluded_paths = _string_filter_values(
+        filters,
+        "excluded_files",
+        "excluded_paths",
+        "excluded_file_paths",
+        "excluded_source_files",
+    )
+    if excluded_paths is not None:
+        expanded = sorted(
+            set().union(*(_path_variants(value) for value in excluded_paths))
+        )
+        if not expanded:
+            return ["FALSE"], []
+        clauses.append(
+            f"(COALESCE({path_expr}, '') <> ALL(%s) "
+            f"AND {document_expr} <> ALL(%s) "
+            f"AND regexp_replace(COALESCE({path_expr}, ''), '^.*/', '') "
+            f"<> ALL(%s))"
+        )
+        parameters.extend([expanded, expanded, expanded])
+
+    document_values = _string_filter_values(
+        filters, "document_ids", "document_id", "doc_ids", "doc_id"
+    )
+    if document_values is not None:
+        if not document_values:
+            return ["FALSE"], []
+        clauses.append(f"{document_expr} = ANY(%s)")
+        parameters.append(document_values)
+    excluded_documents = _string_filter_values(
+        filters,
+        "excluded_documents",
+        "excluded_document_ids",
+        "excluded_doc_ids",
+    )
+    if excluded_documents is not None:
+        expanded = sorted(
+            set().union(*(_path_variants(value) for value in excluded_documents))
+        )
+        if not expanded:
+            return ["FALSE"], []
+        clauses.append(
+            f"{document_expr} <> ALL(%s) AND {record_alias}.source_id <> ALL(%s)"
+        )
+        parameters.extend([expanded, expanded])
+
+    return clauses, parameters
 
 
 def _utc_timestamp(value: datetime) -> datetime:
@@ -146,6 +311,22 @@ def _migrate_records_schema(cursor) -> None:
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_records_workspace "
         "ON records (workspace_id);"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_records_vector_filters "
+        "ON records (workspace_id, source_kind, status, record_id);"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_records_project_filter "
+        "ON records ((metadata->>'project_id'));"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_records_document_filter "
+        "ON records ((metadata->>'doc_id'));"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_records_path_filter "
+        "ON records ((COALESCE(NULLIF(metadata->>'file_path', ''), uri)));"
     )
 
 
@@ -687,26 +868,7 @@ class PGVectorStore:
             # protocol parameters); the value is an internally-controlled int.
             cursor.execute(f"SET LOCAL hnsw.ef_search = {int(self.hnsw_ef_search)};")
 
-            where_parts: list[str] = []
-            filter_params: list[Any] = []
-            status_values = ["active"]
-            if filters and "source_kinds" in filters:
-                source_kinds = filters["source_kinds"]
-                if not source_kinds:
-                    return []
-                placeholders = ",".join(["%s"] * len(source_kinds))
-                where_parts.append(f"r.source_kind IN ({placeholders})")
-                filter_params.extend(source_kinds)
-            if filters and "statuses" in filters:
-                status_values = list(filters["statuses"])
-            if filters and "include_inactive" in filters and filters["include_inactive"]:
-                status_values = ["active", "stale", "archived"]
-            where_parts.append("r.status = ANY(%s)")
-            filter_params.append(status_values)
-            workspace_id = filters.get("workspace_id") if filters else None
-            if workspace_id is not None:
-                where_parts.append("r.workspace_id = %s")
-                filter_params.append(workspace_id)
+            where_parts, filter_params = build_pgvector_filter_sql(filters)
             where_clause = "AND " + " AND ".join(where_parts)
 
             vec_literal = _vector_literal(query_vector)
@@ -719,7 +881,7 @@ class PGVectorStore:
                 "FROM {table} v "
                 "JOIN records r ON v.record_id = r.record_id "
                 "WHERE 1 = 1 " + where_clause + " "
-                "ORDER BY v.embedding <=> %s::vector ASC "
+                "ORDER BY v.embedding <=> %s::vector ASC, v.record_id ASC "
                 "LIMIT %s;"
             ).format(table=sql.Identifier(table_name))
 
