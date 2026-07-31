@@ -32,6 +32,14 @@ class ImplicitGraphBuilder:
             if doc_id.startswith(("memory:", "tag:")):
                 continue
 
+            # Skip chunk-level nodes: IndexStage adds one graph node per chunk
+            # (chunk_id, chunk.metadata), and chunk metadata now carries
+            # document-scoped fields like file_path (folded in so Chunk stays
+            # source-agnostic). Directory-sibling edges are a document-level
+            # relationship; start_pos/end_pos only ever appear on chunk metadata.
+            if "start_pos" in metadata or "end_pos" in metadata:
+                continue
+
             # Try to get path from metadata, fallback to doc_id if it looks like a path
             file_path = metadata.get("file_path")
             if not file_path:
