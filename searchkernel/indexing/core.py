@@ -11,6 +11,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import replace
 
+from searchkernel.chunking.base import ChunkingStrategy
 from searchkernel.domain import Chunk, Record
 from searchkernel.indices.hash_store import ChunkHashStore
 from searchkernel.pipeline.stage import SearchContext
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 class IndexCore:
     def __init__(
         self,
-        chunker,
+        chunker: ChunkingStrategy,
         vector: VectorIndexPort,
         keyword: KeywordIndexPort,
         graph: GraphIndexPort,
@@ -44,7 +45,7 @@ class IndexCore:
         context = ChunkStage(self._chunker).run(
             SearchContext(query="", metadata={"record": record})
         )
-        return context.metadata["chunks"]
+        return context.state.chunks
 
     def index_chunks(self, chunks: list[Chunk]) -> None:
         IndexStage(self.vector, self.keyword, self.graph).run(
