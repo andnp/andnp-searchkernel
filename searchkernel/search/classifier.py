@@ -1,4 +1,5 @@
 import re
+from dataclasses import dataclass
 from enum import Enum, auto
 
 
@@ -13,6 +14,15 @@ _SNAKE_CASE_PATTERN = re.compile(r"\b[a-z]+_[a-z_]+\b")
 _BACKTICK_PATTERN = re.compile(r"`[^`]+`")
 _VERSION_PATTERN = re.compile(r"\b[vV]?\d+\.\d+(?:\.\d+)?(?:-\w+)?\b")
 _QUOTED_PHRASE_PATTERN = re.compile(r'"[^"]+"|\'[^\']+\'')
+_ARTIFACT_PATTERN = re.compile(
+    r"\b[A-Za-z0-9]+(?:[_:./\\-][A-Za-z0-9]+)+\b"
+)
+_RELATIONSHIP_PATTERN = re.compile(
+    r"\b(?:call(?:er|ee)?s?|depend(?:s|ency|encies)?|"
+    r"import(?:s|ed)?|referenc(?:e|es|ed)|relat(?:ed|es)|"
+    r"link(?:ed|s)?|connect(?:ed|s)?|upstream|downstream)\b",
+    re.IGNORECASE,
+)
 
 _NAVIGATIONAL_KEYWORDS = frozenset(
     [
@@ -50,7 +60,35 @@ _QUESTION_WORDS = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class QuerySignals:
+    """Stable lexical signals used by the deterministic query router."""
+
+    artifact: bool
+    quoted: bool
+    navigational: bool
+    exploratory: bool
+    relationship: bool
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        if self.artifact:
+            names.append("artifact")
+        if self.quoted:
+            names.append("quoted")
+        if self.navigational:
+            names.append("navigational")
+        if self.exploratory:
+            names.append("exploratory")
+        if self.relationship:
+            names.append("relationship")
+        return tuple(names)
+
+
 def _has_factual_signals(query: str) -> bool:
+    if "[[" in query and "]]" in query:
+        return False
     if _CAMEL_CASE_PATTERN.search(query):
         return True
     if _SNAKE_CASE_PATTERN.search(query):
@@ -58,6 +96,8 @@ def _has_factual_signals(query: str) -> bool:
     if _BACKTICK_PATTERN.search(query):
         return True
     if _VERSION_PATTERN.search(query):
+        return True
+    if _ARTIFACT_PATTERN.search(query):
         return True
     return bool(_QUOTED_PHRASE_PATTERN.search(query))
 
@@ -79,6 +119,17 @@ def _has_exploratory_signals(query: str) -> bool:
     if words[0] in _QUESTION_WORDS:
         return True
     return bool(query.strip().endswith("?"))
+
+
+def analyze_query(query: str) -> QuerySignals:
+    """Extract routing signals without calling a generative model."""
+    return QuerySignals(
+        artifact=_has_factual_signals(query),
+        quoted=bool(_QUOTED_PHRASE_PATTERN.search(query)),
+        navigational=_has_navigational_signals(query),
+        exploratory=_has_exploratory_signals(query),
+        relationship=bool(_RELATIONSHIP_PATTERN.search(query)),
+    )
 
 
 def classify_query(query: str) -> QueryType:

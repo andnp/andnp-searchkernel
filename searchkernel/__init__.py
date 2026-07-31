@@ -22,6 +22,12 @@ from searchkernel.ports import (
 )
 from searchkernel.search.orchestrator import SearchOrchestrator
 from searchkernel.search.pipeline import SearchPipelineConfig
+from searchkernel.search.query_plan import (
+    QueryPlan,
+    QueryRouter,
+    QueryRouterConfig,
+    route_query,
+)
 from searchkernel.search.record_pipeline import (
     QueryEmbeddingProvider,
     RecordHydrator,
@@ -43,6 +49,9 @@ __all__ = [
     "ContentSource",
     "EmbeddingProvider",
     "QueryEmbeddingProvider",
+    "QueryPlan",
+    "QueryRouter",
+    "QueryRouterConfig",
     "Record",
     "RecordHydrator",
     "RecordIngestor",
@@ -63,5 +72,6 @@ __all__ = [
     "SearchableSource",
     "canonical_storage_key",
     "classify_query_type",
+    "route_query",
     "truncate_content",
 ]
