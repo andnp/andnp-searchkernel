@@ -164,6 +164,23 @@ def test_policy_can_bound_vector_acquisition_to_keyword_candidates() -> None:
     ]
 
 
+def test_policy_can_order_vector_candidates_before_fusion() -> None:
+    records = {record_id: _record(record_id) for record_id in ("a", "b")}
+    vector_store = FakeVectorStore([("a", 0.9), ("b", 0.8)])
+    pipeline = RecordSearchPipeline(
+        vector_store=vector_store,
+        embedding_provider=FakeEmbedder(),
+        hydrator=_hydrator(records),
+        policy=RecordSearchPolicy(
+            vector_ranking_order=lambda ranking, filters: list(reversed(ranking))
+        ),
+    )
+
+    outcome = pipeline.search("query", limit=2)
+
+    assert [result.record_id for result in outcome.results] == ["b", "a"]
+
+
 def test_candidate_filter_runs_before_graph_expansion() -> None:
     records = {record_id: _record(record_id) for record_id in ("seed", "blocked", "allowed")}
     pipeline = RecordSearchPipeline(

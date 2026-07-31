@@ -55,6 +55,13 @@ class RecordSearchPolicy:
         ]
         | None
     ) = None
+    vector_ranking_order: (
+        Callable[
+            [Sequence[tuple[str, float]], dict[str, object]],
+            Sequence[tuple[str, float]],
+        ]
+        | None
+    ) = None
     score_adjuster: Callable[[RecordSearchCandidate], float] | None = None
     result_filter: Callable[[RecordSearchResult], bool] | None = None
     post_process: (
@@ -223,7 +230,7 @@ class RecordSearchPipeline:
                     if candidate_ids is not None:
                         vector_filters = dict(filters)
                         vector_filters["candidate_ids"] = list(candidate_ids)
-                rankings["vector"] = _sorted_unique(
+                vector_ranking = _sorted_unique(
                     self._vector_store.search(
                         vector,
                         acquisition_limit,
@@ -232,6 +239,11 @@ class RecordSearchPipeline:
                         filters=vector_filters,
                     )
                 )
+                if self._policy.vector_ranking_order is not None:
+                    vector_ranking = list(
+                        self._policy.vector_ranking_order(vector_ranking, filters)
+                    )
+                rankings["vector"] = vector_ranking
             except Exception as error:  # noqa: BLE001 - degraded mode captures backend failures
                 self._handle_error("vector", error, failures)
 
