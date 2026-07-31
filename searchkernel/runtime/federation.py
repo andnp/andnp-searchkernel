@@ -6,8 +6,12 @@ optionally reranked once over the fused candidate set.
 
 import inspect
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from dataclasses import replace as dataclass_replace
+from dataclasses import (
+    dataclass,
+)
+from dataclasses import (
+    replace as dataclass_replace,
+)
 from typing import Any, Literal
 
 from searchkernel.domain import ScoredRef
