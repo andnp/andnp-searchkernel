@@ -45,6 +45,7 @@ async def search_anything(
     top_n: int = 10,
     per_source_k: int = DEFAULT_PER_SOURCE_K,
     per_source_timeout_s: float = DEFAULT_PER_SOURCE_TIMEOUT_S,
+    source_weights: dict[str, float] | None = None,
     filters: dict[str, Any] | None = None,
     failure_mode: Literal["strict", "lenient"] = "lenient",
     diagnostics: list[FederationDiagnostic] | None = None,
@@ -91,7 +92,7 @@ async def search_anything(
             for item in fanout_diagnostics
         )
 
-    rankings: list[list[str]] = []
+    rankings: dict[str, list[str]] = {}
     candidates: dict[str, ScoredRef] = {}
     source_scores: dict[str, dict[str, float]] = {}
     source_metadata: dict[str, dict[str, dict[str, Any]]] = {}
@@ -101,9 +102,12 @@ async def search_anything(
         if not results:
             continue
 
+        source_name: str | None = None
         ranking: list[str] = []
         seen_in_source: set[str] = set()
         for candidate in results:
+            if source_name is None:
+                source_name = candidate.source_kind
             identity = candidate.storage_key
             if identity in seen_in_source:
                 continue
@@ -121,13 +125,17 @@ async def search_anything(
                 candidate.source_kind
             ] = dict(candidate.metadata)
 
-        if ranking:
-            rankings.append(ranking)
+        if ranking and source_name is not None:
+            rankings[source_name] = ranking
 
     if not candidates:
         return []
 
-    fused_scores = fuse_reciprocal_rank(rankings, k=DEFAULT_RRF_K)
+    fused_scores = fuse_reciprocal_rank(
+        rankings,
+        k=DEFAULT_RRF_K,
+        strategy_weights=source_weights,
+    )
     fused = [
         dataclass_replace(
             candidates[source_id],

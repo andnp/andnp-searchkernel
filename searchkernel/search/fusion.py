@@ -1,4 +1,5 @@
-from collections.abc import Iterable, Sequence
+import math
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 
 from searchkernel.search.time_scoring import (
@@ -13,16 +14,49 @@ def rrf_score(rank: int, k: int):
 
 
 def fuse_reciprocal_rank(
-    rankings: Iterable[Sequence[str]], k: float = 60.0
+    rankings: Iterable[Sequence[str]] | Mapping[str, Sequence[str]],
+    k: float = 60.0,
+    strategy_weights: Mapping[str, float] | None = None,
+    *,
+    source_weights: Mapping[str, float] | None = None,
 ) -> dict[str, float]:
+    """Fuse rankings with optional per-strategy reliability weights.
+
+    The default remains ordinary reciprocal-rank fusion. Mapping inputs retain
+    strategy names so weighted calls never need source fields in domain models.
+    """
     if k <= 0:
         raise ValueError("k must be positive")
+    if strategy_weights is not None and source_weights is not None:
+        raise ValueError("provide only one of strategy_weights or source_weights")
+    weights = strategy_weights or source_weights or {}
 
     scores: dict[str, float] = {}
-    for ranking in rankings:
+    if isinstance(rankings, Mapping):
+        named_rankings = rankings.items()
+    else:
+        named_rankings = enumerate(rankings)
+    for strategy, ranking in named_rankings:
+        weight = float(weights.get(str(strategy), 1.0))
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError("strategy weights must be finite and non-negative")
         for rank, item_id in enumerate(ranking, start=1):
-            scores[item_id] = scores.get(item_id, 0.0) + 1 / (k + rank)
+            scores[item_id] = scores.get(item_id, 0.0) + weight / (k + rank)
     return scores
+
+
+def weighted_reciprocal_rank(
+    rankings: Mapping[str, Sequence[str]],
+    *,
+    strategy_weights: Mapping[str, float],
+    k: float = 60.0,
+) -> dict[str, float]:
+    """Explicit weighted-RRF entry point for callers that prefer named lanes."""
+    return fuse_reciprocal_rank(
+        rankings,
+        k=k,
+        strategy_weights=strategy_weights,
+    )
 
 
 def apply_recency_boost(
