@@ -9,13 +9,19 @@ from searchkernel.storage import DatabaseManager, SQLiteTuning
     "kwargs",
     [
         {"busy_timeout_ms": -1},
+        {"busy_timeout_ms": 1.5},
         {"page_size": 1000},
+        {"page_size": 4096.0},
         {"page_size": 131_072},
         {"cache_size": 0},
+        {"cache_size": "100"},
         {"mmap_size": -1},
+        {"mmap_size": 1.5},
         {"temp_store": "invalid"},
+        {"temp_store": 2.0},
         {"checkpoint_policy": "invalid"},
         {"checkpoint_interval": -1},
+        {"checkpoint_interval": 1.5},
     ],
 )
 def test_sqlite_tuning_rejects_invalid_values(kwargs):

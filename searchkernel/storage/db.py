@@ -23,25 +23,43 @@ class SQLiteTuning:
     checkpoint_interval: int = 1_000
 
     def __post_init__(self) -> None:
-        if self.busy_timeout_ms < 0:
+        if (
+            not isinstance(self.busy_timeout_ms, int)
+            or isinstance(self.busy_timeout_ms, bool)
+            or self.busy_timeout_ms < 0
+        ):
             raise ValueError("busy_timeout_ms must be non-negative")
         if self.page_size is not None and (
-            self.page_size < 512
+            not isinstance(self.page_size, int)
+            or isinstance(self.page_size, bool)
+            or self.page_size < 512
             or self.page_size > 65_536
             or self.page_size & (self.page_size - 1)
         ):
             raise ValueError("page_size must be a power of two between 512 and 65536")
-        if self.cache_size == 0:
+        if self.cache_size is not None and (
+            not isinstance(self.cache_size, int)
+            or isinstance(self.cache_size, bool)
+            or self.cache_size == 0
+        ):
             raise ValueError("cache_size must be non-zero when configured")
-        if self.mmap_size < 0:
+        if (
+            not isinstance(self.mmap_size, int)
+            or isinstance(self.mmap_size, bool)
+            or self.mmap_size < 0
+        ):
             raise ValueError("mmap_size must be non-negative")
         if isinstance(self.temp_store, str):
             temp_store = self.temp_store.lower()
             if temp_store not in {"default", "file", "memory"}:
                 raise ValueError("temp_store must be default, file, or memory")
-        elif self.temp_store not in {0, 1, 2}:
+        elif (
+            not isinstance(self.temp_store, int)
+            or isinstance(self.temp_store, bool)
+            or self.temp_store not in {0, 1, 2}
+        ):
             raise ValueError("temp_store must be 0, 1, or 2")
-        if self.checkpoint_policy not in {
+        if not isinstance(self.checkpoint_policy, str) or self.checkpoint_policy not in {
             "none",
             "manual",
             "passive",
@@ -50,7 +68,11 @@ class SQLiteTuning:
             "truncate",
         }:
             raise ValueError("unsupported checkpoint_policy")
-        if self.checkpoint_interval < 0:
+        if (
+            not isinstance(self.checkpoint_interval, int)
+            or isinstance(self.checkpoint_interval, bool)
+            or self.checkpoint_interval < 0
+        ):
             raise ValueError("checkpoint_interval must be non-negative")
 
     @property
