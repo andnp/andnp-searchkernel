@@ -589,10 +589,31 @@ class RecordSearchPipeline:
         )
 
     def _cache_epochs(self) -> SearchEpochs:
+        values = {
+            lane: _read_lane_epoch(store, lane)
+            for lane, store in (
+                ("keyword", self._keyword_store),
+                ("vector", self._vector_store),
+                ("graph", self._graph_store),
+            )
+        }
+        missing = [
+            lane
+            for lane, store in (
+                ("keyword", self._keyword_store),
+                ("vector", self._vector_store),
+                ("graph", self._graph_store),
+            )
+            if store is not None and values[lane] is None
+        ]
+        if missing:
+            raise UnstableCacheKey(
+                f"missing mutation epoch for {', '.join(missing)} lane"
+            )
         return SearchEpochs(
-            keyword=_read_lane_epoch(self._keyword_store, "keyword"),
-            vector=_read_lane_epoch(self._vector_store, "vector"),
-            graph=_read_lane_epoch(self._graph_store, "graph"),
+            keyword=values["keyword"] or 0,
+            vector=values["vector"] or 0,
+            graph=values["graph"] or 0,
         )
 
     def _encoder_namespace_for_provider(self) -> str | None:
@@ -1128,9 +1149,9 @@ def _normalize_hits(
     return normalized
 
 
-def _read_lane_epoch(store: object | None, lane: str) -> int:
+def _read_lane_epoch(store: object | None, lane: str) -> int | None:
     if store is None:
-        return 0
+        return None
     epochs = getattr(store, "epochs", None)
     if callable(epochs):
         try:
