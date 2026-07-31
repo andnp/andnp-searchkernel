@@ -198,10 +198,15 @@ class RecordSearchConfig:
 
     candidate_multiplier: int = 5
     minimum_candidate_limit: int = 1
+    keyword_candidate_budget: int | None = None
+    vector_candidate_budget: int | None = None
     keyword_candidate_multiplier: int | None = None
     vector_candidate_multiplier: int | None = None
     rrf_k: float = 60.0
     weighted_rrf_enabled: bool = False
+    base_semantic_weight: float = 1.0
+    base_keyword_weight: float = 1.0
+    base_graph_weight: float = 1.0
     graph_fusion: Literal["rrf", "max"] = "rrf"
     graph_depth: int = 1
     max_graph_seeds: int = 10
@@ -292,6 +297,8 @@ class RecordSearchPipeline:
             QueryRouterConfig(
                 candidate_multiplier=self._config.candidate_multiplier,
                 minimum_candidate_limit=self._config.minimum_candidate_limit,
+                keyword_candidate_budget=self._config.keyword_candidate_budget,
+                vector_candidate_budget=self._config.vector_candidate_budget,
                 keyword_candidate_multiplier=(
                     self._config.keyword_candidate_multiplier
                 ),
@@ -302,6 +309,9 @@ class RecordSearchPipeline:
                 graph_depth=self._config.graph_depth,
                 rerank_budget=self._config.rerank_budget,
                 expansion_enabled=self._config.expansion_enabled,
+                base_semantic_weight=self._config.base_semantic_weight,
+                base_keyword_weight=self._config.base_keyword_weight,
+                base_graph_weight=self._config.base_graph_weight,
             )
         )
         self._validate_config()
@@ -759,6 +769,12 @@ class RecordSearchPipeline:
                         ),
                         "vector_candidate_multiplier": (
                             self._config.vector_candidate_multiplier
+                        ),
+                        "keyword_candidate_budget": (
+                            self._config.keyword_candidate_budget
+                        ),
+                        "vector_candidate_budget": (
+                            self._config.vector_candidate_budget
                         ),
                         "minimum_candidate_limit": (
                             self._config.minimum_candidate_limit
@@ -1318,8 +1334,19 @@ class RecordSearchPipeline:
             value = getattr(self._config, name)
             if value is not None and value < 1:
                 raise ValueError(f"{name} must be positive")
+        for name in ("keyword_candidate_budget", "vector_candidate_budget"):
+            value = getattr(self._config, name)
+            if value is not None and value < 1:
+                raise ValueError(f"{name} must be positive")
         if self._config.rrf_k <= 0:
             raise ValueError("rrf_k must be positive")
+        for name in (
+            "base_semantic_weight",
+            "base_keyword_weight",
+            "base_graph_weight",
+        ):
+            if getattr(self._config, name) < 0:
+                raise ValueError(f"{name} must not be negative")
         if self._config.artifact_confidence_threshold < 0:
             raise ValueError("artifact_confidence_threshold must not be negative")
         if self._config.rerank_budget < 0:

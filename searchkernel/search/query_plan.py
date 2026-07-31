@@ -63,6 +63,8 @@ class QueryRouterConfig:
 
     candidate_multiplier: int = 5
     minimum_candidate_limit: int = 1
+    keyword_candidate_budget: int | None = None
+    vector_candidate_budget: int | None = None
     keyword_candidate_multiplier: int | None = None
     vector_candidate_multiplier: int | None = None
     graph_seed_budget: int = 10
@@ -100,10 +102,12 @@ class QueryRouter:
         query_type = classify_query(query)
         keyword_budget = self._budget(
             limit,
+            self.config.keyword_candidate_budget,
             self.config.keyword_candidate_multiplier,
         )
         vector_budget = self._budget(
             limit,
+            self.config.vector_candidate_budget,
             self.config.vector_candidate_multiplier,
         )
         keyword_enabled = keyword_available
@@ -184,9 +188,16 @@ class QueryRouter:
             diagnostic_skip_reasons=tuple(skip_reasons),
         )
 
-    def _budget(self, limit: int, multiplier: int | None) -> int:
+    def _budget(
+        self,
+        limit: int,
+        configured_budget: int | None,
+        multiplier: int | None,
+    ) -> int:
         return max(
-            limit * (multiplier or self.config.candidate_multiplier),
+            configured_budget
+            if configured_budget is not None
+            else limit * (multiplier or self.config.candidate_multiplier),
             self.config.minimum_candidate_limit,
         )
 
@@ -196,6 +207,10 @@ class QueryRouter:
         if self.config.minimum_candidate_limit < 1:
             raise ValueError("minimum_candidate_limit must be positive")
         for name in ("keyword_candidate_multiplier", "vector_candidate_multiplier"):
+            value = getattr(self.config, name)
+            if value is not None and value < 1:
+                raise ValueError(f"{name} must be positive")
+        for name in ("keyword_candidate_budget", "vector_candidate_budget"):
             value = getattr(self.config, name)
             if value is not None and value < 1:
                 raise ValueError(f"{name} must be positive")
