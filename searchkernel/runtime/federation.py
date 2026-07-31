@@ -5,7 +5,7 @@ optionally reranked once over the fused candidate set.
 """
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import (
     dataclass,
 )
@@ -18,6 +18,11 @@ from searchkernel.domain import ScoredRef
 from searchkernel.ports.rerank import Reranker
 from searchkernel.runtime.fanout import FanoutDiagnostic, gather_with_timeout
 from searchkernel.runtime.registry import SourceRegistry
+from searchkernel.search.diversity import (
+    DiversityDiagnostic,
+    SourceDiversityPolicy,
+    apply_source_diversity,
+)
 from searchkernel.search.fusion import fuse_reciprocal_rank
 
 DEFAULT_PER_SOURCE_K = 10
@@ -31,7 +36,7 @@ class FederationSearchError(RuntimeError):
 
 @dataclass
 class FederationDiagnostic:
-    stage: Literal["source", "rerank"]
+    stage: Literal["source", "diversity", "rerank"]
     message: str
     exception_type: str = "Exception"
 
@@ -53,6 +58,8 @@ async def search_anything(
     candidate_hydrator: (
         Callable[[ScoredRef], str | None | Awaitable[str | None]] | None
     ) = None,
+    diversity_policy: SourceDiversityPolicy | None = None,
+    candidate_embeddings: Mapping[str, Sequence[float]] | None = None,
 ) -> list[ScoredRef]:
     """Fuse the registered sources into one reranked list of ScoredRefs.
 
@@ -152,6 +159,30 @@ async def search_anything(
             key=lambda item: (-item[1], first_seen[item[0]]),
         )
     ]
+
+    diversity_diagnostics: list[DiversityDiagnostic] | None = (
+        [] if diversity_policy is not None else None
+    )
+    fused = apply_source_diversity(
+        fused,
+        top_n=max(top_n, rerank_budget or 0),
+        policy=diversity_policy,
+        embeddings=candidate_embeddings,
+        diagnostics=diversity_diagnostics,
+    )
+    if diagnostics is not None and diversity_diagnostics is not None:
+        diagnostics.extend(
+            FederationDiagnostic(
+                stage="diversity",
+                message=f"{item.reason}"
+                + (
+                    f":{item.source_kind}:{item.source_id}"
+                    if item.source_kind is not None and item.source_id is not None
+                    else ""
+                ),
+            )
+            for item in diversity_diagnostics
+        )
 
     if reranker is None:
         return fused[:top_n]
