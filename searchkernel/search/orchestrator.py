@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from searchkernel.domain import (
@@ -13,7 +13,12 @@ from searchkernel.domain import (
 from searchkernel.pipeline.default_query_spec import DEFAULT_QUERY_SPEC
 from searchkernel.pipeline.executor import PipelineExecutor
 from searchkernel.pipeline.registry import DEFAULT_QUERY_STAGE_REGISTRY, StageDeps
-from searchkernel.pipeline.stage import SearchContext, replace_state
+from searchkernel.pipeline.stage import (
+    SearchContext,
+    replace_state,
+    require_state,
+    run_sync_stage,
+)
 from searchkernel.pipeline.stages.dedup_rerank import DedupRerankStage
 from searchkernel.pipeline.stages.seed_bookkeeping import (
     should_skip_expensive_factual_enrichments,
@@ -36,6 +41,7 @@ from searchkernel.search.query_execution import QueryExecutionContext
 from searchkernel.search.result_cache import QueryResultCache, QueryResultCacheKey
 from searchkernel.search.score_pipeline import ScorePipelineConfig
 from searchkernel.search.tag_expansion import expand_query_with_tags
+from searchkernel.search.types import SearchResultDict
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +105,7 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
     def _build_dedup_rerank_stage(
         self, config: SearchPipelineConfig
     ) -> DedupRerankStage:
-        return DEFAULT_QUERY_STAGE_REGISTRY["dedup_rerank"](asdict(config), StageDeps())
+        return DedupRerankStage(config)
 
     def _get_pipeline(self) -> DedupRerankStage:
         if self._pipeline is None:
@@ -169,8 +175,8 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
     def _should_skip_expensive_factual_enrichments(
         self,
         query_type: QueryType,
-        vector_results: list[dict[str, object]],
-        keyword_results: list[dict[str, object]],
+        vector_results: list[SearchResultDict],
+        keyword_results: list[SearchResultDict],
     ) -> bool:
         return should_skip_expensive_factual_enrichments(
             query_type, vector_results, keyword_results
@@ -317,7 +323,9 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
                         "chunk hydration failed during result assembly",
                     )
 
-        compression_stats = context.state.compression_stats
+        compression_stats = require_state(
+            context.state.compression_stats, "compression_stats"
+        )
         chunk_results = context.state.chunk_results
         strategy_stats = SearchStrategyStats(
             vector_count=len(context.state.vector_results),
@@ -368,7 +376,8 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
         metadata: dict[str, object] = {}
         if result_provenance is not None:
             metadata["result_provenance"] = result_provenance
-        context = stage.run(
+        context = run_sync_stage(
+            stage,
             SearchContext(query="", candidates=results, metadata=metadata)
         )
 
@@ -389,7 +398,8 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
         strategy_results: dict[str, list[tuple[str, float]]],
     ) -> dict[str, SearchResultProvenance]:
         stage = DEFAULT_QUERY_STAGE_REGISTRY["provenance"]({}, StageDeps())
-        context = stage.run(
+        context = run_sync_stage(
+            stage,
             SearchContext(query="", strategy_results=strategy_results)
         )
         return context.state.result_provenance
@@ -466,9 +476,9 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
 
     def _run_tag_expansion(
         self,
-        combined_initial_results: list[dict[str, object]],
+        combined_initial_results: list[SearchResultDict],
         top_k: int,
-    ) -> list[dict[str, object]]:
+    ) -> list[SearchResultDict]:
         return expand_query_with_tags(
             initial_results=combined_initial_results,
             graph=self._graph,
@@ -504,7 +514,8 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
         }
         if result_provenance is not None:
             metadata["result_provenance"] = result_provenance
-        context = stage.run(
+        context = run_sync_stage(
+            stage,
             SearchContext(query="", candidates=fused, metadata=metadata)
         )
         return context.candidates
@@ -530,7 +541,8 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
         metadata: dict[str, object] = {"active_project": active_project}
         if result_provenance is not None:
             metadata["result_provenance"] = result_provenance
-        context = stage.run(
+        context = run_sync_stage(
+            stage,
             SearchContext(query="", candidates=fused, metadata=metadata)
         )
         return context.candidates
@@ -550,7 +562,8 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
         stage = DEFAULT_QUERY_STAGE_REGISTRY["project_filter"](
             {}, StageDeps(get_chunk=get_chunk)
         )
-        context = stage.run(
+        context = run_sync_stage(
+            stage,
             SearchContext(
                 query="",
                 candidates=fused,
@@ -709,7 +722,9 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
             )
         )
         final = dedup_context.candidates
-        compression_stats = dedup_context.state.compression_stats
+        compression_stats = require_state(
+            dedup_context.state.compression_stats, "compression_stats"
+        )
 
         # Build strategy stats (HyDE only uses semantic search)
         strategy_stats = SearchStrategyStats(
@@ -744,7 +759,8 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
         stage = DEFAULT_QUERY_STAGE_REGISTRY["hydrate"](
             {}, StageDeps(hydrate_chunk_result=hydrate_chunk_result)
         )
-        context = stage.run(
+        context = run_sync_stage(
+            stage,
             SearchContext(query="", candidates=final, metadata=metadata)
         )
 

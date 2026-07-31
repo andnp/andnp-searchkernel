@@ -242,3 +242,14 @@ class AsyncSearchStage(Protocol):
     name: str
 
     async def run(self, context: SearchContext) -> SearchContext: ...
+
+
+def run_sync_stage(
+    stage: SearchStage | AsyncSearchStage, context: SearchContext
+) -> SearchContext:
+    """Run a stage that must be synchronous, narrowing its result."""
+
+    result = stage.run(context)
+    if not isinstance(result, SearchContext):
+        raise TypeError(f"stage {stage.name!r} unexpectedly returned an awaitable")
+    return result

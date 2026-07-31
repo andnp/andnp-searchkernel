@@ -16,8 +16,6 @@ I/O-bound.
 
 from __future__ import annotations
 
-import inspect
-
 from searchkernel.pipeline.registry import StageDeps, StageFactory
 from searchkernel.pipeline.spec import PipelineSpec
 from searchkernel.pipeline.stage import SearchContext
@@ -46,9 +44,9 @@ class PipelineExecutor:
             raise UnknownStageError(name) from exc
 
         result = factory(config, deps or StageDeps()).run(context)
-        if inspect.isawaitable(result):
-            return await result
-        return result
+        if isinstance(result, SearchContext):
+            return result
+        return await result
 
     async def run(
         self,

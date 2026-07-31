@@ -12,12 +12,11 @@ computed at the same point in the pipeline.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from itertools import chain
 
 from searchkernel.pipeline.stage import SearchContext, replace_state
 from searchkernel.search.classifier import QueryType
-from searchkernel.search.types import SearchResultDict
 
 _VECTOR_RESULTS_KEY = "vector_results"
 _KEYWORD_RESULTS_KEY = "keyword_results"
@@ -32,8 +31,8 @@ _FACTUAL_QUERY_CONSENSUS_DEPTH = 2
 
 
 def build_graph_seed_scores(
-    vector_results: Sequence[SearchResultDict],
-    keyword_results: Sequence[SearchResultDict],
+    vector_results: Sequence[Mapping[str, object]],
+    keyword_results: Sequence[Mapping[str, object]],
 ) -> dict[str, float]:
     """Best per-doc score across vector + keyword results, for graph seeding."""
     seed_scores: dict[str, float] = {}
@@ -54,8 +53,8 @@ def build_graph_seed_scores(
 
 def should_skip_expensive_factual_enrichments(
     query_type: QueryType,
-    vector_results: Sequence[SearchResultDict],
-    keyword_results: Sequence[SearchResultDict],
+    vector_results: Sequence[Mapping[str, object]],
+    keyword_results: Sequence[Mapping[str, object]],
 ) -> bool:
     """Whether a factual query already has a clear, consensus answer."""
     if query_type is not QueryType.FACTUAL:
