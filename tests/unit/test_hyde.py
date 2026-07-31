@@ -24,7 +24,7 @@ class MockVectorIndex:
     def search(
         self,
         query: str,
-        top_k: int,
+        top_k: int = 10,
         excluded_files: set[str] | None = None,
         docs_root: Path | None = None,
     ) -> list[SearchResultDict]:
