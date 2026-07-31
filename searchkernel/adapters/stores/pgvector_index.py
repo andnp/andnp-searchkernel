@@ -50,10 +50,10 @@ class _Embedder(Protocol):
     def embed_query(self, text: str) -> Vector: ...
 
 
-def _default_embedder(model_name: str) -> _Embedder:
+def _default_embedder(model_name: str, truncate_dim: int | None = None) -> _Embedder:
     from searchkernel.adapters.embedding import HuggingFaceEmbeddingProvider
 
-    return HuggingFaceEmbeddingProvider(model_name=model_name)
+    return HuggingFaceEmbeddingProvider(model_name=model_name, truncate_dim=truncate_dim)
 
 
 def _embedding_text(chunk: Chunk) -> str:
@@ -129,11 +129,13 @@ class PGVectorIndex:
         pg_dsn: str,
         embedding_model_name: str = "BAAI/bge-small-en-v1.5",
         embedder: _Embedder | None = None,
+        *,
+        truncate_dim: int | None = None,
     ):
         self._conn_pool = PostgresConnection(pg_dsn)
         _create_schema(self._conn_pool)
         self._store = PGVectorStore(self._conn_pool)
-        self._embedder = embedder or _default_embedder(embedding_model_name)
+        self._embedder = embedder or _default_embedder(embedding_model_name, truncate_dim=truncate_dim)
         self._model_name = self._embedder.model_name
         self._dim = self._embedder.dim
 

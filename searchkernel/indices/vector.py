@@ -139,6 +139,8 @@ class VectorIndex:
         embedding_model: EmbeddingModel | None = None,
         embedding_workers: int = 4,
         torch_num_threads: int = 4,
+        *,
+        truncate_dim: int | None = None,
     ):
         self._embedding_model_name = embedding_model_name
         self._embedding_model: EmbeddingModel | None = embedding_model
@@ -148,6 +150,7 @@ class VectorIndex:
         self._torch_num_threads = max(1, torch_num_threads)
         self._torch_threads_configured = False
         self._embedding_cache: object | None = None
+        self._truncate_dim = truncate_dim
 
         # Circuit breaker for embedding model failure protection
         self._embedding_circuit_breaker = CircuitBreaker(
@@ -237,7 +240,13 @@ class VectorIndex:
                 else:
                     from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
-                    model = HuggingFaceEmbedding(model_name=self._embedding_model_name)
+                    if self._truncate_dim is not None:
+                        model = HuggingFaceEmbedding(
+                            model_name=self._embedding_model_name,
+                            truncate_dim=self._truncate_dim,
+                        )
+                    else:
+                        model = HuggingFaceEmbedding(model_name=self._embedding_model_name)
                 Settings.embed_model = model
                 return model
 
