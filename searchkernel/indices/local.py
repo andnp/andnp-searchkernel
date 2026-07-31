@@ -207,10 +207,13 @@ class LocalRecordBackend:
     @classmethod
     def _initialize_graph_schema(cls, conn: sqlite3.Connection) -> None:
         foreign_keys = {
-            row[3]
+            (row[3], row[6].upper())
             for row in conn.execute("PRAGMA foreign_key_list(local_graph_edges)")
         }
-        if foreign_keys != {"source_id", "target_id"}:
+        if foreign_keys != {
+            ("source_id", "CASCADE"),
+            ("target_id", "CASCADE"),
+        }:
             conn.execute("DROP INDEX IF EXISTS idx_local_graph_source")
             conn.execute("DROP INDEX IF EXISTS idx_local_graph_target")
             conn.execute("DROP INDEX IF EXISTS idx_local_graph_source_type")
@@ -1396,7 +1399,7 @@ class LocalRecordBackend:
                 row = (edge[0], edge[1], edge[2], float(edge[3]))
             source_id = self._canonical_graph_storage_key(row[0])
             target_id = self._canonical_graph_storage_key(row[1])
-            if not row[2] or not math.isfinite(row[3]):
+            if not isinstance(row[2], str) or not row[2] or not math.isfinite(row[3]):
                 raise ValueError("graph edges require a finite weight and edge type")
             rows.append((source_id, target_id, row[2], row[3]))
         if not rows:
@@ -1460,6 +1463,8 @@ class LocalRecordBackend:
                 if len(edge) < 3:
                     raise ValueError("graph edges require at least three values")
                 row = (edge[0], edge[1], edge[2])
+            if not isinstance(row[2], str) or not row[2]:
+                raise ValueError("graph edges require a non-empty edge type")
             rows.append(
                 (
                     self._canonical_graph_storage_key(row[0]),
