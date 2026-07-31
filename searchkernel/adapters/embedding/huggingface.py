@@ -49,7 +49,7 @@ class HuggingFaceEmbeddingProvider:
         self._model: SentenceTransformer = SentenceTransformer(
             model_name, truncate_dim=truncate_dim, device=device
         )
-        native_dim = self._model.get_sentence_embedding_dimension()
+        native_dim = self._model.get_embedding_dimension()
         self.dim: int = truncate_dim if truncate_dim is not None else int(native_dim)
         # Whether the model ships a named "query" prompt we can reference.
         self._has_query_prompt = "query" in getattr(self._model, "prompts", {})
