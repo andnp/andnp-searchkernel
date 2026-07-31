@@ -1,7 +1,15 @@
 """Unit tests for evaluation runner."""
 
 from searchkernel.eval.golden import GoldenEntry, GoldenSet
-from searchkernel.eval.runner import ab_eval, run_eval
+from searchkernel.eval.runner import (
+    BenchmarkConfig,
+    BenchmarkHooks,
+    SearchExecution,
+    _percentile,
+    ab_eval,
+    run_benchmark,
+    run_eval,
+)
 
 
 def test_run_eval_perfect_search():
@@ -118,6 +126,149 @@ def test_run_eval_latency_percentiles():
     assert p99 is not None
     assert p50 <= p95
     assert p95 <= p99
+
+
+def test_percentile_uses_linear_interpolation_for_small_samples():
+    """Type 7 interpolation matches the documented one-to-many examples."""
+    assert _percentile([7.0], 50) == 7.0
+    assert _percentile([0.0, 10.0], 50) == 5.0
+    assert _percentile([0.0, 10.0, 20.0], 50) == 10.0
+    assert _percentile(list(map(float, range(100))), 95) == 94.05
+
+
+def test_run_eval_excludes_warmups_and_reports_repetitions():
+    """Only measured calls appear in snapshots and aggregate counts."""
+    calls: list[str] = []
+    golden_set = GoldenSet(
+        entries=[
+            GoldenEntry(query="q1", relevant_ids=["a"]),
+            GoldenEntry(query="q2", relevant_ids=["b"]),
+        ]
+    )
+
+    def search(query: str) -> list[str]:
+        calls.append(query)
+        return ["a" if query == "q1" else "b"]
+
+    report = run_eval(
+        golden_set,
+        search,
+        config=BenchmarkConfig(warmup_count=2, measured_repetitions=3),
+    )
+
+    assert len(calls) == 2 * (2 + 3)
+    assert len(report.metrics) == 2 * 3
+    assert {metric.repetition for metric in report.metrics} == {0, 1, 2}
+    assert report.warmup_count == 2
+
+
+def test_run_eval_concurrent_outputs_are_deterministic():
+    """Concurrent execution keeps input order and metric values stable."""
+    golden_set = GoldenSet(
+        entries=[
+            GoldenEntry(query="q1", relevant_ids=["a"]),
+            GoldenEntry(query="q2", relevant_ids=["b"]),
+        ]
+    )
+
+    def search(query: str) -> list[str]:
+        return ["a" if query == "q1" else "b"]
+
+    report = run_eval(
+        golden_set,
+        search,
+        config=BenchmarkConfig(measured_repetitions=2, concurrency=2),
+    )
+
+    assert [(metric.query, metric.repetition) for metric in report.metrics] == [
+        ("q1", 0),
+        ("q2", 0),
+        ("q1", 1),
+        ("q2", 1),
+    ]
+    assert [metric.recall_at_k for metric in report.metrics] == [1.0] * 4
+
+
+def test_run_eval_reports_graded_slices_and_trace():
+    """Graded nDCG, source slices, coverage, and stage timings are reported."""
+    golden_set = GoldenSet(
+        entries=[
+            GoldenEntry(
+                query="q",
+                relevant_ids=["high", "low"],
+                relevance={"high": 3.0, "low": 1.0},
+                query_type="identifier",
+                source_kinds=["docs", "issues"],
+                tags=["hard"],
+            )
+        ]
+    )
+
+    def search(query: str, *, trace) -> SearchExecution:
+        with trace.span("stage"):
+            return SearchExecution(
+                ids=("low", "high"),
+                source_kinds={"low": "issues", "high": "docs"},
+                trace=trace,
+            )
+
+    report = run_eval(
+        golden_set,
+        search,
+        k=2,
+        config=BenchmarkConfig(capture_trace=True, relevant_source_fn=lambda value: {
+            "high": "docs",
+            "low": "issues",
+        }[value]),
+    )
+
+    assert report.mean_ndcg_at_k is not None
+    assert report.mean_ndcg_at_k < 1.0
+    assert report.mean_source_coverage == 1.0
+    assert report.per_source_recall == {"docs": 1.0, "issues": 1.0}
+    assert report.slices["query_type:identifier"].count == 1
+    assert report.slices["source:docs"].count == 1
+    assert report.slices["tag:hard"].count == 1
+    assert report.metrics[0].stage_timings_ms["stage"] >= 0.0
+
+
+def test_run_benchmark_reports_cold_warm_and_metadata():
+    """Benchmark reports include lifecycle hooks and reproducibility fields."""
+    lifecycle: list[str] = []
+    golden_set = GoldenSet(
+        entries=[GoldenEntry(query="q", relevant_ids=["a"])]
+    )
+
+    def search(query: str) -> list[str]:
+        return ["a"]
+
+    report = run_benchmark(
+        golden_set,
+        search,
+        config=BenchmarkConfig(
+            warmup_count=1,
+            corpus_version="corpus-v1",
+            backend="fake",
+            model_fingerprint="model-v1",
+        ),
+        hooks=BenchmarkHooks(
+            before_cold=lambda: lifecycle.append("cold"),
+            before_warm=lambda: lifecycle.append("warm"),
+            build_index=lambda: lifecycle.append("build"),
+            load_index=lambda: lifecycle.append("load"),
+            index_size_bytes=lambda: 123,
+            rss_bytes=lambda: 456,
+        ),
+    )
+
+    assert lifecycle == ["build", "load", "cold", "warm"]
+    assert report.cold.mode == "cold"
+    assert report.warm.mode == "warm"
+    assert report.metadata["corpus_version"] == "corpus-v1"
+    assert report.metadata["config_fingerprint"]
+    assert report.metadata["environment_fingerprint"]
+    assert report.metadata["index_size_bytes"] == 123
+    assert report.metadata["rss_before_index_load_bytes"] == 456
 
 
 def test_run_eval_empty_golden_set():

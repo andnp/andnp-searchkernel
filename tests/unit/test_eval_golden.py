@@ -52,6 +52,41 @@ class TestGoldenEntry:
         assert restored.query == original.query
         assert restored.relevant_ids == original.relevant_ids
 
+    def test_golden_entry_preserves_optional_metadata_and_graded_ids(self):
+        """Graded relevance defines the positive-gain compatibility IDs."""
+        entry = GoldenEntry.from_dict(
+            {
+                "query": "graded query",
+                "relevant_ids": ["wrong"],
+                "relevance": {"high": 3.0, "low": 0.5, "excluded": 0.0},
+                "query_type": "identifier",
+                "source_kinds": ["docs"],
+                "workspace_id": "workspace-a",
+                "tags": ["hard"],
+                "corpus_version": "v1",
+                "split": "test",
+            }
+        )
+
+        assert entry.relevant_ids == ["high", "low"]
+        assert entry.relevance == {"high": 3.0, "low": 0.5, "excluded": 0.0}
+        assert entry.to_dict() == {
+            "query": "graded query",
+            "relevant_ids": ["high", "low"],
+            "relevance": {"high": 3.0, "low": 0.5, "excluded": 0.0},
+            "query_type": "identifier",
+            "source_kinds": ["docs"],
+            "workspace_id": "workspace-a",
+            "tags": ["hard"],
+            "corpus_version": "v1",
+            "split": "test",
+        }
+
+    def test_golden_entry_rejects_unknown_split(self):
+        """Dataset splits stay within the documented vocabulary."""
+        with pytest.raises(ValueError, match="split"):
+            GoldenEntry(query="query", split="benchmark")
+
 
 class TestGoldenSet:
     """Tests for GoldenSet dataclass."""
