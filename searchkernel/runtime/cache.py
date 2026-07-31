@@ -1,13 +1,13 @@
 """Epoch-aware caching decorator and utilities."""
 
 import hashlib
-import json
 import logging
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, TypeVar
 
 from searchkernel.ports.stores import CacheStore
+from searchkernel.runtime.canonical_cache import UnstableCacheKey, stable_json
 
 logger = logging.getLogger(__name__)
 
@@ -25,16 +25,9 @@ def _serialize_key_args(*args: Any, **kwargs: Any) -> str:
         A stable JSON string representation of the arguments.
     """
     try:
-        # Convert args and kwargs to serializable form
-        serializable = {
-            "args": args,
-            "kwargs": kwargs,
-        }
-        json_str = json.dumps(serializable, sort_keys=True, default=str)
-        return json_str
-    except (TypeError, ValueError):
-        # Fallback for non-serializable types
-        return repr((args, kwargs))
+        return stable_json({"args": args, "kwargs": kwargs})
+    except UnstableCacheKey as error:
+        raise TypeError("cache arguments must have stable representations") from error
 
 
 def _make_cache_key(prefix: str, *args: Any, epoch: int, **kwargs: Any) -> str:
