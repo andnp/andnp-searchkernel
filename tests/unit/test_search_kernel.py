@@ -5,8 +5,17 @@ from typing import Any
 import pytest
 
 from searchkernel import SearchAPI, SearchKernel
-from searchkernel.domain import Record, ScoredRef, SearchResult, SearchResultProvenance
-from searchkernel.runtime.local import LocalSearchSource
+from searchkernel.domain import (
+    ChunkResult,
+    Record,
+    ScoredRef,
+    SearchResult,
+    SearchResultProvenance,
+)
+from searchkernel.runtime.local import (
+    LegacyLocalOrchestratorAdapter,
+    LocalSearchSource,
+)
 from searchkernel.search.record_pipeline import RecordSearchOutcome, RecordSearchResult
 
 
@@ -147,3 +156,46 @@ async def test_local_search_source_exposes_canonical_record_identity_and_metadat
     assert orchestrator.calls == [
         ("query", 3, {"source_kinds": ["note"]})
     ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_local_adapter_is_explicit_and_preserves_chunk_metadata():
+    class _LegacyOrchestrator:
+        def __init__(self):
+            self.calls = []
+
+        async def query(
+            self,
+            query: str,
+            *,
+            top_k: int,
+            top_n: int,
+            source_filter: list[str] | None,
+        ):
+            self.calls.append((query, top_k, top_n, source_filter))
+            return (
+                [
+                    ChunkResult(
+                        chunk_id="chunk-1",
+                        record_id="record-1",
+                        score=0.9,
+                        content="legacy result",
+                        metadata={"file_path": "notes.md"},
+                    )
+                ],
+                object(),
+                object(),
+            )
+
+    legacy = _LegacyOrchestrator()
+    source = LocalSearchSource(LegacyLocalOrchestratorAdapter(legacy))
+
+    results = list(
+        await source.search("query", 3, filters={"source_filter": ["note"]})
+    )
+
+    assert results[0].source_id == "chunk-1"
+    assert results[0].source_kind == "local"
+    assert results[0].metadata["doc_id"] == "record-1"
+    assert results[0].metadata["text"] == "legacy result"
+    assert legacy.calls == [("query", 3, 3, ["note"])]

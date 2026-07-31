@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from searchkernel.domain import Record, RecordIdentity, RecordStatus
+from searchkernel.domain import GraphNeighbor, Record, RecordIdentity, RecordStatus
 from searchkernel.indices import (
     LocalGraphStore,
     LocalKeywordStore,
@@ -85,11 +85,11 @@ def test_local_store_uses_collision_safe_identity_and_filters(tmp_path) -> None:
     assert hydrated.body == records[0].body
     assert backend.hydrate_record("same") is None
     assert graph.neighbors(records[0].storage_key) == [
-        (records[1].storage_key, "related", 0.5)
+        GraphNeighbor(RecordIdentity("one", "commit", "same"), "related", 0.5)
     ]
     assert graph.neighbors(
         RecordIdentity("one", "note", "same")
-    ) == [(records[1].storage_key, "related", 0.5)]
+    ) == [GraphNeighbor(RecordIdentity("one", "commit", "same"), "related", 0.5)]
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,14 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from searchkernel.domain import Record, RecordHit, RecordIdentity, RecordStatus, Vector
+from searchkernel.domain import (
+    GraphNeighbor,
+    Record,
+    RecordHit,
+    RecordIdentity,
+    RecordStatus,
+    Vector,
+)
 from searchkernel.storage.db import DatabaseManager
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -411,7 +418,7 @@ class LocalRecordBackend:
         record_id: RecordIdentity | str,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> list[tuple[str, str, float]]:
+    ) -> list[GraphNeighbor]:
         if depth < 1:
             raise ValueError("depth must be positive")
         allowed = set(edge_types) if edge_types else None
@@ -451,12 +458,31 @@ class LocalRecordBackend:
                 frontier = next_frontier
         return sorted(
             (
-                (target_id, edge_type, weight)
+                GraphNeighbor(
+                    self._identity_from_storage_key(target_id),
+                    edge_type,
+                    weight,
+                )
                 for target_id, (edge_type, weight) in best.items()
             ),
-            key=lambda item: (-item[2], item[0], item[1]),
+            key=lambda item: (-item.weight, item.identity.storage_key, item.edge_type),
         )
 
+    @staticmethod
+    def _identity_from_storage_key(storage_key: str) -> RecordIdentity:
+        if storage_key.startswith("record:"):
+            try:
+                workspace_id, source_kind, source_id = json.loads(storage_key[7:])
+            except (TypeError, ValueError):
+                pass
+            else:
+                if (
+                    (workspace_id is None or isinstance(workspace_id, str))
+                    and isinstance(source_kind, str)
+                    and isinstance(source_id, str)
+                ):
+                    return RecordIdentity(workspace_id, source_kind, source_id)
+        return RecordIdentity(None, "legacy", storage_key)
 
 class LocalVectorStore:
     """VectorStore implementation backed by the local record database."""
@@ -516,7 +542,7 @@ class LocalGraphStore:
         record_id: RecordIdentity | str,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> list[tuple[str, str, float]]:
+    ) -> list[GraphNeighbor]:
         return self._backend.neighbors(record_id, edge_types, depth)
 
 
