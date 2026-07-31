@@ -29,6 +29,10 @@ from searchkernel.domain import (
     RecordStatus,
     Vector,
 )
+from searchkernel.domain.vector_filters import (
+    metadata_mapping,
+    record_matches_vector_filters,
+)
 from searchkernel.indices import keyword_scoring as _keyword_scoring
 from searchkernel.indices.faiss_local import FAISSLocalVectorStore
 from searchkernel.indices.local_vectors import (
@@ -596,28 +600,16 @@ class LocalRecordBackend:
         row: sqlite3.Row,
         filters: dict[str, Any] | None,
     ) -> bool:
-        filters = filters or {}
-        if row["status"] not in cls._status_values(filters):
-            return False
-        workspace_id = filters.get("workspace_id")
-        if workspace_id is not None and row["workspace_id"] != workspace_id:
-            return False
-        source_kinds = filters.get("source_kinds")
-        if source_kinds is None and filters.get("source_kind") is not None:
-            source_kinds = [filters["source_kind"]]
-        if source_kinds is not None:
-            source_values = {
-                value.value if isinstance(value, RecordStatus) else str(value)
-                for value in cls._filter_values(source_kinds)
-            }
-            if row["source_kind"] not in source_values:
-                return False
-        candidate_ids = filters.get("candidate_ids")
-        if candidate_ids is None:
-            candidate_ids = filters.get("candidate_storage_keys")
-        if candidate_ids is None:
-            return True
-        return row["storage_key"] in cls._filter_values(candidate_ids)
+        return record_matches_vector_filters(
+            storage_key=row["storage_key"],
+            source_id=row["source_id"],
+            workspace_id=row["workspace_id"],
+            source_kind=row["source_kind"],
+            status=row["status"],
+            metadata=metadata_mapping(row["metadata"]),
+            uri=row["uri"],
+            filters=filters,
+        )
 
     def _record_rows(self) -> list[sqlite3.Row]:
         conn = self._db.get_connection()
@@ -862,7 +854,7 @@ class LocalRecordBackend:
                 rows = conn.execute(
                     """
                     SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                           r.status, v.embedding, v.format_version,
+                           r.status, r.metadata, r.uri, v.embedding, v.format_version,
                            v.normalization_policy
                     FROM local_records r
                     JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
@@ -942,7 +934,7 @@ class LocalRecordBackend:
                 rows = conn.execute(
                     """
                     SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                           r.status, v.embedding, v.format_version,
+                           r.status, r.metadata, r.uri, v.embedding, v.format_version,
                            v.normalization_policy
                     FROM local_records r
                     JOIN local_vectors_v2 v ON v.storage_key = r.storage_key

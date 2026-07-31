@@ -9,6 +9,11 @@ from typing import Any
 
 import numpy as np
 
+from searchkernel.domain.vector_filters import (
+    metadata_mapping,
+    record_matches_vector_filters,
+)
+
 VECTOR_FORMAT_VERSION = 2
 NORMALIZATION_POLICY = "l2"
 
@@ -123,6 +128,8 @@ class VectorSnapshot:
     workspace_ids: np.ndarray
     source_kinds: np.ndarray
     statuses: np.ndarray
+    metadata: tuple[dict[str, Any], ...]
+    uris: tuple[str | None, ...]
 
     @classmethod
     def from_rows(
@@ -139,6 +146,8 @@ class VectorSnapshot:
         workspace_ids: list[str | None] = []
         source_kinds: list[str] = []
         statuses: list[str] = []
+        metadata: list[dict[str, Any]] = []
+        uris: list[str | None] = []
         for row in rows:
             if (
                 row["format_version"] != VECTOR_FORMAT_VERSION
@@ -157,6 +166,8 @@ class VectorSnapshot:
             workspace_ids.append(row["workspace_id"])
             source_kinds.append(row["source_kind"])
             statuses.append(row["status"])
+            metadata.append(dict(metadata_mapping(row["metadata"])))
+            uris.append(row["uri"])
         matrix = (
             np.ascontiguousarray(np.vstack(vectors), dtype="<f4")
             if vectors
@@ -179,6 +190,8 @@ class VectorSnapshot:
             workspace_ids=arrays[1],
             source_kinds=arrays[2],
             statuses=arrays[3],
+            metadata=tuple(metadata),
+            uris=tuple(uris),
         )
 
     def filter_mask(
@@ -188,33 +201,30 @@ class VectorSnapshot:
         status_values: set[str],
         filter_values: Any,
     ) -> np.ndarray:
-        filters = filters or {}
-        mask = np.isin(self.statuses, tuple(status_values))
-        workspace_id = filters.get("workspace_id")
-        if workspace_id is not None:
-            mask &= self.workspace_ids == workspace_id
-        source_kinds = filters.get("source_kinds")
-        if source_kinds is None and filters.get("source_kind") is not None:
-            source_kinds = [filters["source_kind"]]
-        if source_kinds is not None:
-            values = filter_values(source_kinds)
-            if not values:
-                return np.zeros(len(self.storage_keys), dtype=bool)
-            mask &= np.isin(self.source_kinds, tuple(str(value) for value in values))
-        candidate_ids = filters.get("candidate_ids")
-        if candidate_ids is None:
-            candidate_ids = filters.get("candidate_storage_keys")
-        if candidate_ids is not None:
-            values = {str(value) for value in filter_values(candidate_ids)}
-            if not values:
-                return np.zeros(len(self.storage_keys), dtype=bool)
-            mask &= np.asarray(
-                [
-                    storage_key in values or source_id in values
-                    for storage_key, source_id in zip(
-                        self.storage_keys, self.source_ids, strict=True
-                    )
-                ],
-                dtype=bool,
-            )
-        return mask
+        return np.asarray(
+            [
+                record_matches_vector_filters(
+                    storage_key=storage_key,
+                    source_id=str(source_id),
+                    workspace_id=(
+                        str(workspace_id) if workspace_id is not None else None
+                    ),
+                    source_kind=str(source_kind),
+                    status=str(status),
+                    metadata=metadata,
+                    uri=uri,
+                    filters=filters,
+                )
+                for storage_key, source_id, workspace_id, source_kind, status, metadata, uri in zip(
+                    self.storage_keys,
+                    self.source_ids,
+                    self.workspace_ids,
+                    self.source_kinds,
+                    self.statuses,
+                    self.metadata,
+                    self.uris,
+                    strict=True,
+                )
+            ],
+            dtype=bool,
+        )
