@@ -694,17 +694,31 @@ class RecordSearchPipeline:
         misses: list[RecordSearchCandidate] = []
         if self._hydration_cache is not None and self._policy_version is not None:
             for candidate in candidates:
-                version = await self._hydration_version_for(candidate.identity)
+                try:
+                    version = await self._hydration_version_for(candidate.identity)
+                except Exception as error:  # noqa: BLE001 - cache is optional
+                    misses.append(candidate)
+                    diagnostics.append(
+                        f"hydration_cache:bypass:{type(error).__name__}"
+                    )
+                    continue
                 if version is None:
                     misses.append(candidate)
                     continue
-                key = HydrationCacheKey.build(
-                    candidate.identity,
-                    record_version=version,
-                    policy_version=self._policy_version,
-                )
-                versioned.append((candidate, key))
-                hit, record = self._hydration_cache.lookup(key)
+                try:
+                    key = HydrationCacheKey.build(
+                        candidate.identity,
+                        record_version=version,
+                        policy_version=self._policy_version,
+                    )
+                    hit, record = self._hydration_cache.lookup(key)
+                    versioned.append((candidate, key))
+                except Exception as error:  # noqa: BLE001 - cache is optional
+                    misses.append(candidate)
+                    diagnostics.append(
+                        f"hydration_cache:bypass:{type(error).__name__}"
+                    )
+                    continue
                 if hit:
                     cached.append((candidate, record))
                     diagnostics.append("hydration_cache:hit")
