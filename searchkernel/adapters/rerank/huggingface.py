@@ -8,10 +8,53 @@ This is an ADDITIVE port implementation. No live path is affected.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import ItemsView
+from typing import TYPE_CHECKING, Protocol, Self, TypeGuard
 
 if TYPE_CHECKING:
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from torch import Tensor
+
+
+class _TokenizedInputs(Protocol):
+    def items(self) -> ItemsView[str, object]: ...
+
+    def to(self, device: str, /) -> Self: ...
+
+
+class _Tokenizer(Protocol):
+    def __call__(
+        self,
+        text: str,
+        *,
+        return_tensors: str,
+        padding: bool,
+        truncation: bool,
+        max_length: int,
+    ) -> _TokenizedInputs: ...
+
+    def encode(self, text: str, *, add_special_tokens: bool) -> list[int]: ...
+
+
+class _ModelOutput(Protocol):
+    logits: Tensor
+
+
+class _CausalLM(Protocol):
+    def __call__(self, **inputs: object) -> _ModelOutput: ...
+
+    def to(self, device: str, /) -> Self: ...
+
+    def eval(self) -> Self: ...
+
+
+def _is_tokenizer(value: object) -> TypeGuard[_Tokenizer]:
+    return callable(value) and callable(getattr(value, "encode", None))
+
+
+def _is_causal_lm(value: object) -> TypeGuard[_CausalLM]:
+    return all(
+        callable(getattr(value, attribute, None)) for attribute in ("__call__", "to", "eval")
+    )
 
 
 class HuggingFaceReranker:
@@ -36,11 +79,15 @@ class HuggingFaceReranker:
         self._device = device or ("cuda" if self._has_cuda() else "cpu")
 
         # Load tokenizer and model
-        self._tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained(model_name)
-        self._model: AutoModelForCausalLM = AutoModelForCausalLM.from_pretrained(
+        tokenizer: object = AutoTokenizer.from_pretrained(model_name)
+        model: object = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype="auto",
-        ).to(self._device)
+        )
+        if not _is_tokenizer(tokenizer) or not _is_causal_lm(model):
+            raise TypeError("Loaded HuggingFace components do not match the adapter protocol")
+        self._tokenizer = tokenizer
+        self._model = model.to(self._device)
         self._model.eval()
 
         # Resolve yes/no token ids via the tokenizer
@@ -114,7 +161,10 @@ class HuggingFaceReranker:
 
             # Forward pass; get logits at final position
             with torch.no_grad():
-                outputs = self._model(**inputs, output_hidden_states=False)
+                outputs = self._model(
+                    **dict(inputs.items()),
+                    output_hidden_states=False,
+                )
                 logits = outputs.logits[0, -1, :]  # (vocab_size,)
 
             # Softmax over yes/no tokens
