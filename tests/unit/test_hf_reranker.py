@@ -10,6 +10,8 @@ import pytest
 from searchkernel.adapters.rerank import HuggingFaceReranker
 from searchkernel.ports import Reranker
 
+pytestmark = [pytest.mark.slow, pytest.mark.real_embeddings]
+
 
 class TestHuggingFaceRerankerConformance:
     """Test port conformance."""

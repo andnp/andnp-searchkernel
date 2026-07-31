@@ -21,6 +21,8 @@ import pytest
 from searchkernel.domain import Chunk
 from searchkernel.indices.vector import STOPWORDS, VectorIndex
 
+pytestmark = [pytest.mark.slow, pytest.mark.real_embeddings]
+
 
 def _with_hash(chunk):
     """Finalize a freshly-built domain.Chunk (test helper).
