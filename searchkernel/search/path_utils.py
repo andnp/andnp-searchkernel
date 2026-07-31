@@ -61,6 +61,9 @@ def compute_doc_id_multi_root(file_path: Path, docs_roots: list[Path]) -> str:
     resolved_path = file_path.resolve()
     common_root = _compute_common_docs_root(docs_roots)
 
+    if common_root is None:
+        return str(resolved_path.with_suffix("")).replace("\\", "/")
+
     for docs_root in docs_roots:
         try:
             resolved_path.relative_to(docs_root.resolve())
@@ -68,15 +71,12 @@ def compute_doc_id_multi_root(file_path: Path, docs_roots: list[Path]) -> str:
         except ValueError:
             continue
 
-    if common_root is not None:
-        logger.warning(
-            "File %s is outside configured document roots %s. Falling back to common ancestor.",
-            file_path,
-            docs_roots,
-        )
-        return compute_doc_id(resolved_path, common_root)
-
-    return str(resolved_path.with_suffix("")).replace("\\", "/")
+    logger.warning(
+        "File %s is outside configured document roots %s. Falling back to common ancestor.",
+        file_path,
+        docs_roots,
+    )
+    return compute_doc_id(resolved_path, common_root)
 
 
 def _compute_common_docs_root(docs_roots: list[Path]) -> Path | None:

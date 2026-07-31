@@ -50,6 +50,9 @@ def find_excluded_indexed_files(
     """
     excluded_doc_ids: list[str] = []
     indexed_files = manifest.indexed_files or {}
+    configured_roots: list[str | Path] = (
+        [*docs_roots] if docs_roots else [docs_path]
+    )
 
     for doc_id, rel_path in indexed_files.items():
         # Reconstruct absolute path for pattern matching
@@ -60,7 +63,7 @@ def find_excluded_indexed_files(
             include_patterns,
             exclude_patterns,
             exclude_hidden_dirs,
-            documents_roots=docs_roots or [docs_path],
+            documents_roots=configured_roots,
         ):
             excluded_doc_ids.append(doc_id)
             logger.info(f"Indexed file now excluded by pattern: {rel_path}")

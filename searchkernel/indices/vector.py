@@ -7,7 +7,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, TypeGuard, cast
 
 if TYPE_CHECKING:
     from searchkernel.storage.db import DatabaseManager
@@ -132,6 +132,37 @@ class EmbeddingModel(Protocol):
     def get_text_embedding(self, text: str) -> list[float]: ...
 
 
+class CacheableEmbeddingModel(EmbeddingModel, Protocol):
+    embeddings_cache: object
+
+
+def _has_embedding_cache(
+    model: EmbeddingModel,
+) -> TypeGuard[CacheableEmbeddingModel]:
+    return hasattr(model, "embeddings_cache")
+
+
+def _set_embedding_cache(model: EmbeddingModel, cache: object) -> None:
+    if _has_embedding_cache(model):
+        model.embeddings_cache = cache
+
+
+class NodeWithContent(Protocol):
+    def get_content(self) -> str: ...
+
+
+class NodeWithText(Protocol):
+    text: str
+
+
+def _has_node_content(node: object) -> TypeGuard[NodeWithContent]:
+    return callable(getattr(node, "get_content", None))
+
+
+def _has_node_text(node: object) -> TypeGuard[NodeWithText]:
+    return isinstance(getattr(node, "text", None), str)
+
+
 class VectorIndex:
     def __init__(
         self,
@@ -189,7 +220,7 @@ class VectorIndex:
         )  # Protects index operations during concurrent access
 
         if embedding_model is not None and self._embedding_cache is not None:
-            embedding_model.embeddings_cache = self._embedding_cache
+            _set_embedding_cache(embedding_model, self._embedding_cache)
 
     def set_embedding_cache(self, cache: object) -> None:
         """Attach a llama_index-shaped embeddings cache (get/put by text key).
@@ -200,7 +231,7 @@ class VectorIndex:
         """
         self._embedding_cache = cache
         if self._embedding_model is not None:
-            self._embedding_model.embeddings_cache = cache
+            _set_embedding_cache(self._embedding_model, cache)
 
     def _ensure_model_loaded(self, timeout: float = 120.0) -> None:
         """Load the embedding model with timeout and circuit breaker protection.
@@ -258,7 +289,9 @@ class VectorIndex:
                         lambda: future.result(timeout=timeout)
                     )
                     if self._embedding_cache is not None:
-                        self._embedding_model.embeddings_cache = self._embedding_cache
+                        _set_embedding_cache(
+                            self._embedding_model, self._embedding_cache
+                        )
                     self._model_loaded = True
                     logger.info(f"Embedding model loaded: {self._embedding_model_name}")
             except CircuitBreakerOpen as e:
@@ -557,11 +590,7 @@ class VectorIndex:
                     return False
 
                 # Extract content
-                text_content = (
-                    old_node.get_content()
-                    if hasattr(old_node, "get_content")
-                    else getattr(old_node, "text", "")
-                )
+                text_content = self._extract_node_text(old_node)
                 if not text_content:
                     logger.warning(f"No content for {old_chunk_id}")
                     return False
@@ -772,11 +801,7 @@ class VectorIndex:
             if doc_id and doc_id in self._tombstoned_docs:
                 continue
 
-            node_text = (
-                node.node.get_content()
-                if hasattr(node.node, "get_content")
-                else getattr(node.node, "text", "")
-            )
+            node_text = self._extract_node_text(node.node)
 
             if chunk_id:
                 results.append(
@@ -831,11 +856,7 @@ class VectorIndex:
 
             if node:
                 logger.debug(f"get_chunk_by_id({chunk_id}): found in docstore")
-                node_text = (
-                    node.get_content()
-                    if hasattr(node, "get_content")
-                    else getattr(node, "text", "")
-                )
+                node_text = self._extract_node_text(node)
                 return {
                     "chunk_id": chunk_id,
                     "doc_id": node.metadata.get("doc_id"),
@@ -1279,11 +1300,7 @@ class VectorIndex:
             embedding = getattr(node, "embedding", None)
             if embedding is not None:
                 return list(embedding)
-            text = (
-                node.get_content()
-                if hasattr(node, "get_content")
-                else getattr(node, "text", "")
-            )
+            text = self._extract_node_text(node)
             if not text:
                 return None
             return self.get_text_embedding(text)
@@ -1562,11 +1579,11 @@ class VectorIndex:
         )
 
     def _extract_node_text(self, node: object) -> str:
-        return (
-            node.get_content()
-            if hasattr(node, "get_content")
-            else getattr(node, "text", "")
-        )
+        if _has_node_content(node):
+            return node.get_content()
+        if _has_node_text(node):
+            return node.text
+        return ""
 
     def _get_node_from_docstore(self, node_id: str):
         if self._index is None:
