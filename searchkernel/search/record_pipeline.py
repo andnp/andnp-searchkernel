@@ -299,14 +299,13 @@ class RecordSearchPipeline:
                         vector_filters = dict(filters)
                         vector_filters["candidate_ids"] = list(candidate_ids)
                 vector_ranking = _normalize_hits(
-                    await _maybe_await(
-                        self._vector_store.search(
-                            vector,
-                            acquisition_limit,
-                            model_name=model_name,
-                            dim=dim,
-                            filters=vector_filters,
-                        )
+                    await _search_vector_store(
+                        self._vector_store,
+                        vector,
+                        acquisition_limit,
+                        model_name=model_name,
+                        dim=dim,
+                        filters=vector_filters,
                     ),
                     filters,
                     sort=False,
@@ -688,3 +687,41 @@ async def _maybe_await[T](value: T | Awaitable[T]) -> T:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+async def _search_vector_store(
+    store: VectorStore | AsyncVectorStore,
+    vector: Vector,
+    k: int,
+    *,
+    model_name: str,
+    dim: int,
+    filters: dict[str, object] | None,
+) -> Sequence[RecordHit | tuple[str, float]]:
+    async_search = getattr(store, "async_search", None)
+    if callable(async_search):
+        return await _maybe_await(
+            cast(
+                Callable[
+                    ...,
+                    Sequence[RecordHit | tuple[str, float]]
+                    | Awaitable[Sequence[RecordHit | tuple[str, float]]],
+                ],
+                async_search,
+            )(
+                vector,
+                k,
+                model_name=model_name,
+                dim=dim,
+                filters=filters,
+            )
+        )
+    return await _maybe_await(
+        store.search(
+            vector,
+            k,
+            model_name=model_name,
+            dim=dim,
+            filters=filters,
+        )
+    )

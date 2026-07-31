@@ -7,6 +7,7 @@ the ingestion surface, but query execution uses canonical record identities.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
@@ -29,6 +30,7 @@ from searchkernel.domain import (
     Vector,
 )
 from searchkernel.indices import keyword_scoring as _keyword_scoring
+from searchkernel.indices.faiss_local import FAISSLocalVectorStore
 from searchkernel.indices.local_vectors import (
     NORMALIZATION_POLICY,
     VECTOR_FORMAT_VERSION,
@@ -67,11 +69,17 @@ class LocalRecordBackend:
         *,
         db_manager: DatabaseManager | None = None,
         keyword_overfetch_multiplier: float = 4.0,
+        vector_engine: str = "exact",
+        faiss_threshold: int = 50_000,
     ) -> None:
         if db_manager is not None and db_path is not None:
             raise ValueError("pass db_path or db_manager, not both")
         if not math.isfinite(keyword_overfetch_multiplier) or keyword_overfetch_multiplier < 1.0:
             raise ValueError("keyword_overfetch_multiplier must be finite and at least 1")
+        if vector_engine not in {"exact", "faiss", "auto"}:
+            raise ValueError("vector_engine must be exact, faiss, or auto")
+        if faiss_threshold < 1:
+            raise ValueError("faiss_threshold must be positive")
         self._db = db_manager or (
             DatabaseManager(db_path) if db_path is not None else _EphemeralDatabase()
         )
@@ -79,6 +87,8 @@ class LocalRecordBackend:
         self._snapshot_lock = threading.RLock()
         self._vector_snapshots: dict[tuple[str, int], VectorSnapshot] = {}
         self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
+        self._vector_engine = vector_engine
+        self._faiss_threshold = faiss_threshold
         self._fts5_available = False
         self._keyword_search_diagnostic = (
             "FTS5 indexed lexical search has not been initialized"
@@ -790,6 +800,27 @@ class LocalRecordBackend:
             for index, position in selected
         ]
 
+    @property
+    def vector_engine(self) -> str:
+        return self._vector_engine
+
+    @property
+    def faiss_threshold(self) -> int:
+        return self._faiss_threshold
+
+    def vector_count(self, model_name: str, dim: int) -> int:
+        with self._lock:
+            conn = self._db.get_connection()
+            row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM local_vectors_v2
+                WHERE encoder_namespace = ? AND dim = ?
+                """,
+                (model_name, dim),
+            ).fetchone()
+            return int(row[0]) if row else 0
+
     def _get_vector_snapshot(self, model_name: str, dim: int) -> VectorSnapshot:
         key = (model_name, dim)
         with self._snapshot_lock:
@@ -1155,8 +1186,49 @@ class LocalRecordBackend:
 class LocalVectorStore:
     """VectorStore implementation backed by the local record database."""
 
-    def __init__(self, backend: LocalRecordBackend):
+    def __init__(
+        self,
+        backend: LocalRecordBackend,
+        *,
+        engine: str | None = None,
+        faiss_path: Path | None = None,
+    ):
         self._backend = backend
+        self._engine = engine or backend.vector_engine
+        if self._engine not in {"exact", "faiss", "auto"}:
+            raise ValueError("engine must be exact, faiss, or auto")
+        self._faiss_path = faiss_path
+        self._faiss_store: Any | None = None
+        self._last_engine_name = (
+            "faiss" if self._engine == "faiss" else "sqlite-exact"
+        )
+
+    @property
+    def engine_name(self) -> str:
+        return self._last_engine_name
+
+    def _selected_store(
+        self,
+        model_name: str,
+        dim: int,
+    ) -> Any | None:
+        use_faiss = self._engine == "faiss" or (
+            self._engine == "auto"
+            and self._backend.vector_count(model_name, dim)
+            >= self._backend.faiss_threshold
+        )
+        if not use_faiss:
+            self._last_engine_name = "sqlite-exact"
+            return None
+        self._last_engine_name = "faiss"
+        if self._faiss_store is None:
+            from searchkernel.indices.faiss_local import FAISSLocalVectorStore
+
+            self._faiss_store = FAISSLocalVectorStore(
+                self._backend,
+                index_path=self._faiss_path,
+            )
+        return self._faiss_store
 
     def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
         self._backend.upsert(records, model_name, dim)
@@ -1170,8 +1242,35 @@ class LocalVectorStore:
         dim: int,
         filters: dict[str, Any] | None = None,
     ) -> list[RecordHit]:
+        faiss_store = self._selected_store(model_name, dim)
+        if faiss_store is not None:
+            return faiss_store.search(
+                query_vector,
+                k,
+                model_name=model_name,
+                dim=dim,
+                filters=filters,
+            )
         return self._backend.search_vector(
             query_vector, k, model_name=model_name, dim=dim, filters=filters
+        )
+
+    async def async_search(
+        self,
+        query_vector: Vector,
+        k: int,
+        *,
+        model_name: str,
+        dim: int,
+        filters: dict[str, Any] | None = None,
+    ) -> list[RecordHit]:
+        return await asyncio.to_thread(
+            self.search,
+            query_vector,
+            k,
+            model_name=model_name,
+            dim=dim,
+            filters=filters,
         )
 
     def delete(self, record_ids: list[str]) -> None:
@@ -1179,6 +1278,13 @@ class LocalVectorStore:
 
     def epoch(self) -> int:
         return self._backend.epoch()
+
+
+class SQLiteExactVectorStore(LocalVectorStore):
+    """Truthful name for the default packed exact vector engine."""
+
+    def __init__(self, backend: LocalRecordBackend):
+        super().__init__(backend, engine="exact")
 
 
 class LocalKeywordStore:
@@ -1231,16 +1337,18 @@ class LocalGraphStore:
         return self._backend.neighbors(record_id, edge_types, depth)
 
 
-FAISSVectorStore = LocalVectorStore
+FAISSVectorStore = FAISSLocalVectorStore
 SQLiteKeywordStore = LocalKeywordStore
 SQLiteGraphStore = LocalGraphStore
 
 __all__ = [
+    "FAISSLocalVectorStore",
     "FAISSVectorStore",
     "LocalGraphStore",
     "LocalKeywordStore",
     "LocalRecordBackend",
     "LocalVectorStore",
+    "SQLiteExactVectorStore",
     "SQLiteGraphStore",
     "SQLiteKeywordStore",
 ]
