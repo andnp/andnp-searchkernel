@@ -101,6 +101,33 @@ def test_local_store_uses_collision_safe_identity_and_filters(tmp_path) -> None:
     ) == [GraphNeighbor(RecordIdentity("one", "commit", "same"), "related", 0.5)]
 
 
+def test_local_batch_hydration_and_graph_preserve_canonical_keys(tmp_path) -> None:
+    backend, _keyword, _vector, graph = _backend(tmp_path)
+    source = _record("note", "source", "source", workspace_id="one")
+    target = _record("commit", "target", "target", workspace_id="two")
+    source_identity = RecordIdentity("one", "note", "source")
+    target_identity = RecordIdentity("two", "commit", "target")
+    backend.index([source, target])
+    graph.upsert_edges([(source.storage_key, target.storage_key, "related", 0.5)])
+
+    hydrated = backend.hydrate_records([source_identity, target_identity])
+    neighbors = graph.neighbors_many([source_identity], depth=1)
+
+    hydrated_records = [
+        hydrated[identity.storage_key]
+        for identity in (source_identity, target_identity)
+    ]
+    assert all(record is not None for record in hydrated_records)
+    assert [
+        record.storage_key
+        for record in hydrated_records
+        if record is not None
+    ] == [source.storage_key, target.storage_key]
+    assert neighbors == {
+        source.storage_key: [GraphNeighbor(target_identity, "related", 0.5)]
+    }
+
+
 def test_keyword_search_supports_tokens_phrases_prefixes_artifacts_and_symbols(
     tmp_path,
 ) -> None:

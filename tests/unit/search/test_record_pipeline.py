@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import cast
@@ -480,3 +482,436 @@ async def test_graph_neighbors_preserve_canonical_identity() -> None:
         seed.storage_key,
         target.storage_key,
     ]
+
+
+async def test_keyword_and_embedding_work_overlap_without_candidate_gating() -> None:
+    records = {"a": _record("a")}
+    keyword_started = asyncio.Event()
+    embedding_started = asyncio.Event()
+    release = asyncio.Event()
+    vector_started = asyncio.Event()
+
+    class Keyword:
+        async def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit | tuple[str, float]]:
+            keyword_started.set()
+            await release.wait()
+            return [("a", 1.0)]
+
+    class Embedder:
+        model_name = "fake-model"
+        dim = 2
+
+        async def embed_query(self, text: str) -> list[float]:
+            embedding_started.set()
+            await release.wait()
+            return [1.0, 0.0]
+
+    class Vector:
+        async def search(
+            self,
+            query_vector: list[float],
+            k: int,
+            *,
+            model_name: str,
+            dim: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit | tuple[str, float]]:
+            vector_started.set()
+            return [("a", 1.0)]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=Keyword(),
+        vector_store=Vector(),
+        embedding_provider=Embedder(),
+        hydrator=_hydrator(records),
+    )
+    task = asyncio.create_task(pipeline.async_search("query", limit=1))
+    await asyncio.wait_for(
+        asyncio.gather(keyword_started.wait(), embedding_started.wait()),
+        timeout=1,
+    )
+    assert not vector_started.is_set()
+    release.set()
+    await task
+    assert vector_started.is_set()
+
+
+async def test_candidate_gating_delays_vector_lookup_until_keyword_ids_arrive() -> None:
+    keyword_started = asyncio.Event()
+    keyword_finished = asyncio.Event()
+    embedding_started = asyncio.Event()
+    release_keyword = asyncio.Event()
+    vector_started = asyncio.Event()
+
+    class Keyword:
+        async def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit | tuple[str, float]]:
+            keyword_started.set()
+            await release_keyword.wait()
+            keyword_finished.set()
+            return [("a", 1.0)]
+
+    class Embedder:
+        model_name = "fake-model"
+        dim = 2
+
+        async def embed_query(self, text: str) -> list[float]:
+            embedding_started.set()
+            return [1.0, 0.0]
+
+    class Vector:
+        async def search(
+            self,
+            query_vector: list[float],
+            k: int,
+            *,
+            model_name: str,
+            dim: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit | tuple[str, float]]:
+            assert keyword_finished.is_set()
+            vector_started.set()
+            return [("a", 1.0)]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=Keyword(),
+        vector_store=Vector(),
+        embedding_provider=Embedder(),
+        hydrator=_hydrator({"a": _record("a")}),
+        policy=RecordSearchPolicy(
+            vector_candidate_ids=lambda ranking, filters: [
+                record_id for record_id, _score in ranking
+            ]
+        ),
+    )
+    task = asyncio.create_task(pipeline.async_search("query", limit=1))
+    await asyncio.wait_for(
+        asyncio.gather(keyword_started.wait(), embedding_started.wait()),
+        timeout=1,
+    )
+    assert not vector_started.is_set()
+    release_keyword.set()
+    await task
+    assert vector_started.is_set()
+
+
+async def test_batch_graph_and_hydration_use_canonical_keys_once() -> None:
+    seed = RecordIdentity("workspace-a", "note", "seed")
+    target = RecordIdentity("workspace-b", "commit", "target")
+    records = {
+        seed.storage_key: Record(
+            workspace_id=seed.workspace_id,
+            source_kind=seed.source_kind,
+            source_id=seed.source_id,
+            title="seed",
+            body="seed",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+        target.storage_key: Record(
+            workspace_id=target.workspace_id,
+            source_kind=target.source_kind,
+            source_id=target.source_id,
+            title="target",
+            body="target",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+    }
+
+    class Store:
+        def index(self, records: list[Record]) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit]:
+            return [RecordHit(seed, 1.0)]
+
+    class Graph:
+        def upsert_edges(
+            self,
+            edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        ) -> None:
+            pass
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.identities: list[RecordIdentity] = []
+
+        async def neighbors_many(
+            self,
+            identities: Sequence[RecordIdentity],
+            *,
+            depth: int,
+        ) -> dict[str, list[GraphNeighbor]]:
+            self.calls += 1
+            self.identities = list(identities)
+            return {
+                seed.storage_key: [GraphNeighbor(target, "related", 1.0)]
+            }
+
+        def neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+        ) -> list[GraphNeighbor]:
+            raise AssertionError("scalar graph lookup should not run")
+
+    class Hydrator:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.identities: list[RecordIdentity] = []
+
+        async def hydrate_records(
+            self,
+            identities: Sequence[RecordIdentity],
+        ) -> dict[str, Record | None]:
+            self.calls += 1
+            self.identities = list(identities)
+            return {identity.storage_key: records[identity.storage_key] for identity in identities}
+
+        def hydrate_record(self, record_id: RecordIdentity) -> Record | None:
+            raise AssertionError("scalar hydration should not run")
+
+    graph = Graph()
+    hydrator = Hydrator()
+    pipeline = RecordSearchPipeline(
+        keyword_store=Store(),
+        graph_store=graph,
+        hydrator=hydrator,
+    )
+
+    outcome = await pipeline.async_search("query", limit=2)
+
+    assert graph.calls == 1
+    assert graph.identities == [seed]
+    assert hydrator.calls == 1
+    assert [identity.storage_key for identity in hydrator.identities] == [
+        seed.storage_key,
+        target.storage_key,
+    ]
+    assert [result.storage_key for result in outcome.results] == [
+        seed.storage_key,
+        target.storage_key,
+    ]
+
+
+async def test_scalar_and_batch_hydration_have_identical_results_and_provenance() -> None:
+    records = {record_id: _record(record_id) for record_id in ("a", "b", "c")}
+    keyword_results: list[RecordHit | tuple[str, float]] = [
+        ("b", 1.0),
+        ("a", 0.9),
+    ]
+    vector_results: list[RecordHit | tuple[str, float]] = [
+        ("a", 0.8),
+        ("c", 0.7),
+    ]
+
+    class BatchHydrator:
+        async def hydrate_records(
+            self,
+            identities: Sequence[RecordIdentity],
+        ) -> dict[str, Record | None]:
+            return {
+                identity.storage_key: records[identity.source_id]
+                for identity in identities
+            }
+
+        def hydrate_record(self, record_id: RecordIdentity) -> Record | None:
+            raise AssertionError("scalar hydration should not run")
+
+    scalar = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore(keyword_results),
+        vector_store=FakeVectorStore(vector_results),
+        embedding_provider=FakeEmbedder(),
+        hydrator=_hydrator(records),
+    )
+    batched = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore(keyword_results),
+        vector_store=FakeVectorStore(vector_results),
+        embedding_provider=FakeEmbedder(),
+        hydrator=BatchHydrator(),
+    )
+
+    scalar_outcome = await scalar.async_search("query", limit=3)
+    batch_outcome = await batched.async_search("query", limit=3)
+
+    def signature(outcome: RecordSearchOutcome) -> list[tuple[str, float, dict]]:
+        return [
+            (
+                result.storage_key,
+                result.score,
+                result.provenance.to_dict(),
+            )
+            for result in outcome.results
+        ]
+
+    assert signature(scalar_outcome) == signature(batch_outcome)
+
+
+async def test_scalar_graph_fallback_is_bounded() -> None:
+    records = {record_id: _record(record_id) for record_id in ("a", "b", "c", "d")}
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    class Graph:
+        def upsert_edges(
+            self,
+            edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        ) -> None:
+            pass
+
+        def neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+        ) -> list[GraphNeighbor | tuple[str, str, float]]:
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            try:
+                time.sleep(0.03)
+                return []
+            finally:
+                with lock:
+                    active -= 1
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([(record_id, 1.0) for record_id in records]),
+        graph_store=Graph(),
+        hydrator=_hydrator(records),
+        config=RecordSearchConfig(max_graph_concurrency=2),
+    )
+
+    await pipeline.async_search("query", limit=4)
+
+    assert maximum_active == 2
+
+
+async def test_batch_graph_failures_keep_strict_and_lenient_modes() -> None:
+    class BrokenGraph:
+        def upsert_edges(
+            self,
+            edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        ) -> None:
+            pass
+
+        async def neighbors_many(
+            self,
+            identities: Sequence[RecordIdentity],
+            *,
+            depth: int,
+        ) -> dict[str, list[GraphNeighbor]]:
+            raise RuntimeError("graph unavailable")
+
+        def neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+        ) -> list[GraphNeighbor]:
+            raise AssertionError("scalar graph lookup should not run")
+
+    strict = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        graph_store=BrokenGraph(),
+        hydrator=_hydrator({"a": _record("a")}),
+    )
+    with pytest.raises(RecordSearchError, match="graph retrieval failed"):
+        await strict.async_search("query")
+
+    lenient = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        graph_store=BrokenGraph(),
+        hydrator=_hydrator({"a": _record("a")}),
+        continue_on_error=True,
+    )
+    outcome = await lenient.async_search("query")
+    assert [result.record_id for result in outcome.results] == ["a"]
+    assert outcome.failures[0].stage == "graph"
+
+
+async def test_cancelling_overlapped_lanes_cancels_both_tasks() -> None:
+    keyword_started = asyncio.Event()
+    embedding_started = asyncio.Event()
+    keyword_cancelled = asyncio.Event()
+    embedding_cancelled = asyncio.Event()
+    wait_forever = asyncio.Event()
+
+    class Keyword:
+        async def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit | tuple[str, float]]:
+            keyword_started.set()
+            try:
+                await wait_forever.wait()
+            finally:
+                keyword_cancelled.set()
+            return []
+
+    class Embedder:
+        model_name = "fake-model"
+        dim = 2
+
+        async def embed_query(self, text: str) -> list[float]:
+            embedding_started.set()
+            try:
+                await wait_forever.wait()
+            finally:
+                embedding_cancelled.set()
+            return [1.0, 0.0]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=Keyword(),
+        vector_store=FakeVectorStore([]),
+        embedding_provider=Embedder(),
+        hydrator=_hydrator({}),
+    )
+    task = asyncio.create_task(pipeline.async_search("query"))
+    await asyncio.wait_for(
+        asyncio.gather(keyword_started.wait(), embedding_started.wait()),
+        timeout=1,
+    )
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert keyword_cancelled.is_set()
+    assert embedding_cancelled.is_set()
+
+
+async def test_hydration_completion_order_does_not_change_results() -> None:
+    records = {record_id: _record(record_id) for record_id in ("a", "b", "c")}
+
+    class Hydrator:
+        async def hydrate_record(self, record_id: RecordIdentity) -> Record:
+            await asyncio.sleep({"a": 0.03, "b": 0.01, "c": 0.0}[record_id.source_id])
+            return records[record_id.source_id]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("c", 1.0), ("b", 1.0), ("a", 1.0)]),
+        hydrator=Hydrator(),
+    )
+
+    outcome = await pipeline.async_search("query", limit=3)
+
+    assert [result.record_id for result in outcome.results] == ["a", "b", "c"]
