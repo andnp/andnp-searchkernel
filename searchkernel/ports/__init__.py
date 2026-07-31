@@ -30,6 +30,12 @@ from searchkernel.ports.llm import LLMProvider
 from searchkernel.ports.orchestrator_config import OrchestratorConfig
 from searchkernel.ports.record_search import AsyncRecordHydrator, BatchRecordHydrator
 from searchkernel.ports.rerank import Reranker
+from searchkernel.ports.retrieval import (
+    RetrievalFieldExtractor,
+    RetrievalFields,
+    SourceCapabilities,
+    extract_retrieval_fields,
+)
 from searchkernel.ports.search import SearchAPI
 from searchkernel.ports.stores import (
     AsyncGraphStore,
@@ -67,8 +73,12 @@ __all__ = [
     "OrchestratorConfig",
     "RecordIngestor",
     "Reranker",
+    "RetrievalFieldExtractor",
+    "RetrievalFields",
     "SearchAPI",
     "SearchableSource",
+    "SourceCapabilities",
     "VectorIndexPort",
     "VectorStore",
+    "extract_retrieval_fields",
 ]
