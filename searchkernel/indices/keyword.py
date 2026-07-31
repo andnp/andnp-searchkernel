@@ -661,8 +661,9 @@ class KeywordIndex:
             for suffix in ("", "-wal", "-shm"):
                 Path(f"{db_file}{suffix}").unlink(missing_ok=True)
             return  # self._db remains the existing clean temp DB
-        self._db.close()
-        self._db = candidate
+        with self._lock:
+            self._db.close()
+            self._db = candidate
 
     def load(self, path: Path) -> None:
         """Load index from path directory if it contains an index.db."""
