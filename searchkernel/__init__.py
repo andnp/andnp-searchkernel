@@ -16,6 +16,18 @@ from searchkernel.ports import (
 )
 from searchkernel.search.orchestrator import SearchOrchestrator
 from searchkernel.search.pipeline import SearchPipelineConfig
+from searchkernel.search.record_pipeline import (
+    QueryEmbeddingProvider,
+    RecordHydrator,
+    RecordSearchCandidate,
+    RecordSearchConfig,
+    RecordSearchError,
+    RecordSearchFailure,
+    RecordSearchOutcome,
+    RecordSearchPipeline,
+    RecordSearchPolicy,
+    RecordSearchResult,
+)
 from searchkernel.search.utils import classify_query_type, truncate_content
 
 __version__ = "0.1.0"
@@ -23,8 +35,18 @@ __version__ = "0.1.0"
 __all__ = [
     "ContentSource",
     "EmbeddingProvider",
+    "QueryEmbeddingProvider",
     "Record",
+    "RecordHydrator",
     "RecordIngestor",
+    "RecordSearchCandidate",
+    "RecordSearchConfig",
+    "RecordSearchError",
+    "RecordSearchFailure",
+    "RecordSearchOutcome",
+    "RecordSearchPipeline",
+    "RecordSearchPolicy",
+    "RecordSearchResult",
     "ScoredRef",
     "SearchAPI",
     "SearchKernel",
