@@ -37,7 +37,9 @@ def _with_hash(chunk):
 class TestVectorRaceCondition:
     """Test concurrent add_chunk and persist operations."""
 
-    def test_concurrent_add_and_persist(self, tmp_path: Path, shared_embedding_model):
+    def test_concurrent_add_and_persist(
+        self, tmp_path: Path, deterministic_fake_embedding_model
+    ):
         """
         Test that concurrent add_chunk and persist operations don't cause
         'dictionary changed size during iteration' error.
@@ -47,7 +49,7 @@ class TestVectorRaceCondition:
         2. Shutdown triggers persist
         3. LlamaIndex serializes internal dictionaries during persist
         """
-        vector = VectorIndex(embedding_model=shared_embedding_model)
+        vector = VectorIndex(embedding_model=deterministic_fake_embedding_model)
 
         # Create test chunks
         now = datetime.now(UTC)
@@ -106,7 +108,7 @@ class TestVectorRaceCondition:
         assert persist_complete.is_set(), "persist did not complete"
 
         # Verify index is still functional after concurrent operations
-        vector2 = VectorIndex(embedding_model=shared_embedding_model)
+        vector2 = VectorIndex(embedding_model=deterministic_fake_embedding_model)
         vector2.load(tmp_path / "concurrent_test")
 
         # Should have all documents indexed
@@ -115,12 +117,12 @@ class TestVectorRaceCondition:
 
     @pytest.mark.asyncio
     async def test_concurrent_add_and_persist_async(
-        self, tmp_path: Path, shared_embedding_model
+        self, tmp_path: Path, deterministic_fake_embedding_model
     ):
         """
         Test concurrent operations using asyncio (more realistic for actual server).
         """
-        vector = VectorIndex(embedding_model=shared_embedding_model)
+        vector = VectorIndex(embedding_model=deterministic_fake_embedding_model)
 
         now = datetime.now(UTC)
         chunks = [
@@ -150,19 +152,19 @@ class TestVectorRaceCondition:
         )
 
         # Verify index is intact
-        vector2 = VectorIndex(embedding_model=shared_embedding_model)
+        vector2 = VectorIndex(embedding_model=deterministic_fake_embedding_model)
         await asyncio.to_thread(vector2.load, tmp_path / "async_test")
 
         doc_ids = vector2.get_document_ids()
         assert len(doc_ids) > 0, "No documents found after async concurrent operations"
 
     def test_multiple_persists_during_indexing(
-        self, tmp_path: Path, shared_embedding_model
+        self, tmp_path: Path, deterministic_fake_embedding_model
     ):
         """
         Test multiple persist calls during active indexing (stress test).
         """
-        vector = VectorIndex(embedding_model=shared_embedding_model)
+        vector = VectorIndex(embedding_model=deterministic_fake_embedding_model)
 
         now = datetime.now(UTC)
         chunks = [
