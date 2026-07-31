@@ -45,6 +45,8 @@ DEFAULT_HNSW_EF_SEARCH = 100
 DEFAULT_HNSW_ITERATIVE_SCAN = "auto"
 DEFAULT_HNSW_MAX_SCAN_TUPLES = 20_000
 DEFAULT_HNSW_SCAN_MEM_MULTIPLIER = 1.0
+DEFAULT_VECTOR_OVERFETCH_MULTIPLIER = 2.0
+DEFAULT_VECTOR_MAX_SCAN_ROUNDS = 4
 _SCHEMA_ADVISORY_LOCK_KEY = 907341005
 _ITERATIVE_SCAN_MODES = {"auto", "off", "strict_order", "relaxed_order"}
 
@@ -68,6 +70,29 @@ class PGVectorFeatureSupport:
             else (0, 0)
         )
         return cls(extension_version, version >= (0, 8))
+
+
+def bounded_scan_limits(
+    requested_k: int,
+    *,
+    max_scan_tuples: int,
+    max_scan_rounds: int,
+    overfetch_multiplier: float,
+) -> list[int]:
+    """Return bounded ANN limits for adaptive filtered retrieval."""
+    if requested_k < 1:
+        return []
+    limits: list[int] = []
+    current = min(requested_k, max_scan_tuples)
+    for _ in range(max_scan_rounds):
+        limits.append(current)
+        if current >= max_scan_tuples:
+            break
+        current = min(
+            max_scan_tuples,
+            max(current + 1, math.ceil(current * overfetch_multiplier)),
+        )
+    return limits
 
 
 def _sanitize_model_name(model_name: str) -> str:
@@ -691,6 +716,8 @@ class PGVectorStore:
         hnsw_iterative_scan: str = DEFAULT_HNSW_ITERATIVE_SCAN,
         hnsw_max_scan_tuples: int = DEFAULT_HNSW_MAX_SCAN_TUPLES,
         hnsw_scan_mem_multiplier: float = DEFAULT_HNSW_SCAN_MEM_MULTIPLIER,
+        overfetch_multiplier: float = DEFAULT_VECTOR_OVERFETCH_MULTIPLIER,
+        max_scan_rounds: int = DEFAULT_VECTOR_MAX_SCAN_ROUNDS,
     ):
         """Initialize vector store.
 
@@ -700,6 +727,8 @@ class PGVectorStore:
             hnsw_iterative_scan: auto, off, strict_order, or relaxed_order
             hnsw_max_scan_tuples: maximum tuples visited by iterative scans
             hnsw_scan_mem_multiplier: iterative scan memory multiplier
+            overfetch_multiplier: bounded filtered-search expansion factor
+            max_scan_rounds: maximum filtered-search expansion rounds
         """
         if not isinstance(hnsw_ef_search, int) or isinstance(hnsw_ef_search, bool):
             raise TypeError("hnsw_ef_search must be an integer")
@@ -716,6 +745,19 @@ class PGVectorStore:
         ):
             raise ValueError("hnsw_max_scan_tuples must be a positive integer")
         if (
+            not isinstance(overfetch_multiplier, (int, float))
+            or isinstance(overfetch_multiplier, bool)
+        ):
+            raise TypeError("overfetch_multiplier must be numeric")
+        if not math.isfinite(overfetch_multiplier) or overfetch_multiplier < 1.0:
+            raise ValueError("overfetch_multiplier must be finite and >= 1")
+        if (
+            not isinstance(max_scan_rounds, int)
+            or isinstance(max_scan_rounds, bool)
+            or max_scan_rounds < 1
+        ):
+            raise ValueError("max_scan_rounds must be a positive integer")
+        if (
             not isinstance(hnsw_scan_mem_multiplier, (int, float))
             or isinstance(hnsw_scan_mem_multiplier, bool)
         ):
@@ -730,11 +772,18 @@ class PGVectorStore:
         self.hnsw_iterative_scan = hnsw_iterative_scan
         self.hnsw_max_scan_tuples = hnsw_max_scan_tuples
         self.hnsw_scan_mem_multiplier = hnsw_scan_mem_multiplier
+        self.overfetch_multiplier = float(overfetch_multiplier)
+        self.max_scan_rounds = max_scan_rounds
         self._feature_support: PGVectorFeatureSupport | None = None
+        self._last_search_diagnostics: dict[str, Any] = {}
 
     @property
     def feature_support(self) -> PGVectorFeatureSupport | None:
         return self._feature_support
+
+    @property
+    def last_search_diagnostics(self) -> dict[str, Any]:
+        return dict(self._last_search_diagnostics)
 
     def detect_feature_support(self) -> PGVectorFeatureSupport:
         """Read feature support from the installed server extension."""
@@ -970,11 +1019,18 @@ class PGVectorStore:
                 (model_name, dim),
             )
             if cursor.fetchone() is None:
+                self._last_search_diagnostics = {
+                    "requested_k": k,
+                    "returned": 0,
+                    "scan_rounds": 0,
+                    "under_returned": True,
+                    "scan_bound_hit": False,
+                }
                 return []
 
             table_name = _vector_table_name(model_name, dim)
 
-            self._configure_hnsw(cursor)
+            feature_support = self._configure_hnsw(cursor)
 
             where_parts, filter_params = build_pgvector_filter_sql(filters)
             where_clause = "AND " + " AND ".join(where_parts)
@@ -993,10 +1049,33 @@ class PGVectorStore:
                 "LIMIT %s;"
             ).format(table=sql.Identifier(table_name))
 
-            params = [vec_literal, *filter_params, vec_literal, k]
-
-            cursor.execute(query_sql, params)
-            results = cursor.fetchall()
+            results: list[Any] = []
+            scan_limits = bounded_scan_limits(
+                k,
+                max_scan_tuples=self.hnsw_max_scan_tuples,
+                max_scan_rounds=self.max_scan_rounds,
+                overfetch_multiplier=self.overfetch_multiplier,
+            )
+            scan_rounds = 0
+            last_scan_limit = 0
+            for scan_limit in scan_limits:
+                scan_rounds += 1
+                last_scan_limit = scan_limit
+                params = [vec_literal, *filter_params, vec_literal, scan_limit]
+                cursor.execute(query_sql, params)
+                results = cursor.fetchall()
+                if len(results) >= k or scan_limit >= self.hnsw_max_scan_tuples:
+                    break
+            self._last_search_diagnostics = {
+                "requested_k": k,
+                "returned": min(len(results), k),
+                "scan_rounds": scan_rounds,
+                "scan_limit": last_scan_limit,
+                "scan_bound_hit": last_scan_limit >= self.hnsw_max_scan_tuples,
+                "under_returned": len(results) < k,
+                "iterative_scan": feature_support.iterative_scan,
+                "extension_version": feature_support.extension_version,
+            }
             conn.commit()
             return [
                 (
@@ -1005,7 +1084,7 @@ class PGVectorStore:
                         1.0 - float(row[3]),
                     )
                 )
-                for row in results
+                for row in results[:k]
             ]
         finally:
             if cursor is not None:
