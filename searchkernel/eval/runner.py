@@ -4,6 +4,7 @@ The runner is decoupled from SearchOrchestrator; it takes a plain search callabl
 This enables testing without a live index.
 """
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -129,8 +130,11 @@ class AbReport:
         }
 
 
-def _percentile(values: list[float], p: int) -> float:
+def _percentile(values: list[float], p: float) -> float:
     """Compute the pth percentile of a list of values.
+
+    Uses the Hyndman-Fan type 7 ("linear") method: the percentile position is
+    ``(n - 1) * p / 100`` and adjacent observations are linearly interpolated.
 
     Args:
         values: List of numeric values.
@@ -141,10 +145,17 @@ def _percentile(values: list[float], p: int) -> float:
     """
     if not values:
         return 0.0
+    if not 0 <= p <= 100:
+        raise ValueError("p must be between 0 and 100")
+
     sorted_vals = sorted(values)
-    idx = int((p / 100.0) * len(sorted_vals))
-    idx = min(idx, len(sorted_vals) - 1)
-    return sorted_vals[idx]
+    position = (len(sorted_vals) - 1) * (p / 100.0)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return sorted_vals[lower]
+    fraction = position - lower
+    return sorted_vals[lower] + (sorted_vals[upper] - sorted_vals[lower]) * fraction
 
 
 def run_eval(
