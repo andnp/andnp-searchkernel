@@ -111,7 +111,7 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
             (_SCHEMA_ADVISORY_LOCK_KEY,),
         )
         # Create pgvector extension
-        cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;")
 
         # Registry of per-(model_name, dim) vector tables. Each embedding
         # model/dimension pair gets its own typed `vector(dim)` table with
