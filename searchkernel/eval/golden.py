@@ -5,34 +5,90 @@ Used to measure retrieval quality against a benchmark.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 @dataclass
 class GoldenEntry:
-    """Single evaluation entry: a query with its relevant result IDs."""
+    """Single evaluation entry with optional graded and slice metadata."""
 
     query: str
     """The search query text."""
 
-    relevant_ids: list[str]
-    """List of result IDs that are relevant to this query."""
+    relevant_ids: list[str] = field(default_factory=list)
+    """Positive-gain result IDs, retained for binary relevance compatibility."""
+
+    relevance: dict[str, float] | None = None
+    """Optional graded gains keyed by result ID."""
+
+    query_type: str | None = None
+    """Optional query category for evaluation slices."""
+
+    source_kinds: list[str] = field(default_factory=list)
+    """Source kinds represented by the expected results."""
+
+    workspace_id: str | None = None
+    """Optional workspace identifier for the query."""
+
+    tags: list[str] = field(default_factory=list)
+    """Optional evaluation tags."""
+
+    corpus_version: str | None = None
+    """Version of the corpus used to create this entry."""
+
+    split: str | None = None
+    """Optional dataset split: train, validation, or test."""
+
+    def __post_init__(self) -> None:
+        """Normalize mutable inputs and make graded gains authoritative."""
+        self.relevant_ids = list(self.relevant_ids)
+        if self.relevance is not None:
+            self.relevance = dict(self.relevance)
+            self.relevant_ids = [
+                result_id for result_id, gain in self.relevance.items() if gain > 0
+            ]
+        self.source_kinds = list(self.source_kinds)
+        self.tags = list(self.tags)
+        if self.split not in {None, "train", "validation", "test"}:
+            raise ValueError("split must be one of train, validation, test, or None")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary."""
-        return {
+        data: dict[str, Any] = {
             "query": self.query,
-            "relevant_ids": self.relevant_ids,
         }
+        data["relevant_ids"] = self.relevant_ids
+        if self.relevance is not None:
+            data["relevance"] = self.relevance
+        if self.query_type is not None:
+            data["query_type"] = self.query_type
+        if self.source_kinds:
+            data["source_kinds"] = self.source_kinds
+        if self.workspace_id is not None:
+            data["workspace_id"] = self.workspace_id
+        if self.tags:
+            data["tags"] = self.tags
+        if self.corpus_version is not None:
+            data["corpus_version"] = self.corpus_version
+        if self.split is not None:
+            data["split"] = self.split
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GoldenEntry":
         """Deserialize from a dictionary."""
         return cls(
             query=data["query"],
-            relevant_ids=data["relevant_ids"],
+            relevant_ids=data.get("relevant_ids") or [],
+            relevance=data.get("relevance"),
+            query_type=data.get("query_type"),
+            source_kinds=data.get("source_kinds", []),
+            workspace_id=data.get("workspace_id"),
+            tags=data.get("tags", []),
+            corpus_version=data.get("corpus_version"),
+            split=data.get("split"),
         )
 
 
