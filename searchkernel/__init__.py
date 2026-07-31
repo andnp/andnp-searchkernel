@@ -10,8 +10,8 @@ from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
     ContentSource,
     EmbeddingProvider,
-    SearchAPI,
     SearchableSource,
+    SearchAPI,
 )
 from searchkernel.search.orchestrator import SearchOrchestrator
 from searchkernel.search.pipeline import SearchPipelineConfig
