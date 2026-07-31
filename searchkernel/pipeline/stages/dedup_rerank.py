@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from searchkernel.domain import CompressionStats
-from searchkernel.pipeline.stage import SearchContext, replace_state
+from searchkernel.pipeline.stage import SearchContext, replace_state, require_state
 from searchkernel.pipeline.stages.dedup_content_hash import ContentHashDedupStage
 from searchkernel.pipeline.stages.dedup_ngram import NgramDedupStage
 from searchkernel.pipeline.stages.dedup_similarity import SimilarityDedupStage
@@ -74,9 +74,9 @@ class DedupRerankStage:
         return cached_get_content
 
     def run(self, context: SearchContext) -> SearchContext:
-        get_embedding = context.state.get_embedding
-        get_content = context.state.get_content
-        top_n = context.state.top_n
+        get_embedding = require_state(context.state.get_embedding, "get_embedding")
+        get_content = require_state(context.state.get_content, "get_content")
+        top_n = require_state(context.state.top_n, "top_n")
 
         cached_get_content = self._build_cached_content_provider(get_content)
         original_count = len(context.candidates)

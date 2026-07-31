@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, require_state
 from searchkernel.search.dedup import deduplicate_by_content_hash
 
 _GET_CONTENT_KEY = "get_content"
@@ -25,6 +25,6 @@ class ContentHashDedupStage:
     name = "dedup_content_hash"
 
     def run(self, context: SearchContext) -> SearchContext:
-        get_content = context.state.get_content
+        get_content = require_state(context.state.get_content, "get_content")
         deduped, _removed = deduplicate_by_content_hash(context.candidates, get_content)
         return replace(context, candidates=deduped)

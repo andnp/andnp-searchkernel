@@ -12,10 +12,12 @@ computed at the same point in the pipeline.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Sequence
+from itertools import chain
 
 from searchkernel.pipeline.stage import SearchContext, replace_state
 from searchkernel.search.classifier import QueryType
+from searchkernel.search.types import SearchResultDict
 
 _VECTOR_RESULTS_KEY = "vector_results"
 _KEYWORD_RESULTS_KEY = "keyword_results"
@@ -30,13 +32,13 @@ _FACTUAL_QUERY_CONSENSUS_DEPTH = 2
 
 
 def build_graph_seed_scores(
-    vector_results: list[dict[str, Any]],
-    keyword_results: list[dict[str, Any]],
+    vector_results: Sequence[SearchResultDict],
+    keyword_results: Sequence[SearchResultDict],
 ) -> dict[str, float]:
     """Best per-doc score across vector + keyword results, for graph seeding."""
     seed_scores: dict[str, float] = {}
 
-    for result in vector_results + keyword_results:
+    for result in chain(vector_results, keyword_results):
         doc_id_obj = result.get("doc_id")
         if not isinstance(doc_id_obj, str) or not doc_id_obj:
             continue
@@ -52,8 +54,8 @@ def build_graph_seed_scores(
 
 def should_skip_expensive_factual_enrichments(
     query_type: QueryType,
-    vector_results: list[dict[str, Any]],
-    keyword_results: list[dict[str, Any]],
+    vector_results: Sequence[SearchResultDict],
+    keyword_results: Sequence[SearchResultDict],
 ) -> bool:
     """Whether a factual query already has a clear, consensus answer."""
     if query_type is not QueryType.FACTUAL:
@@ -61,7 +63,7 @@ def should_skip_expensive_factual_enrichments(
 
     unique_chunk_ids = {
         str(result["chunk_id"])
-        for result in vector_results + keyword_results
+        for result in chain(vector_results, keyword_results)
         if isinstance(result.get("chunk_id"), str) and result.get("chunk_id")
     }
     if len(unique_chunk_ids) <= 1:
@@ -105,6 +107,8 @@ class SeedBookkeepingStage:
         vector_results = context.state.vector_results
         keyword_results = context.state.keyword_results
         query_type = context.state.query_type
+        if query_type is None:
+            raise ValueError("missing required search state: query_type")
 
         all_doc_ids: set[str] = set()
         chunk_id_to_doc_id: dict[str, str] = {}

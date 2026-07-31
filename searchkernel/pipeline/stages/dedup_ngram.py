@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, require_state
 from searchkernel.search.dedup import deduplicate_by_ngram
 
 _GET_CONTENT_KEY = "get_content"
@@ -31,7 +31,7 @@ class NgramDedupStage:
         if len(context.candidates) <= 1:
             return context
 
-        get_content = context.state.get_content
+        get_content = require_state(context.state.get_content, "get_content")
         deduped, _removed = deduplicate_by_ngram(
             context.candidates, get_content, self._threshold
         )

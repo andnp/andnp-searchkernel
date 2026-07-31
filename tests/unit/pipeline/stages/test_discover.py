@@ -14,7 +14,7 @@ def test_discover_stage_single_root_uses_documents_path(tmp_path):
         _context(documents_path=tmp_path, documents_roots=[tmp_path])
     )
 
-    discovered = result.metadata["discovered_files"]
+    discovered = result.state.discovered_files
     assert len(discovered) == 2
     assert any("a.md" in f for f in discovered)
     assert any("b.md" in f for f in discovered)
@@ -35,7 +35,7 @@ def test_discover_stage_multi_root_unions_all_roots(tmp_path):
         )
     )
 
-    discovered = result.metadata["discovered_files"]
+    discovered = result.state.discovered_files
     assert any("one.md" in f for f in discovered)
     assert any("two.md" in f for f in discovered)
 
@@ -52,7 +52,7 @@ def test_discover_stage_respects_exclude_patterns(tmp_path):
         )
     )
 
-    discovered = result.metadata["discovered_files"]
+    discovered = result.state.discovered_files
     assert any("keep.md" in f for f in discovered)
     assert not any("skip.md" in f for f in discovered)
 

@@ -25,7 +25,7 @@ def test_builds_narrow_strategy_results_for_fusion():
         "keyword": [("b_chunk_0", 0.5)],
         "graph": [("c_chunk_0", 0.4)],
     }
-    assert "tag_expansion" not in result.metadata["provenance_strategy_results"]
+    assert "tag_expansion" not in result.state.provenance_strategy_results
 
 
 def test_provenance_strategy_results_includes_tag_expansion_when_applied():
@@ -41,7 +41,7 @@ def test_provenance_strategy_results_includes_tag_expansion_when_applied():
 
     result = StrategyResultsStage().run(context)
 
-    assert result.metadata["provenance_strategy_results"]["tag_expansion"] == [
+    assert result.state.provenance_strategy_results["tag_expansion"] == [
         ("new_chunk_0", 0.3)
     ]
     assert "tag_expansion" not in result.strategy_results
@@ -58,4 +58,4 @@ def test_does_not_mutate_input_context():
     StrategyResultsStage().run(context)
 
     assert context.strategy_results == {}
-    assert "provenance_strategy_results" not in context.metadata
+    assert "provenance_strategy_results" not in context.state

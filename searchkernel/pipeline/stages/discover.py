@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from searchkernel.indexing.discovery import discover_files, discover_files_multi_root
-from searchkernel.pipeline.stage import SearchContext, replace_state
+from searchkernel.pipeline.stage import SearchContext, replace_state, require_state
 
 _DOCUMENTS_PATH_KEY = "documents_path"
 _DOCUMENTS_ROOTS_KEY = "documents_roots"
@@ -40,7 +40,9 @@ class DiscoverStage:
     name = "discover"
 
     def run(self, context: SearchContext) -> SearchContext:
-        documents_path: str | Path = context.state.documents_path
+        documents_path = require_state(
+            context.state.documents_path, "documents_path"
+        )
         documents_roots: list[str | Path] = context.state.documents_roots
         include_patterns = context.state.include_patterns
         exclude_patterns = context.state.exclude_patterns

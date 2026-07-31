@@ -25,7 +25,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, require_state
 from searchkernel.search.score_pipeline import ScorePipeline
 from searchkernel.search.types import SearchResultDict
 
@@ -73,9 +73,9 @@ class RAGFusionStage:
         if not self._config.enabled:
             return context
 
-        top_k = context.state.top_k
+        top_k = require_state(context.state.top_k, "top_k")
         excluded_files = context.state.excluded_files
-        docs_root = context.state.docs_root
+        docs_root = require_state(context.state.docs_root, "docs_root")
 
         variants = await self._generate_query_variants(
             context.query, self._config.num_variants

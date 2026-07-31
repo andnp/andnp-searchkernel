@@ -16,7 +16,7 @@ def test_provenance_stage_records_rank_and_raw_score_per_strategy():
 
     result = ProvenanceStage().run(context)
 
-    provenance = result.metadata["result_provenance"]
+    provenance = result.state.result_provenance
     assert set(provenance) == {"chunk_a", "chunk_b"}
     assert provenance["chunk_a"].strategies == ("semantic",)
     assert provenance["chunk_a"].strategy_details["semantic"].rank == 1
@@ -33,7 +33,7 @@ def test_provenance_stage_first_strategy_wins_on_duplicate_chunk_in_same_strateg
 
     result = ProvenanceStage().run(context)
 
-    detail = result.metadata["result_provenance"]["chunk_a"].strategy_details["semantic"]
+    detail = result.state.result_provenance["chunk_a"].strategy_details["semantic"]
     assert detail.rank == 1
     assert detail.raw_score == 0.9
 
@@ -43,7 +43,7 @@ def test_provenance_stage_empty_strategy_results_yields_empty_provenance():
 
     result = ProvenanceStage().run(context)
 
-    assert result.metadata["result_provenance"] == {}
+    assert result.state.result_provenance == {}
 
 
 def test_provenance_stage_does_not_mutate_input_context():
@@ -68,6 +68,6 @@ def test_provenance_stage_prefers_metadata_strategy_results_override():
 
     result = ProvenanceStage().run(context)
 
-    provenance = result.metadata["result_provenance"]
+    provenance = result.state.result_provenance
     assert set(provenance) == {"chunk_a", "chunk_b"}
     assert provenance["chunk_b"].strategies == ("tag_expansion",)

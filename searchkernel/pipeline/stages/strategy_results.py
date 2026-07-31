@@ -17,10 +17,10 @@ dict (rather than just the provenance-only one) would change ranking.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any
 
 from searchkernel.pipeline.stage import SearchContext, replace_state
 from searchkernel.search.path_utils import extract_doc_id_from_chunk_id
+from searchkernel.search.types import SearchResultDict
 
 _VECTOR_RESULTS_KEY = "vector_results"
 _KEYWORD_RESULTS_KEY = "keyword_results"
@@ -46,11 +46,11 @@ class StrategyResultsStage:
     name = "strategy_results"
 
     def run(self, context: SearchContext) -> SearchContext:
-        vector_results: list[dict[str, Any]] = context.state.vector_results
-        keyword_results: list[dict[str, Any]] = context.state.keyword_results
+        vector_results: list[SearchResultDict] = context.state.vector_results
+        keyword_results: list[SearchResultDict] = context.state.keyword_results
         graph_chunk_ids: list[str] = context.state.graph_chunk_ids
         graph_doc_scores: dict[str, float] = context.state.graph_doc_scores
-        applied_tag_expansion_results: list[dict[str, Any]] = (
+        applied_tag_expansion_results: list[SearchResultDict] = (
             context.state.applied_tag_expansion_results
         )
 

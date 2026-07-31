@@ -10,7 +10,7 @@ what lets `RetrieveStage`/`SeedBookkeepingStage`/`TagExpansionStage`/
 
 from __future__ import annotations
 
-from searchkernel.pipeline.stage import SearchContext, replace_state
+from searchkernel.pipeline.stage import SearchContext, replace_state, require_state
 from searchkernel.search.classifier import QueryType
 
 _REQUESTED_TOP_K_KEY = "requested_top_k"
@@ -36,10 +36,12 @@ class EffectiveTopKStage:
     name = "effective_top_k"
 
     def run(self, context: SearchContext) -> SearchContext:
-        requested_top_k = context.state.requested_top_k
-        top_n = context.state.top_n
+        requested_top_k = require_state(
+            context.state.requested_top_k, "requested_top_k"
+        )
+        top_n = require_state(context.state.top_n, "top_n")
         project_filter = context.state.project_filter
-        query_type = context.state.query_type
+        query_type = require_state(context.state.query_type, "query_type")
 
         metadata = dict(context.state)
         metadata[_TOP_K_KEY] = self._resolve(

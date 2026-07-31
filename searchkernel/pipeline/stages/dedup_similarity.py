@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, require_state
 from searchkernel.search.dedup import deduplicate_by_similarity
 
 _GET_EMBEDDING_KEY = "get_embedding"
@@ -33,7 +33,7 @@ class SimilarityDedupStage:
         if len(context.candidates) <= 1:
             return context
 
-        get_embedding = context.state.get_embedding
+        get_embedding = require_state(context.state.get_embedding, "get_embedding")
         deduped, _clusters_merged = deduplicate_by_similarity(
             context.candidates, get_embedding, self._threshold
         )

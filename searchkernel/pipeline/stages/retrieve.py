@@ -19,7 +19,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from searchkernel.pipeline.stage import SearchContext, replace_state
+from searchkernel.pipeline.stage import SearchContext, replace_state, require_state
 from searchkernel.search.types import SearchResultDict
 
 Searcher = Callable[
@@ -50,9 +50,9 @@ class RetrieveStage:
         self._search_keyword = search_keyword
 
     async def run(self, context: SearchContext) -> SearchContext:
-        top_k = context.state.top_k
+        top_k = require_state(context.state.top_k, "top_k")
         excluded_files = context.state.excluded_files
-        docs_root = context.state.docs_root
+        docs_root = require_state(context.state.docs_root, "docs_root")
 
         vector_results, keyword_results = await asyncio.gather(
             self._search_vector(context.query, top_k, excluded_files, docs_root),

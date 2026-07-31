@@ -18,11 +18,11 @@ set) from the exact same merged `chunk_id_to_doc_id`/`all_doc_ids`.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 
 from searchkernel.pipeline.stage import SearchContext, replace_state
+from searchkernel.search.types import SearchResultDict
 
-ExpandQueryWithTags = Callable[[list[dict[str, Any]], int], list[dict[str, Any]]]
+ExpandQueryWithTags = Callable[[list[SearchResultDict], int], list[SearchResultDict]]
 
 _VECTOR_RESULTS_KEY = "vector_results"
 _KEYWORD_RESULTS_KEY = "keyword_results"
@@ -62,16 +62,18 @@ class TagExpansionStage:
         chunk_id_to_doc_id = dict(context.state.chunk_id_to_doc_id)
         all_doc_ids = set(context.state.all_doc_ids)
         top_k = context.state.top_k
+        if top_k is None:
+            raise ValueError("missing required search state: top_k")
         skip = context.state.skip_tag_expansion
 
         if skip:
-            tag_expanded_results: list[dict[str, Any]] = []
+            tag_expanded_results: list[SearchResultDict] = []
         else:
             tag_expanded_results = self._expand_query_with_tags(
                 vector_results + keyword_results, top_k
             )
 
-        applied: list[dict[str, Any]] = []
+        applied: list[SearchResultDict] = []
         tag_expansion_count = 0
         for result in tag_expanded_results:
             chunk_id = result["chunk_id"]

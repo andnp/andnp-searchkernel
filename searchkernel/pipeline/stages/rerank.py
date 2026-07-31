@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, require_state
 from searchkernel.search.reranker import ReRanker
 
 _GET_CONTENT_KEY = "get_content"
@@ -45,7 +45,7 @@ class RerankStage:
         if not context.candidates or not self._enabled:
             return context
 
-        get_content = context.state.get_content
+        get_content = require_state(context.state.get_content, "get_content")
         reranked = self._get_reranker().rerank(
             context.query, context.candidates, get_content, self._top_n
         )

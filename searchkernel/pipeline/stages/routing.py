@@ -8,7 +8,7 @@ so this is a pure extraction with no behavior change.
 
 from __future__ import annotations
 
-from searchkernel.pipeline.stage import SearchContext, replace_state
+from searchkernel.pipeline.stage import SearchContext, replace_state, require_state
 from searchkernel.search.classifier import classify_query, get_adaptive_weights
 
 _BASE_SEMANTIC_WEIGHT_KEY = "base_semantic_weight"
@@ -31,9 +31,15 @@ class RoutingStage:
     name = "routing"
 
     def run(self, context: SearchContext) -> SearchContext:
-        base_semantic = context.state.base_semantic_weight
-        base_keyword = context.state.base_keyword_weight
-        base_graph = context.state.base_graph_weight
+        base_semantic = require_state(
+            context.state.base_semantic_weight, "base_semantic_weight"
+        )
+        base_keyword = require_state(
+            context.state.base_keyword_weight, "base_keyword_weight"
+        )
+        base_graph = require_state(
+            context.state.base_graph_weight, "base_graph_weight"
+        )
 
         query_type = classify_query(context.query)
         semantic_w, keyword_w, graph_w = get_adaptive_weights(

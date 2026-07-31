@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from searchkernel.pipeline.stage import SearchContext, replace_state
+from searchkernel.pipeline.stage import SearchContext, replace_state, require_state
 from searchkernel.search.path_utils import resolve_doc_path, resolve_doc_path_multi_root
 
 _DOC_ID_KEY = "doc_id"
@@ -37,9 +37,9 @@ class RepairStage:
     name = "repair"
 
     def run(self, context: SearchContext) -> SearchContext:
-        doc_id: str = context.state.doc_id
-        docs_path: Path = context.state.docs_path
-        documents_roots: list[Path] = context.state.documents_roots
+        doc_id = require_state(context.state.doc_id, "doc_id")
+        docs_path = require_state(context.state.docs_path, "docs_path")
+        documents_roots = [Path(root) for root in context.state.documents_roots]
         suffixes: list[str] = context.state.suffixes
 
         resolved_path = resolve_doc_path_multi_root(doc_id, documents_roots, suffixes)

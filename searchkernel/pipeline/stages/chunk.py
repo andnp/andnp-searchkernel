@@ -12,7 +12,7 @@ concrete chunker varies with `Config.chunking`.
 from __future__ import annotations
 
 from searchkernel.chunking.base import ChunkingStrategy
-from searchkernel.pipeline.stage import SearchContext, replace_state
+from searchkernel.pipeline.stage import SearchContext, replace_state, require_state
 
 _RECORD_KEY = "record"
 _CHUNKS_KEY = "chunks"
@@ -31,7 +31,7 @@ class ChunkStage:
         self._chunker = chunker
 
     def run(self, context: SearchContext) -> SearchContext:
-        record = context.state.record
+        record = require_state(context.state.record, "record")
         chunks = self._chunker.chunk_record(record)
 
         metadata = dict(context.state)

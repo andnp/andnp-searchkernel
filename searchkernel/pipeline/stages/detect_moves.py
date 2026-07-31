@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from searchkernel.domain import Chunk
-from searchkernel.pipeline.stage import SearchContext, replace_state
+from searchkernel.pipeline.stage import SearchContext, replace_state, require_state
 
 _REMOVED_DOC_IDS_KEY = "removed_doc_ids"
 _ADDED_DOCS_KEY = "added_docs"
@@ -42,7 +42,9 @@ class DetectMovesStage:
     def run(self, context: SearchContext) -> SearchContext:
         removed_docs: set[str] = context.state.removed_doc_ids
         added_docs: dict[str, list[Chunk]] = context.state.added_docs
-        threshold: float = context.state.move_detection_threshold
+        threshold = require_state(
+            context.state.move_detection_threshold, "move_detection_threshold"
+        )
 
         moves: dict[str, str] = {}
 

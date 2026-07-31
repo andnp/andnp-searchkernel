@@ -24,6 +24,14 @@ from searchkernel.search.classifier import QueryType
 from searchkernel.search.types import SearchResultDict
 
 
+def require_state[StateT](value: StateT | None, name: str) -> StateT:
+    """Return a required state value or fail with its missing field name."""
+
+    if value is None:
+        raise ValueError(f"missing required search state: {name}")
+    return value
+
+
 @dataclass
 class SearchState(Mapping[str, object]):
     """Typed, source-agnostic values shared by pipeline stages.

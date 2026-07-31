@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from searchkernel.pipeline.stage import SearchContext, replace_state
+from searchkernel.pipeline.stage import SearchContext, replace_state, require_state
 
 RankNeighbors = Callable[[dict[str, float]], list[tuple[str, float]]]
 BuildChunkCandidates = Callable[[list[str], int, "set[str] | None"], list[str]]
@@ -45,7 +45,7 @@ class GraphExpandStage:
 
     def run(self, context: SearchContext) -> SearchContext:
         seed_scores = context.state.seed_scores
-        top_k = context.state.top_k
+        top_k = require_state(context.state.top_k, "top_k")
         excluded_chunk_ids = context.state.excluded_chunk_ids
 
         ranked_neighbors = self._rank_neighbors(seed_scores)

@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from searchkernel.domain import Chunk
-from searchkernel.pipeline.stage import SearchContext, replace_state
+from searchkernel.pipeline.stage import SearchContext, replace_state, require_state
 
 _OLD_DOC_ID_KEY = "old_doc_id"
 _NEW_DOC_ID_KEY = "new_doc_id"
@@ -76,8 +76,8 @@ class ApplyMoveStage:
         self._threshold = move_detection_threshold
 
     def run(self, context: SearchContext) -> SearchContext:
-        old_doc_id: str = context.state.old_doc_id
-        new_doc_id: str = context.state.new_doc_id
+        old_doc_id = require_state(context.state.old_doc_id, "old_doc_id")
+        new_doc_id = require_state(context.state.new_doc_id, "new_doc_id")
         new_chunks: list[Chunk] = context.state.new_chunks
 
         applied, moved_count, hash_store_updated = self._apply(

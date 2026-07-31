@@ -29,12 +29,12 @@ def test_hydrate_stage_wraps_successful_hydration_and_attaches_provenance():
         _context([("doc1_chunk_0", 0.9)], {"doc1_chunk_0": provenance})
     )
 
-    chunk_results = result.metadata["chunk_results"]
+    chunk_results = result.state.chunk_results
     assert len(chunk_results) == 1
     assert chunk_results[0].chunk_id == "doc1_chunk_0"
     assert chunk_results[0].content == "body"
     assert chunk_results[0].provenance is provenance
-    assert result.metadata["missing_chunk_ids"] == []
+    assert result.state.missing_chunk_ids == []
 
 
 def test_hydrate_stage_emits_placeholder_and_reports_missing_chunk_ids():
@@ -43,7 +43,7 @@ def test_hydrate_stage_emits_placeholder_and_reports_missing_chunk_ids():
 
     result = HydrateStage(hydrate).run(_context([("doc1_chunk_0", 0.5)]))
 
-    chunk_results = result.metadata["chunk_results"]
+    chunk_results = result.state.chunk_results
     assert len(chunk_results) == 1
     placeholder = chunk_results[0]
     assert placeholder.chunk_id == "doc1_chunk_0"
@@ -51,7 +51,7 @@ def test_hydrate_stage_emits_placeholder_and_reports_missing_chunk_ids():
     assert placeholder.content == ""
     assert placeholder.metadata["header_path"] == ""
     assert placeholder.metadata["file_path"] == ""
-    assert result.metadata["missing_chunk_ids"] == ["doc1_chunk_0"]
+    assert result.state.missing_chunk_ids == ["doc1_chunk_0"]
 
 
 def test_hydrate_stage_preserves_candidate_order_with_mixed_hits_and_misses():
@@ -70,9 +70,9 @@ def test_hydrate_stage_preserves_candidate_order_with_mixed_hits_and_misses():
         _context([("a", 0.9), ("missing", 0.5), ("b", 0.1)])
     )
 
-    chunk_ids = [c.chunk_id for c in result.metadata["chunk_results"]]
+    chunk_ids = [c.chunk_id for c in result.state.chunk_results]
     assert chunk_ids == ["a", "missing", "b"]
-    assert result.metadata["missing_chunk_ids"] == ["missing"]
+    assert result.state.missing_chunk_ids == ["missing"]
 
 
 def test_hydrate_stage_does_not_mutate_input_context():

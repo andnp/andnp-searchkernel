@@ -4,6 +4,7 @@ import pytest
 
 from searchkernel.pipeline.stage import SearchContext
 from searchkernel.pipeline.stages.rag_fusion import RAGFusionConfig, RAGFusionStage
+from searchkernel.search.types import SearchResultDict
 
 
 def _context(query: str = "original query") -> SearchContext:
@@ -22,7 +23,12 @@ async def test_rag_fusion_stage_is_a_noop_passthrough_when_disabled():
     async def generate_query_variants(query: str, num_variants: int) -> list[str]:
         raise AssertionError("must not be called when disabled")
 
-    async def retrieve(query, top_k, excluded_files, docs_root):
+    async def retrieve(
+        query: str,
+        top_k: int,
+        excluded_files: set[str] | None,
+        docs_root: Path,
+    ) -> list[SearchResultDict]:
         raise AssertionError("must not be called when disabled")
 
     context = _context()
@@ -41,7 +47,12 @@ async def test_rag_fusion_stage_retrieves_over_original_plus_variants_and_fuses(
         assert num_variants == 2
         return [f"{query} variant {i}" for i in range(num_variants)]
 
-    async def retrieve(query, top_k, excluded_files, docs_root):
+    async def retrieve(
+        query: str,
+        top_k: int,
+        excluded_files: set[str] | None,
+        docs_root: Path,
+    ) -> list[SearchResultDict]:
         seen_queries.append(query)
         if query == "original query":
             return [
