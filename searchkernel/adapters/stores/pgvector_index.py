@@ -291,15 +291,15 @@ class PGVectorIndex:
     def remove(self, document_id: str) -> None:
         chunk_ids = self.get_chunk_ids_for_document(document_id)
         if chunk_ids:
-            self._store.delete(chunk_ids)
+            self._store.delete_for_model(chunk_ids, self._model_name, self._dim)
 
     def remove_chunk(self, chunk_id: str) -> None:
-        self._store.delete([chunk_id])
+        self._store.delete_for_model([chunk_id], self._model_name, self._dim)
 
     def prune_document(self, doc_id: str) -> int:
         chunk_ids = self.get_chunk_ids_for_document(doc_id)
         if chunk_ids:
-            self._store.delete(chunk_ids)
+            self._store.delete_for_model(chunk_ids, self._model_name, self._dim)
         return len(chunk_ids)
 
     def update_chunk_path(
@@ -323,7 +323,7 @@ class PGVectorIndex:
         )
         record.embedding = self._embedder.embed([body])[0]
         self._store.upsert([record], self._model_name, self._dim)
-        self._store.delete([old_chunk_id])
+        self._store.delete_for_model([old_chunk_id], self._model_name, self._dim)
         return True
 
     def is_ready(self) -> bool:
@@ -359,7 +359,7 @@ class PGVectorIndex:
             cursor.close()
             self._conn_pool.put_connection(conn)
         if record_ids:
-            self._store.delete(record_ids)
+            self._store.delete_for_model(record_ids, self._model_name, self._dim)
 
     def _fetch_records(self, record_ids: list[str]) -> dict[str, tuple[str, dict[str, Any]]]:
         if not record_ids:
@@ -367,8 +367,15 @@ class PGVectorIndex:
         conn = self._conn_pool.get_connection()
         try:
             cursor = conn.cursor()
+            table_name = self._own_vector_table_name(cursor)
+            if table_name is None:
+                return {}
             cursor.execute(
-                "SELECT record_id, body, metadata FROM records WHERE record_id = ANY(%s);",
+                sql.SQL(
+                    "SELECT r.record_id, r.body, r.metadata "
+                    "FROM records r JOIN {table} v ON v.record_id = r.record_id "
+                    "WHERE r.record_id = ANY(%s);"
+                ).format(table=sql.Identifier(table_name)),
                 (record_ids,),
             )
             return {row[0]: (row[1], row[2] or {}) for row in cursor.fetchall()}

@@ -25,7 +25,7 @@ from tests.integration.conftest import pg_dsn_for_schema, pg_worker_schema
 
 @pytest.fixture(scope="session")
 def pg_dsn():
-    """Get PostgreSQL DSN from environment."""
+    """Use the Docker-backed DSN installed by the integration conftest."""
     dsn = os.environ.get("SEARCHKERNEL_PG_DSN")
     if not dsn:
         pytest.skip("SEARCHKERNEL_PG_DSN not set")
@@ -234,6 +234,115 @@ class TestVectorStore:
         )
         assert len(results) == 3
 
+    def test_search_filters_source_kinds(self, pg_conn, fixture_records):
+        """Test vector search filters without leaking other record kinds."""
+        other = Record(
+            source_kind="other",
+            source_id="other:1",
+            title="Other record",
+            body="Machine learning from another source",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        store = PGVectorStore(pg_conn)
+        store.upsert([*fixture_records, other], model_name="filtered-model", dim=4)
+
+        filtered = store.search(
+            [1.0, 0.0, 0.0, 0.0],
+            k=10,
+            model_name="filtered-model",
+            dim=4,
+            filters={"source_kinds": ["test"]},
+        )
+        assert "other:1" not in {record_id for record_id, _score in filtered}
+        assert store.search(
+            [1.0, 0.0, 0.0, 0.0],
+            k=10,
+            model_name="filtered-model",
+            dim=4,
+            filters={"source_kinds": ["missing"]},
+        ) == []
+
+    def test_dimension_and_model_tables_are_isolated(self, pg_conn, fixture_records):
+        """Test that model/dimension pairs select only their own table."""
+        store = PGVectorStore(pg_conn)
+        store.upsert(fixture_records, model_name="model-four", dim=4)
+        three_dimensional = Record(
+            source_kind="three",
+            source_id="three:1",
+            title="Three dimensional",
+            body="Three dimensional vector",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            embedding=[1.0, 0.0, 0.0],
+        )
+        store.upsert([three_dimensional], model_name="model-three", dim=3)
+
+        assert store.search(
+            [1.0, 0.0, 0.0],
+            k=10,
+            model_name="model-four",
+            dim=3,
+        ) == []
+        assert store.search(
+            [1.0, 0.0, 0.0],
+            k=10,
+            model_name="model-three",
+            dim=3,
+        ) == [("three:1", pytest.approx(1.0))]
+
+    def test_delete_removes_records_from_all_models(self, pg_conn, fixture_records):
+        """Test global deletion removes vectors from every model table."""
+        store = PGVectorStore(pg_conn)
+        store.upsert(fixture_records, model_name="model-v1", dim=4)
+        store.upsert(fixture_records, model_name="model-v2", dim=4)
+
+        store.delete(["test:1"])
+
+        for model_name in ("model-v1", "model-v2"):
+            results = store.search(
+                [1.0, 0.0, 0.0, 0.0],
+                k=10,
+                model_name=model_name,
+                dim=4,
+            )
+            assert "test:1" not in {record_id for record_id, _score in results}
+
+    def test_failed_upsert_does_not_poison_connection_or_leave_rows(self, pg_conn):
+        """Test malformed vectors fail before partially writing a transaction."""
+        now = datetime.now(UTC)
+        good = Record(
+            source_kind="failure",
+            source_id="failure:good",
+            title="Good",
+            body="Good record",
+            created_at=now,
+            updated_at=now,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        bad = Record(
+            source_kind="failure",
+            source_id="failure:bad",
+            title="Bad",
+            body="Bad record",
+            created_at=now,
+            updated_at=now,
+            embedding=[1.0, 0.0, 0.0],
+        )
+        store = PGVectorStore(pg_conn)
+
+        with pytest.raises(ValueError, match="Embedding dimension mismatch"):
+            store.upsert([good, bad], model_name="failure-model", dim=4)
+
+        assert store.search(
+            good.embedding, k=10, model_name="failure-model", dim=4
+        ) == []
+        store.upsert([good], model_name="failure-model", dim=4)
+        assert store.search(
+            good.embedding, k=10, model_name="failure-model", dim=4
+        )[0][0] == good.source_id
+
     def test_hnsw_index_exists_per_model_table(self, pg_conn, fixture_records):
         """Test that an HNSW index is created on the per-model vector table."""
         store = PGVectorStore(pg_conn)
@@ -352,6 +461,22 @@ class TestKeywordStore:
         assert len(results) > 0
         assert results[0][0] == "test:3"
 
+    def test_keyword_index_ignores_missing_records(self, pg_conn):
+        """Test indexing an unknown record does not create searchable data."""
+        record = Record(
+            source_kind="missing",
+            source_id="missing:1",
+            title="Missing",
+            body="This record is not in the records table",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        keyword_store = PGKeywordStore(pg_conn)
+
+        keyword_store.index([record])
+
+        assert keyword_store.search("missing", k=10) == []
+
 
 class TestGraphStore:
     """Tests for GraphStore port implementation."""
@@ -374,6 +499,17 @@ class TestGraphStore:
 
         assert "test:2" in neighbor_ids
         assert "test:3" in neighbor_ids
+
+    def test_edge_upsert_updates_weight_and_missing_neighbors_are_empty(self, pg_conn):
+        """Test graph edge conflict updates and empty lookups."""
+        store = PGGraphStore(pg_conn)
+        store.upsert_edges([("source", "target", "related", 0.9)])
+        store.upsert_edges([("source", "target", "related", 0.2)])
+
+        assert store.neighbors("source", depth=3) == [
+            ("target", "related", pytest.approx(0.2))
+        ]
+        assert store.neighbors("missing") == []
 
     def test_neighbors_with_edge_type_filter(self, pg_conn):
         """Test neighbor retrieval with edge type filter."""

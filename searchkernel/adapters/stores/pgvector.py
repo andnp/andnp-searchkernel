@@ -302,6 +302,13 @@ class PGVectorStore:
         if not records:
             return
 
+        for record in records:
+            if record.embedding is not None and len(record.embedding) != dim:
+                raise ValueError(
+                    f"Embedding dimension mismatch for record {record.source_id}: "
+                    f"expected {dim}, got {len(record.embedding)}"
+                )
+
         conn = self.conn_pool.get_connection()
         try:
             cursor = conn.cursor()
@@ -353,11 +360,6 @@ class PGVectorStore:
             for record in records:
                 if record.embedding is None:
                     continue
-                if len(record.embedding) != dim:
-                    raise ValueError(
-                        f"Embedding dimension mismatch for record {record.source_id}: "
-                        f"expected {dim}, got {len(record.embedding)}"
-                    )
                 cursor.execute(
                     upsert_vec_sql,
                     (record.source_id, _vector_literal(record.embedding)),
@@ -475,6 +477,58 @@ class PGVectorStore:
 
             conn.commit()
             logger.debug(f"Deleted {len(record_ids)} records")
+        finally:
+            cursor.close()
+            self.conn_pool.put_connection(conn)
+
+    def delete_for_model(self, record_ids: list[str], model_name: str, dim: int) -> None:
+        """Delete records from one model while preserving other model vectors."""
+        if not record_ids:
+            return
+
+        conn = self.conn_pool.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT table_name FROM vector_tables WHERE model_name = %s AND dim = %s;",
+                (model_name, dim),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return
+            table_name = row[0]
+
+            cursor.execute(
+                sql.SQL("DELETE FROM {table} WHERE record_id = ANY(%s);").format(
+                    table=sql.Identifier(table_name)
+                ),
+                (record_ids,),
+            )
+
+            cursor.execute("SELECT table_name FROM vector_tables;")
+            table_names = [table_row[0] for table_row in cursor.fetchall()]
+            remaining_checks = [
+                sql.SQL(
+                    "NOT EXISTS (SELECT 1 FROM {table} v "
+                    "WHERE v.record_id = r.record_id)"
+                ).format(table=sql.Identifier(other_table))
+                for other_table in table_names
+            ]
+            if remaining_checks:
+                cursor.execute(
+                    sql.SQL("DELETE FROM records r WHERE r.record_id = ANY(%s) AND {}").format(
+                        sql.SQL(" AND ").join(remaining_checks)
+                    ),
+                    (record_ids,),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM records WHERE record_id = ANY(%s);",
+                    (record_ids,),
+                )
+
+            cursor.execute("UPDATE index_epoch SET epoch = epoch + 1;")
+            conn.commit()
         finally:
             cursor.close()
             self.conn_pool.put_connection(conn)

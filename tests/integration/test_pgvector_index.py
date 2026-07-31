@@ -2,8 +2,8 @@
 PGVectorStore that lets the live index/search path run on pgvector.
 
 Uses a stub embedder (no real model load) against a live Postgres, so these
-tests are fast while still exercising the real SQL. Set SEARCHKERNEL_PG_DSN
-to run them.
+tests are fast while still exercising the real SQL. The integration conftest
+starts a temporary pgvector container when SEARCHKERNEL_PG_DSN is absent.
 
 Each test gets its own uuid-suffixed embedding-model name and doc/chunk id
 prefix so tests stay isolated from each other under the repo's default
@@ -37,7 +37,6 @@ def _with_hash(chunk):
     if hasattr(modified_time, "isoformat"):
         chunk.metadata["modified_time"] = modified_time.isoformat()
     return chunk
-
 
 
 class _StubEmbedder:
@@ -87,6 +86,15 @@ def test_add_chunks_then_get_chunk_by_id(index, prefix):
     assert result["header_path"] == "Intro"
 
 
+def test_lifecycle_methods_are_safe_no_ops(index, tmp_path):
+    index.add_chunks([])
+    index.warm_up()
+    index.persist(tmp_path / "index")
+    index.load(tmp_path / "index")
+    index.clear()
+    assert index.is_ready() is True
+
+
 def test_get_chunk_by_id_missing_returns_none(index, prefix):
     assert index.get_chunk_by_id(f"{prefix}_nope") is None
 
@@ -110,6 +118,25 @@ def test_search_returns_added_chunk(index, prefix):
 
 def test_search_empty_query_returns_empty(index):
     assert index.search("   ") == []
+
+
+def test_search_excludes_matching_files(index, prefix, tmp_path):
+    index.add_chunks(
+        [
+            _chunk(f"{prefix}_excluded_chunk_0", f"{prefix}_excluded", "hello world"),
+            _chunk(f"{prefix}_kept_chunk_0", f"{prefix}_kept", "goodbye"),
+        ]
+    )
+
+    results = index.search(
+        "hello world",
+        top_k=2,
+        excluded_files={f"{prefix}_excluded"},
+        docs_root=tmp_path,
+    )
+
+    assert results
+    assert all(result["file_path"] != f"{prefix}_excluded.md" for result in results)
 
 
 def test_get_chunk_ids_for_document_and_get_document_ids(index, prefix):
@@ -136,6 +163,20 @@ def test_get_parent_content(index, prefix):
 
     assert index.get_parent_content(chunk_id) == "parent text"
     assert index.get_parent_content(f"{prefix}_missing") is None
+
+
+def test_get_embedding_for_empty_chunk_returns_none(index, prefix):
+    chunk = _with_hash(
+        Chunk(
+            chunk_id=f"{prefix}_empty_chunk_0",
+            record_id=f"{prefix}_empty",
+            content="",
+            metadata={},
+        )
+    )
+    index.add_chunk(chunk)
+
+    assert index.get_embedding_for_chunk(chunk.chunk_id) is None
 
 
 def test_remove_deletes_all_chunks_for_document(index, prefix):
@@ -216,6 +257,22 @@ def test_clear_removes_only_this_models_chunks(index, prefix):
     assert index.get_chunk_by_id(f"{doc1}_chunk_0") is None
 
 
+def test_clear_preserves_same_chunk_in_other_model(index, prefix):
+    chunk = _chunk(f"{prefix}_shared_chunk_0", f"{prefix}_shared", "shared content")
+    other = PGVectorIndex(
+        pg_dsn=index._conn_pool.dsn,
+        embedder=_StubEmbedder(f"other-{prefix}"),
+    )
+    index.add_chunk(chunk)
+    other.add_chunk(chunk)
+
+    index.clear()
+
+    assert index.get_chunk_by_id(chunk.chunk_id) is None
+    assert other.get_chunk_by_id(chunk.chunk_id) is not None
+    other.clear()
+
+
 def test_is_ready_is_always_true(index):
     assert index.is_ready() is True
 
@@ -235,3 +292,19 @@ def test_get_embedding_for_chunk_recomputes_from_content(index, prefix):
 
 def test_get_embedding_for_chunk_missing_returns_none(index, prefix):
     assert index.get_embedding_for_chunk(f"{prefix}_missing") is None
+
+
+def test_search_skips_missing_record_rows(index, prefix):
+    chunk = _chunk(f"{prefix}_orphan_chunk_0", f"{prefix}_orphan", "orphan content")
+    index.add_chunk(chunk)
+
+    conn = index._conn_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM records WHERE record_id = %s;", (chunk.chunk_id,))
+        conn.commit()
+    finally:
+        cursor.close()
+        index._conn_pool.put_connection(conn)
+
+    assert index.search("orphan content") == []
