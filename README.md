@@ -20,6 +20,14 @@ To use an existing PostgreSQL instance instead, set
 `SEARCHKERNEL_PG_DSN` to its connection string. The database must allow the
 `vector` extension to be created.
 
+## Releases
+
+Merges to `main` with `feat`, `fix`, or breaking Conventional Commits are
+released automatically. The release workflow bumps the SemVer version,
+updates `pyproject.toml` and `uv.lock`, pushes a `v*` tag, and dispatches the
+PyPI publishing workflow. Documentation, chore, and test-only commits do not
+create releases.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
