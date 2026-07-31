@@ -39,7 +39,7 @@ class CrossEncoderModelProtocol(Protocol):
 
 
 class CrossEncoderProtocol(Protocol):
-    def predict(self, inputs: list[tuple[str, str]]) -> Iterable[object]: ...
+    def predict(self, sentences: list[tuple[str, str]]) -> Iterable[object]: ...
 
 
 def _is_iterable_scores(value: object) -> TypeGuard[Iterable[object]]:
@@ -58,8 +58,8 @@ class _CrossEncoderAdapter:
     def __init__(self, model: CrossEncoderModelProtocol):
         self._model = model
 
-    def predict(self, inputs: list[tuple[str, str]]) -> Iterable[object]:
-        predictions = self._model.predict(inputs)
+    def predict(self, sentences: list[tuple[str, str]]) -> Iterable[object]:
+        predictions = self._model.predict(sentences)
         if not _is_iterable_scores(predictions):
             raise TypeError("Cross-encoder returned a non-iterable score result")
         return predictions
