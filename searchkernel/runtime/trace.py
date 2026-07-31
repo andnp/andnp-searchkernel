@@ -52,6 +52,9 @@ class QueryTrace:
     query_text: str
     """The query that was executed."""
 
+    include_query: bool = True
+    """Whether serialized traces may include the full query text."""
+
     start_time: float = field(default_factory=time.perf_counter)
     """Wall-clock time when the query started."""
 
@@ -110,10 +113,11 @@ class QueryTrace:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary."""
         result = {
-            "query": self.query_text,
             "total_duration_ms": self.total_duration_ms,
             "spans": [span.to_dict() for span in self.spans.values()],
         }
+        if self.include_query:
+            result["query"] = self.query_text
         if self.provenance is not None:
             result["provenance"] = self.provenance
         return result

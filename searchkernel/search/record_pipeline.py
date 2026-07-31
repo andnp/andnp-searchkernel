@@ -39,6 +39,7 @@ from searchkernel.runtime import (
     UnstableCacheKey,
     fingerprint,
 )
+from searchkernel.runtime.trace import QueryTrace
 from searchkernel.search.adaptive_limit import resolve_adaptive_result_limit
 from searchkernel.search.bounded_graph import (
     TypedGraphEdge,
@@ -175,6 +176,7 @@ class RecordSearchOutcome:
     missing_record_ids: tuple[str, ...] = ()
     cache_diagnostics: tuple[str, ...] = ()
     diagnostics: tuple[str, ...] = ()
+    trace: QueryTrace | None = None
 
     @property
     def degraded(self) -> bool:
@@ -213,6 +215,7 @@ class RecordSearchConfig:
     expansion_timeout_s: float = 0.25
     expansion_top_k: int = 3
     expansion_similarity_threshold: float = 0.5
+    capture_trace: bool = False
     adaptive_enabled: bool = False
     maximum_limit: int = 100
     score_ratio_floor: float = 0.5
@@ -336,6 +339,11 @@ class RecordSearchPipeline:
         missing_record_ids: list[str] = []
         cache_diagnostics: list[str] = []
         diagnostics: list[str] = []
+        trace = (
+            QueryTrace(query_text=query, include_query=False)
+            if self._config.capture_trace
+            else None
+        )
         filters = dict(filters or {})
         filters.setdefault("statuses", ["active"])
         plan = self._router.route(
@@ -348,6 +356,16 @@ class RecordSearchPipeline:
             rerank_available=False,
         )
         diagnostics.extend(_plan_diagnostics(plan))
+        if trace is not None:
+            trace.provenance = {
+                "query_plan": {
+                    "type": plan.query_type.name.lower(),
+                    "signals": plan.signals.names,
+                    "lanes": plan.enabled_lanes,
+                    "budgets": plan.lane_budgets,
+                    "skip_reasons": plan.diagnostic_skip_reasons,
+                }
+            }
         acquisition_limit = max(
             plan.keyword_candidate_budget,
             plan.vector_candidate_budget,
@@ -628,12 +646,20 @@ class RecordSearchPipeline:
         if self._policy.post_process is not None:
             hydrated = list(self._policy.post_process(hydrated))
 
+        if trace is not None:
+            trace.provenance = {
+                **(trace.provenance or {}),
+                "diagnostics": tuple(diagnostics),
+            }
+            trace.close()
+
         return RecordSearchOutcome(
             results=tuple(hydrated),
             failures=tuple(failures),
             missing_record_ids=tuple(missing_record_ids),
             cache_diagnostics=tuple(cache_diagnostics),
             diagnostics=tuple(diagnostics),
+            trace=trace,
         )
 
     async def _acquire_keyword(
