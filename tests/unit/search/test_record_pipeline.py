@@ -776,6 +776,52 @@ async def test_trace_is_redacted_and_contains_routing_diagnostics() -> None:
     assert "diagnostics" in trace["provenance"]
 
 
+async def test_rerank_runs_once_with_a_bounded_candidate_set() -> None:
+    class Reranker:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def rerank(self, query: str, documents: list[str]) -> list[float]:
+            self.calls.append(documents)
+            return [0.2, 0.9]
+
+    reranker = Reranker()
+    records = {record_id: _record(record_id) for record_id in ("a", "b")}
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0), ("b", 0.9)]),
+        hydrator=_hydrator(records),
+        reranker=reranker,
+        config=RecordSearchConfig(rerank_budget=2),
+    )
+
+    outcome = await pipeline.async_search("query", limit=2)
+
+    assert len(reranker.calls) == 1
+    assert len(reranker.calls[0]) == 2
+    assert [result.record_id for result in outcome.results] == ["b", "a"]
+    assert "rerank:applied:2" in outcome.diagnostics
+
+
+async def test_rerank_failure_falls_back_deterministically_in_lenient_mode() -> None:
+    class FailingReranker:
+        def rerank(self, query: str, documents: list[str]) -> list[float]:
+            raise RuntimeError("reranker unavailable")
+
+    records = {record_id: _record(record_id) for record_id in ("a", "b")}
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("b", 1.0), ("a", 1.0)]),
+        hydrator=_hydrator(records),
+        reranker=FailingReranker(),
+        config=RecordSearchConfig(rerank_budget=2, failure_mode="lenient"),
+    )
+
+    outcome = await pipeline.async_search("query", limit=2)
+
+    assert [result.record_id for result in outcome.results] == ["a", "b"]
+    assert outcome.failures[0].stage == "rerank"
+    assert "rerank:fallback:RuntimeError" in outcome.diagnostics
+
+
 async def test_batch_graph_and_hydration_use_canonical_keys_once() -> None:
     seed = RecordIdentity("workspace-a", "note", "seed")
     target = RecordIdentity("workspace-b", "commit", "target")
