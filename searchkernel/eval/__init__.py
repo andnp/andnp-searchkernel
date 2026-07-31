@@ -20,6 +20,13 @@ from searchkernel.eval.runner import (
     run_benchmark,
     run_eval,
 )
+from searchkernel.eval.synthetic import (
+    SyntheticCorpus,
+    make_1k_corpus,
+    make_10k_corpus,
+    make_100k_corpus,
+    make_synthetic_corpus,
+)
 
 __all__ = [
     "AbReport",
@@ -33,9 +40,14 @@ __all__ = [
     "MetricSnapshot",
     "SearchExecution",
     "SliceReport",
+    "SyntheticCorpus",
     "ab_eval",
     "enforce_ab_gate",
     "evaluate_ab_gate",
+    "make_1k_corpus",
+    "make_10k_corpus",
+    "make_100k_corpus",
+    "make_synthetic_corpus",
     "run_benchmark",
     "run_eval",
 ]
