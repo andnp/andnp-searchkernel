@@ -1,6 +1,7 @@
 """Unit tests for ChunkHashStore."""
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
@@ -332,3 +333,117 @@ def test_hash_store_persist_io_error_handling(tmp_path, monkeypatch):
     finally:
         # Restore permissions
         storage_path.parent.chmod(0o755)
+
+
+def test_hash_store_batch_indexes_support_lookup_and_delete(tmp_path):
+    store = ChunkHashStore(tmp_path / "chunk_hashes.json")
+    store.set_hashes(
+        [
+            ("doc#chunk-0", "same"),
+            ("doc#chunk-1", "same"),
+            ("other#chunk-0", "other"),
+        ]
+    )
+
+    assert store.get_chunks_by_document("doc") == [
+        ("doc#chunk-0", "same"),
+        ("doc#chunk-1", "same"),
+    ]
+    assert store.get_chunk_id_by_hash("same") == "doc#chunk-0"
+
+    with sqlite3.connect(store.db_path) as conn:
+        document_plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT chunk_id FROM chunk_hashes WHERE document_id = ?",
+            ("doc",),
+        ).fetchall()
+        content_plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT chunk_id FROM chunk_hashes WHERE content_hash = ?",
+            ("same",),
+        ).fetchall()
+
+    assert any("idx_chunk_hashes_document" in row[-1] for row in document_plan)
+    assert any("idx_chunk_hashes_content" in row[-1] for row in content_plan)
+
+    store.delete_chunks(["doc#chunk-0", "other#chunk-0"])
+    assert store.get_chunk_id_by_hash("same") == "doc#chunk-1"
+    assert store.get_hash("other#chunk-0") is None
+
+
+def test_hash_store_migrates_json_once(tmp_path):
+    storage_path = tmp_path / "chunk_hashes.json"
+    storage_path.write_text(
+        json.dumps(
+            {
+                "doc#chunk-0": "hash-0",
+                "doc#chunk-1": "hash-1",
+            }
+        )
+    )
+
+    store = ChunkHashStore(storage_path)
+
+    assert store.get_chunks_by_document("doc") == [
+        ("doc#chunk-0", "hash-0"),
+        ("doc#chunk-1", "hash-1"),
+    ]
+    with sqlite3.connect(store.db_path) as conn:
+        status = conn.execute(
+            "SELECT value FROM chunk_hash_store_meta WHERE key = 'json_migration'"
+        ).fetchone()
+    assert status == ("complete",)
+
+    storage_path.write_text(json.dumps({"new#chunk-0": "new-hash"}))
+    reloaded = ChunkHashStore(storage_path)
+    assert reloaded.get_hash("doc#chunk-0") == "hash-0"
+    assert reloaded.get_hash("new#chunk-0") is None
+
+
+def test_hash_store_corrupt_json_records_failure_for_explicit_retry(tmp_path):
+    storage_path = tmp_path / "chunk_hashes.json"
+    storage_path.write_text("{not valid")
+
+    store = ChunkHashStore(storage_path)
+
+    assert store.get_hash("missing") is None
+    with sqlite3.connect(store.db_path) as conn:
+        status = conn.execute(
+            "SELECT value FROM chunk_hash_store_meta WHERE key = 'json_migration'"
+        ).fetchone()
+    assert status is not None
+    assert status[0].startswith("failed:")
+
+    storage_path.write_text(json.dumps({"fixed#chunk-0": "fixed-hash"}))
+    assert store.migrate_json(force=True) is True
+    assert store.get_hash("fixed#chunk-0") == "fixed-hash"
+
+
+def test_hash_store_retries_interrupted_json_migration(tmp_path):
+    storage_path = tmp_path / "chunk_hashes.json"
+    storage_path.write_text(json.dumps({"doc#chunk-0": "hash-0"}))
+    store = ChunkHashStore(storage_path)
+
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            """
+            UPDATE chunk_hash_store_meta
+            SET value = 'in_progress'
+            WHERE key = 'json_migration'
+            """
+        )
+        conn.execute("DELETE FROM chunk_hashes")
+        conn.commit()
+
+    reloaded = ChunkHashStore(storage_path)
+
+    assert reloaded.get_hash("doc#chunk-0") == "hash-0"
+
+
+def test_hash_store_recovers_corrupt_sqlite_database(tmp_path):
+    storage_path = tmp_path / "chunk_hashes.json"
+    db_path = storage_path.with_suffix(".sqlite3")
+    db_path.write_bytes(b"not a sqlite database")
+
+    store = ChunkHashStore(storage_path)
+
+    assert store.get_hash("missing") is None
+    assert db_path.with_suffix(".sqlite3.corrupt").exists()
