@@ -101,14 +101,35 @@ def _chunk_to_record(chunk: Chunk) -> Record:
     )
 
 
-def _row_to_result(record_id: str, body: str, metadata: dict, score: float) -> SearchResultDict:
+def _row_to_result(
+    record_id: str,
+    body: str,
+    metadata: dict[str, Any],
+    score: float,
+) -> SearchResultDict:
+    doc_id = metadata.get("doc_id")
+    if not isinstance(doc_id, str):
+        raise TypeError(f"Missing string doc_id metadata for record {record_id}")
+
+    header_path = metadata.get("header_path", "")
+    if not isinstance(header_path, str):
+        header_path = ""
+
+    file_path = metadata.get("file_path", "")
+    if not isinstance(file_path, str):
+        file_path = ""
+
+    project_id = metadata.get("project_id")
+    if project_id is not None and not isinstance(project_id, str):
+        project_id = None
+
     return {
         "chunk_id": record_id,
-        "doc_id": metadata.get("doc_id"),
+        "doc_id": doc_id,
         "score": score,
-        "header_path": metadata.get("header_path", ""),
-        "file_path": metadata.get("file_path", ""),
-        "project_id": metadata.get("project_id"),
+        "header_path": header_path,
+        "file_path": file_path,
+        "project_id": project_id,
         "content": body,
         "metadata": metadata,
     }
@@ -220,6 +241,7 @@ class PGVectorIndex:
 
     def get_chunk_ids_for_document(self, doc_id: str) -> list[str]:
         conn = self._conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
             table_name = self._own_vector_table_name(cursor)
@@ -235,11 +257,13 @@ class PGVectorIndex:
             )
             return [row[0] for row in cursor.fetchall()]
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self._conn_pool.put_connection(conn)
 
     def get_document_ids(self) -> list[str]:
         conn = self._conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
             table_name = self._own_vector_table_name(cursor)
@@ -255,7 +279,8 @@ class PGVectorIndex:
             )
             return [row[0] for row in cursor.fetchall() if row[0] is not None]
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self._conn_pool.put_connection(conn)
 
     def _own_vector_table_name(self, cursor) -> str | None:
@@ -344,6 +369,7 @@ class PGVectorIndex:
         should not touch another's.
         """
         conn = self._conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
             table_name = self._own_vector_table_name(cursor)
@@ -356,7 +382,8 @@ class PGVectorIndex:
             )
             record_ids = [r[0] for r in cursor.fetchall()]
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self._conn_pool.put_connection(conn)
         if record_ids:
             self._store.delete_for_model(record_ids, self._model_name, self._dim)
@@ -365,6 +392,7 @@ class PGVectorIndex:
         if not record_ids:
             return {}
         conn = self._conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
             table_name = self._own_vector_table_name(cursor)
@@ -380,5 +408,6 @@ class PGVectorIndex:
             )
             return {row[0]: (row[1], row[2] or {}) for row in cursor.fetchall()}
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self._conn_pool.put_connection(conn)

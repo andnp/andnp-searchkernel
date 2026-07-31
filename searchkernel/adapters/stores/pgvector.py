@@ -104,6 +104,7 @@ class PostgresConnection:
 def _create_schema(conn_pool: PostgresConnection) -> None:
     """Create idempotent schema for vector, keyword, graph, and cache stores."""
     conn = conn_pool.get_connection()
+    cursor = None
     try:
         cursor = conn.cursor()
         cursor.execute(
@@ -200,13 +201,15 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
 
         # Initialize epoch if not present
         cursor.execute("SELECT COUNT(*) FROM index_epoch;")
-        if cursor.fetchone()[0] == 0:
+        row = cursor.fetchone()
+        if row is not None and row[0] == 0:
             cursor.execute("INSERT INTO index_epoch (epoch) VALUES (0);")
 
         conn.commit()
         logger.info("pgvector schema initialized successfully")
     finally:
-        cursor.close()
+        if cursor is not None:
+            cursor.close()
         conn_pool.put_connection(conn)
 
 
@@ -310,6 +313,7 @@ class PGVectorStore:
                 )
 
         conn = self.conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
 
@@ -371,7 +375,8 @@ class PGVectorStore:
             conn.commit()
             logger.debug(f"Upserted {len(records)} records for model {model_name}")
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self.conn_pool.put_connection(conn)
 
     def search(
@@ -397,6 +402,7 @@ class PGVectorStore:
             List of (record_id, similarity_score) tuples, sorted descending
         """
         conn = self.conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
 
@@ -441,7 +447,8 @@ class PGVectorStore:
             conn.commit()
             return [(row[0], 1.0 - float(row[1])) for row in results]
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self.conn_pool.put_connection(conn)
 
     def delete(self, record_ids: list[str]) -> None:
@@ -454,6 +461,7 @@ class PGVectorStore:
             return
 
         conn = self.conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
 
@@ -478,7 +486,8 @@ class PGVectorStore:
             conn.commit()
             logger.debug(f"Deleted {len(record_ids)} records")
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self.conn_pool.put_connection(conn)
 
     def delete_for_model(self, record_ids: list[str], model_name: str, dim: int) -> None:
@@ -487,6 +496,7 @@ class PGVectorStore:
             return
 
         conn = self.conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
             cursor.execute(
@@ -530,19 +540,22 @@ class PGVectorStore:
             cursor.execute("UPDATE index_epoch SET epoch = epoch + 1;")
             conn.commit()
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self.conn_pool.put_connection(conn)
 
     def epoch(self) -> int:
         """Get current index epoch."""
         conn = self.conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
             cursor.execute("SELECT epoch FROM index_epoch LIMIT 1;")
             result = cursor.fetchone()
             return result[0] if result else 0
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self.conn_pool.put_connection(conn)
 
 
@@ -567,6 +580,7 @@ class PGKeywordStore:
             return
 
         conn = self.conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
 
@@ -584,7 +598,8 @@ class PGKeywordStore:
             conn.commit()
             logger.debug(f"Indexed {len(records)} records for keyword search")
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self.conn_pool.put_connection(conn)
 
     def search(
@@ -601,12 +616,13 @@ class PGKeywordStore:
             List of (record_id, relevance_score) tuples, sorted descending
         """
         conn = self.conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
 
             # Build WHERE clause for filters
             where_clause = ""
-            params = [query]
+            params: list[Any] = [query]
             if filters and "source_kinds" in filters:
                 source_kinds = filters["source_kinds"]
                 placeholders = ",".join(["%s"] * len(source_kinds))
@@ -629,7 +645,8 @@ class PGKeywordStore:
             results = cursor.fetchall()
             return [(row[0], float(row[1])) for row in results]
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self.conn_pool.put_connection(conn)
 
 
@@ -657,6 +674,7 @@ class PGGraphStore:
             return
 
         conn = self.conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
 
@@ -675,7 +693,8 @@ class PGGraphStore:
             conn.commit()
             logger.debug(f"Upserted {len(edges)} edges")
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self.conn_pool.put_connection(conn)
 
     def neighbors(
@@ -695,6 +714,7 @@ class PGGraphStore:
             List of (neighbor_id, edge_type, cumulative_weight) tuples
         """
         conn = self.conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
 
@@ -719,7 +739,8 @@ class PGGraphStore:
             results = cursor.fetchall()
             return [(row[0], row[1], float(row[2])) for row in results]
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self.conn_pool.put_connection(conn)
 
 
@@ -744,6 +765,7 @@ class PGCacheStore:
             Cached value, or None if not found or stale
         """
         conn = self.conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
             cursor.execute("SELECT value FROM cache_store WHERE key = %s;", (key,))
@@ -756,7 +778,8 @@ class PGCacheStore:
                 return value
             return None
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self.conn_pool.put_connection(conn)
 
     def set(self, key: str, value: Any, epoch: int) -> None:
@@ -768,6 +791,7 @@ class PGCacheStore:
             epoch: Index epoch at cache time
         """
         conn = self.conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
             value_json = json.dumps(value)
@@ -783,7 +807,8 @@ class PGCacheStore:
             )
             conn.commit()
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self.conn_pool.put_connection(conn)
 
     def invalidate_epoch(self, epoch: int) -> None:
@@ -793,6 +818,7 @@ class PGCacheStore:
             epoch: Entries with epoch <= this are discarded
         """
         conn = self.conn_pool.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
             cursor.execute(
@@ -802,5 +828,6 @@ class PGCacheStore:
             conn.commit()
             logger.debug(f"Invalidated cache entries for epochs <= {epoch}")
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             self.conn_pool.put_connection(conn)

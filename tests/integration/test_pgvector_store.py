@@ -353,6 +353,7 @@ class TestVectorStore:
         table_name = _vector_table_name("test-model", 4)
 
         conn = pg_conn.get_connection()
+        cursor = None
         try:
             cursor = conn.cursor()
             cursor.execute(
@@ -361,7 +362,8 @@ class TestVectorStore:
             )
             indexdefs = [row[0] for row in cursor.fetchall()]
         finally:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
             pg_conn.put_connection(conn)
 
         assert any("hnsw" in indexdef.lower() for indexdef in indexdefs), (
