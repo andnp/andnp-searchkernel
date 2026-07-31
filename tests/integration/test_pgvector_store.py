@@ -331,16 +331,18 @@ class TestVectorStore:
             embedding=[1.0, 0.0, 0.0],
         )
         store = PGVectorStore(pg_conn)
+        good_embedding = good.embedding
+        assert good_embedding is not None
 
         with pytest.raises(ValueError, match="Embedding dimension mismatch"):
             store.upsert([good, bad], model_name="failure-model", dim=4)
 
         assert store.search(
-            good.embedding, k=10, model_name="failure-model", dim=4
+            good_embedding, k=10, model_name="failure-model", dim=4
         ) == []
         store.upsert([good], model_name="failure-model", dim=4)
         assert store.search(
-            good.embedding, k=10, model_name="failure-model", dim=4
+            good_embedding, k=10, model_name="failure-model", dim=4
         )[0][0] == good.source_id
 
     def test_hnsw_index_exists_per_model_table(self, pg_conn, fixture_records):

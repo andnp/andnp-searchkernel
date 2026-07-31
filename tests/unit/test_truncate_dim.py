@@ -1,8 +1,7 @@
 """Tests for truncate_dim parameter in VectorIndex and PGVectorIndex."""
 
+import inspect
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from searchkernel.adapters.stores.pgvector_index import (
     PGVectorIndex,
@@ -46,19 +45,8 @@ class TestVectorIndexTruncateDim:
         index1 = VectorIndex(truncate_dim=256)
         assert index1._truncate_dim == 256
 
-        # Positional argument for truncate_dim would require it
-        # to be passed after keyword-only marker (*), which should fail.
-        # We verify the parameter is keyword-only by attempting to pass
-        # it as positional and catching TypeError.
-        with pytest.raises(TypeError):
-            # Attempting to pass 5 positional arguments
-            VectorIndex(
-                "BAAI/bge-small-en-v1.5",  # embedding_model_name
-                None,  # embedding_model
-                4,  # embedding_workers
-                4,  # torch_num_threads
-                256,  # This should fail (truncate_dim is keyword-only)
-            )
+        parameter = inspect.signature(VectorIndex).parameters["truncate_dim"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
 
     def test_vectorindex_truncate_dim_with_all_params(self):
         """VectorIndex accepts truncate_dim alongside all other parameters."""
@@ -267,14 +255,8 @@ class TestPGVectorIndexTruncateDim:
             )
             assert result_index is not None
 
-            # Positional argument for truncate_dim should fail
-            with pytest.raises(TypeError):
-                PGVectorIndex(
-                    "postgresql://localhost/test",  # pg_dsn
-                    "BAAI/bge-small-en-v1.5",  # embedding_model_name
-                    None,  # embedder
-                    256,  # This should fail (truncate_dim is keyword-only)
-                )
+            parameter = inspect.signature(PGVectorIndex).parameters["truncate_dim"]
+            assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
 
     def test_pgvectorindex_with_custom_model_name(self):
         """PGVectorIndex accepts custom embedding_model_name with truncate_dim."""

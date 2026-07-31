@@ -299,12 +299,14 @@ def test_search_skips_missing_record_rows(index, prefix):
     index.add_chunk(chunk)
 
     conn = index._conn_pool.get_connection()
+    cursor = None
     try:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM records WHERE record_id = %s;", (chunk.chunk_id,))
         conn.commit()
     finally:
-        cursor.close()
+        if cursor is not None:
+            cursor.close()
         index._conn_pool.put_connection(conn)
 
     assert index.search("orphan content") == []
