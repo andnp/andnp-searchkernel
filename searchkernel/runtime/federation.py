@@ -12,10 +12,15 @@ from dataclasses import (
 from dataclasses import (
     replace as dataclass_replace,
 )
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from searchkernel.domain import ScoredRef
+from searchkernel.ports.content_source import (
+    HierarchicalSearchableSource,
+    SearchableSource,
+)
 from searchkernel.ports.rerank import Reranker
+from searchkernel.ports.retrieval import SourceCapabilities
 from searchkernel.runtime.fanout import FanoutDiagnostic, gather_with_timeout
 from searchkernel.runtime.registry import SourceRegistry
 from searchkernel.search.diversity import (
@@ -24,6 +29,10 @@ from searchkernel.search.diversity import (
     apply_source_diversity,
 )
 from searchkernel.search.fusion import fuse_reciprocal_rank
+from searchkernel.search.hierarchical import (
+    HierarchicalRetrievalConfig,
+    search_hierarchical,
+)
 
 DEFAULT_PER_SOURCE_K = 10
 DEFAULT_PER_SOURCE_TIMEOUT_S = 5.0
@@ -36,7 +45,7 @@ class FederationSearchError(RuntimeError):
 
 @dataclass
 class FederationDiagnostic:
-    stage: Literal["source", "diversity", "rerank"]
+    stage: Literal["source", "diversity", "hierarchical", "rerank"]
     message: str
     exception_type: str = "Exception"
 
@@ -60,6 +69,7 @@ async def search_anything(
     ) = None,
     diversity_policy: SourceDiversityPolicy | None = None,
     candidate_embeddings: Mapping[str, Sequence[float]] | None = None,
+    hierarchical_config: HierarchicalRetrievalConfig | None = None,
 ) -> list[ScoredRef]:
     """Fuse the registered sources into one reranked list of ScoredRefs.
 
@@ -85,7 +95,16 @@ async def search_anything(
 
     fanout_diagnostics: list[FanoutDiagnostic] = []
     per_source_results = await gather_with_timeout(
-        [source.search(query, per_source_k, filters) for source in selected],
+        [
+            _search_source(
+                source,
+                query,
+                per_source_k,
+                filters,
+                hierarchical_config,
+            )
+            for source in selected
+        ],
         per_timeout_s=per_source_timeout_s,
         failure_mode=failure_mode,
         diagnostics=fanout_diagnostics,
@@ -106,7 +125,17 @@ async def search_anything(
     source_metadata: dict[str, dict[str, dict[str, Any]]] = {}
     first_seen: dict[str, int] = {}
 
-    for results in per_source_results:
+    for output in per_source_results:
+        if output is None:
+            continue
+        if diagnostics is not None and output.diagnostic is not None:
+            diagnostics.append(
+                FederationDiagnostic(
+                    stage="hierarchical",
+                    message=output.diagnostic,
+                )
+            )
+        results = output.results
         if not results:
             continue
 
@@ -241,6 +270,65 @@ async def search_anything(
 def _candidate_text(candidate: ScoredRef) -> str:
     text = candidate.metadata.get("text", "")
     return text if isinstance(text, str) else str(text)
+
+
+@dataclass(frozen=True)
+class _SourceSearchOutput:
+    results: list[ScoredRef]
+    diagnostic: str | None = None
+
+
+async def _search_source(
+    source: SearchableSource,
+    query: str,
+    k: int,
+    filters: dict[str, Any] | None,
+    hierarchical_config: HierarchicalRetrievalConfig | None,
+) -> _SourceSearchOutput:
+    if (
+        hierarchical_config is None
+        or not hierarchical_config.enabled
+    ):
+        results = await _call_source_search(source, query, k, filters)
+        return _SourceSearchOutput(results)
+
+    capabilities = getattr(source, "capabilities", None)
+    supports_hierarchical = (
+        isinstance(capabilities, SourceCapabilities)
+        and capabilities.supports_hierarchical_retrieval
+    )
+    if not supports_hierarchical:
+        results = await _call_source_search(source, query, k, filters)
+        return _SourceSearchOutput(
+            results,
+            f"hierarchical:fallback:capability_unavailable:{getattr(source, 'source_kind', 'unknown')}",
+        )
+
+    if not isinstance(source, HierarchicalSearchableSource):
+        results = await _call_source_search(source, query, k, filters)
+        return _SourceSearchOutput(
+            results,
+            f"hierarchical:fallback:contract_unavailable:{getattr(source, 'source_kind', 'unknown')}",
+        )
+
+    results = await search_hierarchical(
+        cast(HierarchicalSearchableSource, source),
+        query,
+        k=k,
+        config=hierarchical_config,
+        filters=filters,
+    )
+    return _SourceSearchOutput(results, "hierarchical:applied")
+
+
+async def _call_source_search(
+    source: SearchableSource,
+    query: str,
+    k: int,
+    filters: dict[str, Any] | None,
+) -> list[ScoredRef]:
+    results = await source.search(query, k, filters)
+    return list(results)
 
 
 async def _maybe_await[T](value: T | Awaitable[T]) -> T:

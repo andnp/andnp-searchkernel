@@ -5,6 +5,10 @@ from searchkernel.search.diversity import (
     SourceDiversityPolicy,
     apply_source_diversity,
 )
+from searchkernel.search.hierarchical import (
+    HierarchicalRetrievalConfig,
+    search_hierarchical,
+)
 from searchkernel.search.orchestrator import SearchOrchestrator
 from searchkernel.search.query_plan import (
     QueryPlan,
@@ -16,6 +20,7 @@ from searchkernel.search.record_pipeline import RecordSearchPipeline
 
 __all__ = [
     "DiversityDiagnostic",
+    "HierarchicalRetrievalConfig",
     "QueryPlan",
     "QueryRouter",
     "QueryRouterConfig",
@@ -24,4 +29,5 @@ __all__ = [
     "SourceDiversityPolicy",
     "apply_source_diversity",
     "route_query",
+    "search_hierarchical",
 ]

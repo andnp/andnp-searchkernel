@@ -11,6 +11,7 @@ from searchkernel.ports.chunking_config import ChunkTuningConfig
 from searchkernel.ports.content_source import (
     AsyncRecordIngestor,
     ContentSource,
+    HierarchicalSearchableSource,
     RecordIngestor,
     SearchableSource,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "EmbeddingSink",
     "GraphIndexPort",
     "GraphStore",
+    "HierarchicalSearchableSource",
     "IndexManagerPort",
     "KeywordIndexPort",
     "KeywordStore",

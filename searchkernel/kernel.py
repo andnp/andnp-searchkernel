@@ -22,6 +22,8 @@ from searchkernel.runtime import federation
 from searchkernel.runtime.federation import DEFAULT_PER_SOURCE_TIMEOUT_S
 from searchkernel.runtime.local import LocalSearchSource
 from searchkernel.runtime.registry import SourceRegistry
+from searchkernel.search.diversity import SourceDiversityPolicy
+from searchkernel.search.hierarchical import HierarchicalRetrievalConfig
 from searchkernel.search.orchestrator import SearchOrchestrator
 
 
@@ -38,6 +40,8 @@ class SearchKernel:
         config: object | None = None,
         embedder: EmbeddingProvider | None = None,
         per_source_timeout_s: float = DEFAULT_PER_SOURCE_TIMEOUT_S,
+        diversity_policy: SourceDiversityPolicy | None = None,
+        hierarchical_config: HierarchicalRetrievalConfig | None = None,
     ) -> None:
         self._registry = registry
         self._ingestor = ingestor
@@ -48,6 +52,8 @@ class SearchKernel:
         self._config = config
         self._embedder = embedder
         self._per_source_timeout_s = per_source_timeout_s
+        self._diversity_policy = diversity_policy
+        self._hierarchical_config = hierarchical_config
 
     @classmethod
     def build(
@@ -62,6 +68,8 @@ class SearchKernel:
         orchestrator: SearchOrchestrator | None = None,
         registry: SourceRegistry | None = None,
         per_source_timeout_s: float = DEFAULT_PER_SOURCE_TIMEOUT_S,
+        diversity_policy: SourceDiversityPolicy | None = None,
+        hierarchical_config: HierarchicalRetrievalConfig | None = None,
     ) -> "SearchKernel":
         """Compose a kernel from source adapters and provider instances.
 
@@ -96,6 +104,8 @@ class SearchKernel:
             config=config,
             embedder=effective_embedder,
             per_source_timeout_s=per_source_timeout_s,
+            diversity_policy=diversity_policy,
+            hierarchical_config=hierarchical_config,
         )
 
     @property
@@ -283,6 +293,8 @@ class SearchKernel:
             per_source_k=k,
             per_source_timeout_s=self._per_source_timeout_s,
             filters=filters,
+            diversity_policy=self._diversity_policy,
+            hierarchical_config=self._hierarchical_config,
         )
         return [self._to_search_result(ref) for ref in scored_refs]
 

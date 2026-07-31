@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from searchkernel.domain import ChangeSignal, Cursor, Record, ScoredRef
+from searchkernel.ports.retrieval import SourceCapabilities
 
 IngestionFailureMode = Literal["strict", "lenient"]
 RecordIngestionStatus = Literal["committed", "skipped", "failed", "cancelled"]
@@ -145,10 +146,33 @@ class SearchableSource(Protocol):
         ...
 
 
+@runtime_checkable
+class HierarchicalSearchableSource(Protocol):
+    """Optional parent-first search contract for structured source adapters."""
+
+    source_kind: str
+    capabilities: SourceCapabilities
+
+    async def search_parents(
+        self, query: str, k: int, filters: dict[str, Any] | None = None
+    ) -> Iterable[ScoredRef]:
+        ...
+
+    async def search_children(
+        self,
+        query: str,
+        parent_ids: Sequence[str],
+        k: int,
+        filters: dict[str, Any] | None = None,
+    ) -> Iterable[ScoredRef]:
+        ...
+
+
 __all__ = [
     "AsyncRecordIngestor",
     "CheckpointStore",
     "ContentSource",
+    "HierarchicalSearchableSource",
     "IngestionBatchResult",
     "IngestionError",
     "IngestionFailureMode",
