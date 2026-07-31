@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from itertools import islice
 
@@ -99,3 +100,35 @@ def embed_in_batches(
             )
         vectors.extend(list(vector) for vector in batch_vectors)
     return vectors
+
+
+async def async_embed_and_upsert(
+    inputs: list[EmbeddingInput],
+    *,
+    provider: EmbeddingBatchProvider,
+    sink: EmbeddingSink,
+    batch_size: int,
+) -> EmbeddingBatchResult:
+    """Run the blocking embedding/upsert path without blocking the event loop."""
+    return await asyncio.to_thread(
+        embed_and_upsert,
+        inputs,
+        provider=provider,
+        sink=sink,
+        batch_size=batch_size,
+    )
+
+
+async def async_embed_in_batches(
+    texts: list[str],
+    *,
+    provider: EmbeddingBatchProvider,
+    batch_size: int,
+) -> list[Vector]:
+    """Run blocking model inference in a worker thread."""
+    return await asyncio.to_thread(
+        embed_in_batches,
+        texts,
+        provider=provider,
+        batch_size=batch_size,
+    )

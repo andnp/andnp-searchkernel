@@ -1,112 +1,161 @@
-"""ContentSource port: adapters for ingesting content from external sources.
+"""Ports for asynchronous, checkpointed content ingestion."""
 
-This is the primary outbound port for the kernel. Content sources implement one
-of two flavors:
-  - Ingestible: the kernel stores and indexes the content
-  - Searchable: the source runs its own search; kernel merges results
-"""
+from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import AsyncIterator, Iterable, Sequence
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from searchkernel.domain import ChangeSignal, Cursor, Record, ScoredRef
+
+IngestionFailureMode = Literal["strict", "lenient"]
+RecordIngestionStatus = Literal["committed", "skipped", "failed", "cancelled"]
+
+
+@dataclass(frozen=True, slots=True)
+class RecordIngestionResult:
+    """Outcome for one record in an ingestion batch."""
+
+    source_kind: str
+    source_id: str
+    workspace_id: str | None
+    status: RecordIngestionStatus
+    cursor: Cursor = None
+    error: str | None = None
+
+    @property
+    def successful(self) -> bool:
+        return self.status in {"committed", "skipped"}
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionReceipt:
+    """Outcome of one committed or attempted ingestion batch."""
+
+    source_kind: str
+    workspace_id: str | None
+    checkpoint: Cursor
+    records: tuple[RecordIngestionResult, ...]
+    cancelled: bool = False
+
+    @property
+    def attempted(self) -> int:
+        return len(self.records)
+
+    @property
+    def committed(self) -> int:
+        return sum(record.status == "committed" for record in self.records)
+
+    @property
+    def skipped(self) -> int:
+        return sum(record.status == "skipped" for record in self.records)
+
+    @property
+    def failed(self) -> int:
+        return sum(record.status == "failed" for record in self.records)
+
+    @property
+    def successful(self) -> int:
+        return self.committed + self.skipped
+
+    @property
+    def failures(self) -> tuple[RecordIngestionResult, ...]:
+        return tuple(record for record in self.records if record.status == "failed")
+
+
+IngestionResult = IngestionReceipt
+IngestionBatchResult = IngestionReceipt
+
+
+class IngestionError(RuntimeError):
+    """Raised when strict ingestion cannot commit a complete batch."""
+
+    def __init__(self, receipt: IngestionReceipt):
+        self.receipt = receipt
+        super().__init__(
+            f"Failed to ingest {receipt.failed} record(s) from "
+            f"{receipt.source_kind!r} in strict mode"
+        )
 
 
 @runtime_checkable
 class ContentSource(Protocol):
-    """Ingestible source: kernel owns indexing and storage.
-
-    The source yields Records; the kernel chunks, embeds (unless the record
-    carries pre-computed embeddings), and indexes them.
-
-    Attributes:
-        source_kind: Stable identifier for this source type
-                     (e.g., "note", "git_commit", "gmail").
-    """
+    """Asynchronous source of source-agnostic records."""
 
     source_kind: str
 
-    def iter_records(self, since: Cursor | None = None) -> Iterable[Record]:
-        """
-        Iterate over records to ingest, optionally since a cursor.
-
-        Args:
-            since: Optional watermark (e.g., last processed commit SHA, timestamp).
-                   If provided, only records modified after this point are returned.
-
-        Yields:
-            Records ready for chunking and indexing.
-        """
+    def iter_records(self, since: Cursor | None = None) -> AsyncIterator[Record]:
+        """Yield records after the supplied source-owned cursor."""
         ...
 
     def change_signal(self) -> ChangeSignal:
-        """
-        Return change-detection signal for this source.
+        """Return source-specific watch or polling configuration."""
+        ...
 
-        Returns:
-            A dict with one of:
-              - {"watch": True}: use a file-watcher to detect changes
-              - {"poll_interval": 3600}: poll for changes every N seconds
-              Any other source-specific config can be included.
-        """
+    def cursor_for(self, record: Record) -> Cursor:
+        """Return the source-owned cursor represented by a record."""
+        ...
+
+
+@runtime_checkable
+class CheckpointStore(Protocol):
+    """Durable cursor persistence used after an index commit."""
+
+    async def load(
+        self, source_kind: str, workspace_id: str | None = None
+    ) -> Cursor:
+        ...
+
+    async def save(
+        self,
+        source_kind: str,
+        workspace_id: str | None,
+        checkpoint: Cursor,
+    ) -> None:
         ...
 
 
 @runtime_checkable
 class RecordIngestor(Protocol):
-    """Minimal indexing surface required to ingest source records."""
-
-    def index_record(self, record: Record) -> bool:
-        """Index one source-agnostic record."""
-        ...
-
-
-@runtime_checkable
-class AsyncRecordIngestor(Protocol):
-    """Checkpointed batch indexing boundary for record ingestion."""
+    """Asynchronous batch indexing boundary."""
 
     async def index_records(
         self,
-        records: list[Record],
+        records: Sequence[Record],
         *,
         checkpoint: Cursor | None = None,
-    ) -> Cursor:
-        """Index a batch and return the checkpoint safe to persist."""
+        failure_mode: IngestionFailureMode = "strict",
+    ) -> IngestionReceipt:
+        """Index a batch and report per-record outcomes."""
         ...
+
+
+AsyncRecordIngestor = RecordIngestor
 
 
 @runtime_checkable
 class SearchableSource(Protocol):
-    """Federated source: source runs its own retrieval; kernel merges results.
-
-    The source already owns embeddings and ranking. The kernel never stores
-    the source's content; it merges ranked results from multiple sources and
-    may perform one late rerank according to the federation entrypoint.
-
-    Source scores are source-local, are not assumed comparable across sources,
-    and are retained as provenance metadata.
-
-    Attributes:
-        source_kind: Stable identifier for this source type
-                     (e.g., "memory", "jira").
-    """
+    """Federated source whose native search is merged by the kernel."""
 
     source_kind: str
 
     async def search(
         self, query: str, k: int, filters: dict[str, Any] | None = None
     ) -> Iterable[ScoredRef]:
-        """
-        Run the source's native search and return ranked references.
-
-        Args:
-            query: The search query string.
-            k: Maximum number of results to return.
-            filters: Optional source-specific filters (opaque to the kernel).
-
-        Returns:
-            An iterable of ScoredRefs in descending source-local score order. The kernel
-            merges candidates and applies the optional or required late
-            rerank defined by ``runtime.federation.search_anything``.
-        """
         ...
+
+
+__all__ = [
+    "AsyncRecordIngestor",
+    "CheckpointStore",
+    "ContentSource",
+    "IngestionBatchResult",
+    "IngestionError",
+    "IngestionFailureMode",
+    "IngestionReceipt",
+    "IngestionResult",
+    "RecordIngestionResult",
+    "RecordIngestionStatus",
+    "RecordIngestor",
+    "SearchableSource",
+]

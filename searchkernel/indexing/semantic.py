@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -256,6 +257,24 @@ class SemanticWorkPlanner:
                 )
             cache.put_many(to_cache)
         return SemanticProgress(completed, total, len(plan.hits), len(plan.misses))
+
+    async def execute_async(
+        self,
+        inputs: Sequence[SemanticInput],
+        cache: EmbeddingCache,
+        encoder: EmbeddingEncoder,
+        materializer: VectorMaterializer,
+        progress: Callable[[SemanticProgress], None] | None = None,
+    ) -> SemanticProgress:
+        """Execute blocking cache, model, and materializer work off-loop."""
+        return await asyncio.to_thread(
+            self.execute,
+            inputs,
+            cache,
+            encoder,
+            materializer,
+            progress,
+        )
 
     def _valid_vector(self, vector: Sequence[float]) -> bool:
         try:

@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from searchkernel.chunking.base import ChunkingStrategy
-from searchkernel.domain import Chunk, Record
+from searchkernel.domain import Chunk, Record, RecordStatus
 from searchkernel.indices.hash_store import ChunkHashStore
 from searchkernel.pipeline.stage import SearchContext
 from searchkernel.pipeline.stages.chunk import ChunkStage
@@ -152,6 +152,10 @@ class IndexCore:
             True if the indices were mutated, False if the record was
             unchanged and skipped.
         """
+        if record.status is not RecordStatus.ACTIVE:
+            self.remove_record(record)
+            return True
+
         chunking_metadata = {
             **record.metadata,
             "title": record.title,
@@ -182,3 +186,16 @@ class IndexCore:
         self.graph.add_node(record.source_id, graph_metadata)
 
         return True
+
+    def remove_record(
+        self,
+        record: Record,
+        on_persist_hash_store: Callable[[], None] | None = None,
+    ) -> None:
+        """Tombstone a record and remove its searchable content."""
+        self.vector.remove(record.source_id)
+        self.keyword.remove(record.source_id)
+        self.graph.remove_node(record.source_id)
+        self._hash_store.remove_document(record.source_id)
+        if on_persist_hash_store is not None:
+            on_persist_hash_store()
