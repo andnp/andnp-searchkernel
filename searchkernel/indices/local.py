@@ -408,14 +408,17 @@ class LocalRecordBackend:
 
     def neighbors(
         self,
-        record_id: str,
+        record_id: RecordIdentity | str,
         edge_types: list[str] | None = None,
         depth: int = 1,
     ) -> list[tuple[str, str, float]]:
         if depth < 1:
             raise ValueError("depth must be positive")
         allowed = set(edge_types) if edge_types else None
-        frontier = {record_id}
+        identity_key = (
+            record_id.storage_key if isinstance(record_id, RecordIdentity) else record_id
+        )
+        frontier = {identity_key}
         best: dict[str, tuple[str, float]] = {}
         with self._lock:
             conn = self._db.get_connection()
@@ -435,7 +438,7 @@ class LocalRecordBackend:
                 for row in rows:
                     if allowed is not None and row["edge_type"] not in allowed:
                         continue
-                    if row["target_id"] == record_id:
+                    if row["target_id"] == identity_key:
                         continue
                     weight = float(row["weight"])
                     if hop:
@@ -510,7 +513,7 @@ class LocalGraphStore:
 
     def neighbors(
         self,
-        record_id: str,
+        record_id: RecordIdentity | str,
         edge_types: list[str] | None = None,
         depth: int = 1,
     ) -> list[tuple[str, str, float]]:
