@@ -29,6 +29,11 @@ from searchkernel.domain import (
     Vector,
 )
 from searchkernel.indices import keyword_scoring as _keyword_scoring
+from searchkernel.indices.local_vectors import (
+    NORMALIZATION_POLICY,
+    VECTOR_FORMAT_VERSION,
+    PackedVectorCodec,
+)
 from searchkernel.storage.db import DatabaseManager
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -113,6 +118,23 @@ class LocalRecordBackend:
                 embedding TEXT NOT NULL,
                 PRIMARY KEY (storage_key, model_name, dim)
             );
+            CREATE TABLE IF NOT EXISTS local_vectors_v2 (
+                storage_key TEXT NOT NULL,
+                encoder_namespace TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                embedding BLOB NOT NULL,
+                format_version INTEGER NOT NULL,
+                normalization_policy TEXT NOT NULL,
+                PRIMARY KEY (storage_key, encoder_namespace, dim),
+                FOREIGN KEY (storage_key) REFERENCES local_records(storage_key)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_local_vectors_v2_namespace
+                ON local_vectors_v2 (encoder_namespace, dim);
+            CREATE TABLE IF NOT EXISTS local_vector_schema (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS local_graph_edges (
                 source_id TEXT NOT NULL,
                 target_id TEXT NOT NULL,
@@ -130,7 +152,67 @@ class LocalRecordBackend:
         )
         self._ensure_local_record_column(conn, "keywords", "TEXT NOT NULL DEFAULT ''")
         self._initialize_keyword_schema(conn)
+        self._migrate_legacy_vectors(conn)
         conn.commit()
+
+    @staticmethod
+    def _migrate_legacy_vectors(conn: sqlite3.Connection) -> None:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(local_vectors)")
+        }
+        if not columns:
+            return
+        rows = conn.execute(
+            "SELECT storage_key, model_name, dim, embedding FROM local_vectors"
+        ).fetchall()
+        if not rows:
+            conn.execute(
+                """
+                INSERT INTO local_vector_schema (name, version)
+                VALUES ('local_vectors', ?)
+                ON CONFLICT(name) DO UPDATE SET version = excluded.version
+                """,
+                (VECTOR_FORMAT_VERSION,),
+            )
+            return
+        for row in rows:
+            packed = PackedVectorCodec.migrate_json(
+                row["embedding"],
+                int(row["dim"]),
+                context=(
+                    f"legacy embedding for {row['storage_key']} "
+                    f"namespace {row['model_name']!r}"
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO local_vectors_v2 (
+                    storage_key, encoder_namespace, dim, embedding,
+                    format_version, normalization_policy
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(storage_key, encoder_namespace, dim) DO UPDATE SET
+                    embedding = excluded.embedding,
+                    format_version = excluded.format_version,
+                    normalization_policy = excluded.normalization_policy
+                """,
+                (
+                    row["storage_key"],
+                    row["model_name"],
+                    int(row["dim"]),
+                    packed,
+                    VECTOR_FORMAT_VERSION,
+                    NORMALIZATION_POLICY,
+                ),
+            )
+        conn.execute("DELETE FROM local_vectors")
+        conn.execute(
+            """
+            INSERT INTO local_vector_schema (name, version)
+            VALUES ('local_vectors', ?)
+            ON CONFLICT(name) DO UPDATE SET version = excluded.version
+            """,
+            (VECTOR_FORMAT_VERSION,),
+        )
 
     @staticmethod
     def _ensure_local_record_column(
@@ -394,11 +476,18 @@ class LocalRecordBackend:
         if dim < 1:
             raise ValueError("dim must be positive")
         rows = list(records)
+        packed_vectors: list[tuple[str, bytes]] = []
         for record in rows:
-            if record.embedding is not None and len(record.embedding) != dim:
-                raise ValueError(
-                    f"embedding dimension mismatch for {record.storage_key}: "
-                    f"expected {dim}, got {len(record.embedding)}"
+            if record.embedding is not None:
+                packed_vectors.append(
+                    (
+                        record.storage_key,
+                        PackedVectorCodec.encode(
+                            record.embedding,
+                            dim,
+                            context=f"embedding for {record.storage_key}",
+                        ),
+                    )
                 )
         self._upsert_records(rows)
         if not rows:
@@ -407,20 +496,25 @@ class LocalRecordBackend:
             conn = self._db.get_connection()
             conn.executemany(
                 """
-                INSERT INTO local_vectors (storage_key, model_name, dim, embedding)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(storage_key, model_name, dim) DO UPDATE SET
-                    embedding = excluded.embedding
+                INSERT INTO local_vectors_v2 (
+                    storage_key, encoder_namespace, dim, embedding,
+                    format_version, normalization_policy
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(storage_key, encoder_namespace, dim) DO UPDATE SET
+                    embedding = excluded.embedding,
+                    format_version = excluded.format_version,
+                    normalization_policy = excluded.normalization_policy
                 """,
                 [
                     (
-                        record.storage_key,
+                        storage_key,
                         model_name,
                         dim,
-                        json.dumps(record.embedding),
+                        embedding,
+                        VECTOR_FORMAT_VERSION,
+                        NORMALIZATION_POLICY,
                     )
-                    for record in rows
-                    if record.embedding is not None
+                    for storage_key, embedding in packed_vectors
                 ],
             )
             self._bump_epoch(conn)
@@ -666,18 +760,17 @@ class LocalRecordBackend:
             raise ValueError(
                 f"query vector dimension mismatch: expected {dim}, got {len(query_vector)}"
             )
-        query = np.asarray(query_vector, dtype=np.float32)
-        query_norm = float(np.linalg.norm(query))
-        if query_norm == 0:
-            return []
+        query = PackedVectorCodec._validated_array(
+            query_vector, dim, context="query vector"
+        )
         with self._lock:
             conn = self._db.get_connection()
             rows = conn.execute(
                 """
-                SELECT r.*, v.embedding
+                SELECT r.*, v.embedding, v.format_version, v.normalization_policy
                 FROM local_records r
-                JOIN local_vectors v ON v.storage_key = r.storage_key
-                WHERE v.model_name = ? AND v.dim = ?
+                JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                WHERE v.encoder_namespace = ? AND v.dim = ?
                 """,
                 (model_name, dim),
             ).fetchall()
@@ -685,9 +778,19 @@ class LocalRecordBackend:
             for row in rows:
                 if not self._matches(row, filters):
                     continue
-                vector = np.asarray(json.loads(row["embedding"]), dtype=np.float32)
-                norm = float(np.linalg.norm(vector))
-                score = float(np.dot(query, vector) / (query_norm * norm)) if norm else 0.0
+                if (
+                    row["format_version"] != VECTOR_FORMAT_VERSION
+                    or row["normalization_policy"] != NORMALIZATION_POLICY
+                ):
+                    raise ValueError(
+                        f"unsupported vector format for {row['storage_key']}"
+                    )
+                vector = PackedVectorCodec.decode(
+                    row["embedding"],
+                    dim,
+                    context=f"stored embedding for {row['storage_key']}",
+                )
+                score = float(np.dot(query, vector))
                 hits.append(
                     RecordHit(
                         RecordIdentity(
@@ -774,6 +877,10 @@ class LocalRecordBackend:
                     ).fetchone()
                     if old_row is not None and self._fts5_available:
                         self._delete_fts_row(conn, old_row)
+                    conn.execute(
+                        "DELETE FROM local_vectors_v2 WHERE storage_key = ?",
+                        (record.storage_key,),
+                    )
                     conn.execute(
                         "DELETE FROM local_vectors WHERE storage_key = ?",
                         (record.storage_key,),
