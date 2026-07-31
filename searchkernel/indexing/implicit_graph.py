@@ -1,13 +1,13 @@
 import logging
 from pathlib import Path
 
-from searchkernel.indices.graph import GraphStore
+from searchkernel.ports.live_indices import GraphIndexPort
 
 logger = logging.getLogger(__name__)
 
 
 class ImplicitGraphBuilder:
-    def __init__(self, graph: GraphStore):
+    def __init__(self, graph: GraphIndexPort):
         self.graph = graph
 
     def build_implicit_edges(self):

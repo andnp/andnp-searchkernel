@@ -12,13 +12,15 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from searchkernel.domain import Chunk, Record
-from searchkernel.indices.graph import GraphStore
 from searchkernel.indices.hash_store import ChunkHashStore
-from searchkernel.indices.keyword import KeywordIndex
-from searchkernel.indices.vector import VectorIndex
 from searchkernel.pipeline.stage import SearchContext
 from searchkernel.pipeline.stages.chunk import ChunkStage
 from searchkernel.pipeline.stages.index import IndexStage
+from searchkernel.ports.live_indices import (
+    GraphIndexPort,
+    KeywordIndexPort,
+    VectorIndexPort,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +29,9 @@ class IndexCore:
     def __init__(
         self,
         chunker,
-        vector: VectorIndex,
-        keyword: KeywordIndex,
-        graph: GraphStore,
+        vector: VectorIndexPort,
+        keyword: KeywordIndexPort,
+        graph: GraphIndexPort,
         hash_store: ChunkHashStore,
     ):
         self._chunker = chunker
