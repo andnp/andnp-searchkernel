@@ -369,3 +369,114 @@ async def test_local_source_matches_record_pipeline_contract_deterministically(t
         (first.storage_key, second.storage_key)
     )
     assert all(result.metadata["text"].startswith("first") for result in results)
+
+
+def test_graph_edges_cascade_when_a_record_is_deleted(tmp_path) -> None:
+    backend, _keyword, _vector, graph = _backend(tmp_path)
+    source = _record("note", "source", "source")
+    target = _record("note", "target", "target")
+    backend.index([source, target])
+    graph.upsert_edges([(source.storage_key, target.storage_key, "related", 0.5)])
+    epoch = graph.graph_epoch()
+
+    backend.delete([target.storage_key])
+
+    assert graph.graph_epoch() == epoch + 1
+    assert graph.neighbors(source.storage_key) == []
+    assert graph.check_graph_integrity()
+
+
+def test_graph_rejects_malformed_or_missing_record_endpoints(tmp_path) -> None:
+    backend, _keyword, _vector, graph = _backend(tmp_path)
+    source = _record("note", "source", "source")
+    target = _record("note", "target", "target")
+    backend.index([source, target])
+    epoch = graph.graph_epoch()
+
+    with pytest.raises(ValueError, match="canonical storage key"):
+        graph.upsert_edges([("source", target.storage_key, "related", 0.5)])
+    with pytest.raises(ValueError, match="not indexed"):
+        graph.upsert_edges(
+            [
+                (
+                    source.storage_key,
+                    _record("note", "missing", "missing").storage_key,
+                    "related",
+                    0.5,
+                )
+            ]
+        )
+
+    assert graph.graph_epoch() == epoch
+
+
+def test_graph_schema_indexes_both_endpoints(tmp_path) -> None:
+    backend, _keyword, _vector, graph = _backend(tmp_path)
+    source = _record("note", "source", "source")
+    target = _record("note", "target", "target")
+    backend.index([source, target])
+
+    conn = backend.db_manager.get_connection()
+    foreign_keys = {
+        row[3] for row in conn.execute("PRAGMA foreign_key_list(local_graph_edges)")
+    }
+    index_names = {
+        row[1] for row in conn.execute("PRAGMA index_list(local_graph_edges)")
+    }
+
+    assert foreign_keys == {"source_id", "target_id"}
+    assert {
+        "idx_local_graph_source",
+        "idx_local_graph_target",
+        "idx_local_graph_source_type",
+    } <= index_names
+    assert graph.check_graph_integrity()
+
+
+def test_graph_integrity_hides_dangling_rows_from_neighbors(tmp_path) -> None:
+    backend, _keyword, _vector, graph = _backend(tmp_path)
+    source = _record("note", "source", "source")
+    backend.index([source])
+    conn = backend.db_manager.get_connection()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        """
+        INSERT INTO local_graph_edges (source_id, target_id, edge_type, weight)
+        VALUES (?, ?, ?, ?)
+        """,
+        (source.storage_key, "record:[null,\"note\",\"missing\"]", "related", 0.5),
+    )
+    conn.commit()
+
+    assert not graph.check_graph_integrity()
+    assert graph.neighbors(source.storage_key) == []
+
+
+def test_failed_batch_rolls_back_records_and_epochs(tmp_path) -> None:
+    backend, _keyword, vector, graph = _backend(tmp_path)
+    good = _record("note", "good", "good")
+    bad = _record("note", "bad", "bad", metadata={"invalid": object()})
+    good.embedding = [1.0, 0.0]
+    bad.embedding = [0.0, 1.0]
+    before = backend.epochs()
+
+    with pytest.raises(TypeError):
+        vector.upsert([good, bad], "test", 2)
+
+    assert backend.hydrate_record(good.storage_key) is None
+    assert backend.epochs() == before
+    assert graph.graph_epoch() == before["graph"]
+
+
+def test_repeated_graph_upsert_does_not_advance_epoch(tmp_path) -> None:
+    backend, _keyword, _vector, graph = _backend(tmp_path)
+    source = _record("note", "source", "source")
+    target = _record("note", "target", "target")
+    backend.index([source, target])
+    edge = (source.storage_key, target.storage_key, "related", 0.5)
+
+    graph.upsert_edges([edge])
+    epoch = graph.graph_epoch()
+    graph.upsert_edges([edge])
+
+    assert graph.graph_epoch() == epoch
