@@ -604,6 +604,178 @@ async def test_candidate_gating_delays_vector_lookup_until_keyword_ids_arrive() 
     assert vector_started.is_set()
 
 
+async def test_artifact_keyword_confidence_skips_embedding() -> None:
+    class CountingEmbedder:
+        model_name = "fake-model"
+        dim = 2
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def embed_query(self, query: str) -> list[float]:
+            self.calls += 1
+            return [1.0, 0.0]
+
+    embedder = CountingEmbedder()
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        vector_store=FakeVectorStore([("a", 0.9)]),
+        embedding_provider=embedder,
+        hydrator=_hydrator({"a": _record("a")}),
+    )
+
+    outcome = await pipeline.async_search("src/search_kernel.py", limit=1)
+
+    assert [result.record_id for result in outcome.results] == ["a"]
+    assert embedder.calls == 0
+    assert "vector:artifact_keyword_confident" in outcome.diagnostics
+
+
+async def test_lane_budgets_reach_their_respective_stores() -> None:
+    class AnyEmbedder(FakeEmbedder):
+        def embed_query(self, query: str) -> list[float]:
+            return [1.0, 0.0]
+
+    keyword_store = FakeKeywordStore([("a", 1.0)])
+    vector_store = FakeVectorStore([("a", 0.9)])
+    pipeline = RecordSearchPipeline(
+        keyword_store=keyword_store,
+        vector_store=vector_store,
+        embedding_provider=AnyEmbedder(),
+        hydrator=_hydrator({"a": _record("a")}),
+        config=RecordSearchConfig(
+            keyword_candidate_multiplier=2,
+            vector_candidate_multiplier=3,
+        ),
+    )
+
+    await pipeline.async_search("what is caching?", limit=2)
+
+    assert keyword_store.queries[0][1] == 4
+    assert vector_store.filters[0] == {"statuses": ["active"]}
+
+
+async def test_graph_disabled_does_not_touch_graph_store() -> None:
+    class FailingGraph(FakeGraphStore):
+        def neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+        ) -> list[GraphNeighbor | tuple[str, str, float]]:
+            raise AssertionError("graph should be disabled")
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        graph_store=FailingGraph({}),
+        hydrator=_hydrator({"a": _record("a")}),
+        config=RecordSearchConfig(graph_enabled=False),
+    )
+
+    outcome = await pipeline.async_search("what is caching?", limit=1)
+
+    assert outcome.results[0].record_id == "a"
+    assert "query_plan:skip:graph:disabled" in outcome.diagnostics
+
+
+async def test_conditional_expansion_is_called_once_after_weak_first_pass() -> None:
+    class AnyEmbedder(FakeEmbedder):
+        def embed_query(self, query: str) -> list[float]:
+            return [1.0, 0.0]
+
+    class ExpandingKeyword(FakeKeywordStore):
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit | tuple[str, float]]:
+            self.queries.append((query, k, filters))
+            return [("a", 1.0)] if query == "what is thing?" else [("b", 0.9)]
+
+    class ExpandingVector(FakeVectorStore):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.expansion_calls = 0
+
+        def expand_query(
+            self,
+            query: str,
+            *,
+            top_k: int,
+            similarity_threshold: float,
+        ) -> str:
+            self.expansion_calls += 1
+            return f"{query} expanded"
+
+    keyword_store = ExpandingKeyword([])
+    vector_store = ExpandingVector()
+    records = {"a": _record("a"), "b": _record("b")}
+    pipeline = RecordSearchPipeline(
+        keyword_store=keyword_store,
+        vector_store=vector_store,
+        embedding_provider=AnyEmbedder(),
+        hydrator=_hydrator(records),
+        config=RecordSearchConfig(expansion_enabled=True),
+    )
+
+    outcome = await pipeline.async_search("what is thing?", limit=2)
+
+    assert vector_store.expansion_calls == 1
+    assert [result.record_id for result in outcome.results] == ["a", "b"]
+    assert "expansion:applied" in outcome.diagnostics
+
+
+async def test_conditional_expansion_obeys_latency_budget() -> None:
+    class AnyEmbedder(FakeEmbedder):
+        def embed_query(self, query: str) -> list[float]:
+            return [1.0, 0.0]
+
+    class SlowExpandingVector(FakeVectorStore):
+        async def expand_query(
+            self,
+            query: str,
+            *,
+            top_k: int,
+            similarity_threshold: float,
+        ) -> str:
+            await asyncio.sleep(0.05)
+            return f"{query} expanded"
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([]),
+        vector_store=SlowExpandingVector([]),
+        embedding_provider=AnyEmbedder(),
+        hydrator=_hydrator({}),
+        config=RecordSearchConfig(
+            expansion_enabled=True,
+            expansion_timeout_s=0.01,
+        ),
+    )
+
+    started = time.perf_counter()
+    outcome = await pipeline.async_search("what is thing?", limit=1)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.05
+    assert "expansion:fallback:timeout" in outcome.diagnostics
+
+
+async def test_trace_is_redacted_and_contains_routing_diagnostics() -> None:
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        hydrator=_hydrator({"a": _record("a")}),
+        config=RecordSearchConfig(capture_trace=True),
+    )
+
+    outcome = await pipeline.async_search("secret query", limit=1)
+
+    assert outcome.trace is not None
+    trace = outcome.trace.to_dict()
+    assert "query" not in trace
+    assert "diagnostics" in trace["provenance"]
+
+
 async def test_batch_graph_and_hydration_use_canonical_keys_once() -> None:
     seed = RecordIdentity("workspace-a", "note", "seed")
     target = RecordIdentity("workspace-b", "commit", "target")

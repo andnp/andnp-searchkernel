@@ -14,6 +14,7 @@ from searchkernel.search.fusion import (
     apply_recency_boost,
     fuse_reciprocal_rank,
     rrf_score,
+    weighted_reciprocal_rank,
 )
 
 
@@ -68,6 +69,30 @@ class TestReciprocalRankFusion:
     def test_non_positive_k_is_rejected(self, invalid_k):
         with pytest.raises(ValueError, match="k must be positive"):
             fuse_reciprocal_rank([["doc1"]], k=invalid_k)
+
+    def test_named_unweighted_rankings_match_plain_rrf(self):
+        rankings = [["doc1", "doc2"], ["doc2", "doc1"]]
+        assert fuse_reciprocal_rank(rankings) == fuse_reciprocal_rank(
+            {"keyword": rankings[0], "vector": rankings[1]}
+        )
+
+    def test_weighted_rrf_applies_strategy_weights(self):
+        scores = weighted_reciprocal_rank(
+            {"keyword": ["doc1"], "vector": ["doc2"]},
+            strategy_weights={"keyword": 2.0, "vector": 0.5},
+            k=10.0,
+        )
+
+        assert scores["doc1"] == pytest.approx(2 / 11)
+        assert scores["doc2"] == pytest.approx(0.5 / 11)
+
+    def test_weighted_rrf_preserves_equal_score_ties(self):
+        scores = weighted_reciprocal_rank(
+            {"keyword": ["doc-b"], "vector": ["doc-a"]},
+            strategy_weights={"keyword": 1.0, "vector": 1.0},
+        )
+
+        assert scores["doc-a"] == scores["doc-b"]
 
 
 class TestRecencyBoost:
