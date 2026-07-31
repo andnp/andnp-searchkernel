@@ -9,8 +9,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -40,7 +42,32 @@ _IDENT_RE = re.compile(r"[^a-z0-9_]+")
 
 # Default HNSW query-time recall knob. Higher = better recall, more latency.
 DEFAULT_HNSW_EF_SEARCH = 100
+DEFAULT_HNSW_ITERATIVE_SCAN = "auto"
+DEFAULT_HNSW_MAX_SCAN_TUPLES = 20_000
+DEFAULT_HNSW_SCAN_MEM_MULTIPLIER = 1.0
 _SCHEMA_ADVISORY_LOCK_KEY = 907341005
+_ITERATIVE_SCAN_MODES = {"auto", "off", "strict_order", "relaxed_order"}
+
+
+@dataclass(frozen=True, slots=True)
+class PGVectorFeatureSupport:
+    extension_version: str | None
+    iterative_scan: bool
+
+    @classmethod
+    def from_extension_version(
+        cls,
+        extension_version: str | None,
+    ) -> PGVectorFeatureSupport:
+        if not extension_version:
+            return cls(None, False)
+        numbers = re.match(r"^(\d+)\.(\d+)", extension_version)
+        version = (
+            (int(numbers.group(1)), int(numbers.group(2)))
+            if numbers is not None
+            else (0, 0)
+        )
+        return cls(extension_version, version >= (0, 8))
 
 
 def _sanitize_model_name(model_name: str) -> str:
@@ -660,15 +687,98 @@ class PGVectorStore:
         self,
         conn_pool: PostgresConnection,
         hnsw_ef_search: int = DEFAULT_HNSW_EF_SEARCH,
+        *,
+        hnsw_iterative_scan: str = DEFAULT_HNSW_ITERATIVE_SCAN,
+        hnsw_max_scan_tuples: int = DEFAULT_HNSW_MAX_SCAN_TUPLES,
+        hnsw_scan_mem_multiplier: float = DEFAULT_HNSW_SCAN_MEM_MULTIPLIER,
     ):
         """Initialize vector store.
 
         Args:
             conn_pool: PostgresConnection pool
             hnsw_ef_search: hnsw.ef_search GUC applied per query (recall/latency knob)
+            hnsw_iterative_scan: auto, off, strict_order, or relaxed_order
+            hnsw_max_scan_tuples: maximum tuples visited by iterative scans
+            hnsw_scan_mem_multiplier: iterative scan memory multiplier
         """
+        if not isinstance(hnsw_ef_search, int) or isinstance(hnsw_ef_search, bool):
+            raise TypeError("hnsw_ef_search must be an integer")
+        if hnsw_ef_search < 1:
+            raise ValueError("hnsw_ef_search must be positive")
+        if hnsw_iterative_scan not in _ITERATIVE_SCAN_MODES:
+            raise ValueError(
+                "hnsw_iterative_scan must be auto, off, strict_order, or relaxed_order"
+            )
+        if (
+            not isinstance(hnsw_max_scan_tuples, int)
+            or isinstance(hnsw_max_scan_tuples, bool)
+            or hnsw_max_scan_tuples < 1
+        ):
+            raise ValueError("hnsw_max_scan_tuples must be a positive integer")
+        if (
+            not isinstance(hnsw_scan_mem_multiplier, (int, float))
+            or isinstance(hnsw_scan_mem_multiplier, bool)
+        ):
+            raise TypeError("hnsw_scan_mem_multiplier must be numeric")
+        if (
+            not math.isfinite(hnsw_scan_mem_multiplier)
+            or hnsw_scan_mem_multiplier < 1.0
+        ):
+            raise ValueError("hnsw_scan_mem_multiplier must be finite and >= 1")
         self.conn_pool = conn_pool
         self.hnsw_ef_search = hnsw_ef_search
+        self.hnsw_iterative_scan = hnsw_iterative_scan
+        self.hnsw_max_scan_tuples = hnsw_max_scan_tuples
+        self.hnsw_scan_mem_multiplier = hnsw_scan_mem_multiplier
+        self._feature_support: PGVectorFeatureSupport | None = None
+
+    @property
+    def feature_support(self) -> PGVectorFeatureSupport | None:
+        return self._feature_support
+
+    def detect_feature_support(self) -> PGVectorFeatureSupport:
+        """Read feature support from the installed server extension."""
+        conn = self.conn_pool.get_connection()
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            support = self._detect_feature_support(cursor)
+            conn.commit()
+            return support
+        finally:
+            if cursor is not None:
+                cursor.close()
+            self.conn_pool.put_connection(conn)
+
+    def _detect_feature_support(self, cursor) -> PGVectorFeatureSupport:
+        if self._feature_support is not None:
+            return self._feature_support
+        cursor.execute(
+            "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
+        )
+        row = cursor.fetchone()
+        version = str(row[0]) if row and row[0] is not None else None
+        self._feature_support = PGVectorFeatureSupport.from_extension_version(version)
+        return self._feature_support
+
+    def _configure_hnsw(self, cursor) -> PGVectorFeatureSupport:
+        support = self._detect_feature_support(cursor)
+        cursor.execute(f"SET LOCAL hnsw.ef_search = {self.hnsw_ef_search};")
+        if self.hnsw_iterative_scan != "off" and support.iterative_scan:
+            mode = (
+                "strict_order"
+                if self.hnsw_iterative_scan == "auto"
+                else self.hnsw_iterative_scan
+            )
+            cursor.execute(f"SET LOCAL hnsw.iterative_scan = '{mode}';")
+            cursor.execute(
+                f"SET LOCAL hnsw.max_scan_tuples = {self.hnsw_max_scan_tuples};"
+            )
+            cursor.execute(
+                "SET LOCAL hnsw.scan_mem_multiplier = "
+                f"{self.hnsw_scan_mem_multiplier!r};"
+            )
+        return support
 
     def _ensure_vector_table(self, cursor, model_name: str, dim: int) -> str:
         """Return the table name for (model_name, dim), creating it (+ HNSW index) if needed.
@@ -864,9 +974,7 @@ class PGVectorStore:
 
             table_name = _vector_table_name(model_name, dim)
 
-            # hnsw.ef_search cannot be a bind parameter (SET does not accept
-            # protocol parameters); the value is an internally-controlled int.
-            cursor.execute(f"SET LOCAL hnsw.ef_search = {int(self.hnsw_ef_search)};")
+            self._configure_hnsw(cursor)
 
             where_parts, filter_params = build_pgvector_filter_sql(filters)
             where_clause = "AND " + " AND ".join(where_parts)
