@@ -1,12 +1,11 @@
 import logging
 from pathlib import Path
-from typing import TypeAlias
 
 from searchkernel.ports.live_indices import VectorIndexPort
 
 logger = logging.getLogger(__name__)
 
-VectorSearchable: TypeAlias = VectorIndexPort
+type VectorSearchable = VectorIndexPort
 
 
 def search_with_hypothesis(
