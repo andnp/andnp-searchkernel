@@ -13,6 +13,8 @@ from searchkernel.indices.keyword_scoring import (
 
 def test_sanitize_fts_query_removes_match_operators():
     assert sanitize_fts_query('worker.enabled - "debug"') == "worker.enabled debug"
+    assert sanitize_fts_query('"alpha beta"') == '"alpha beta"'
+    assert sanitize_fts_query("alph*") == "alph*"
     assert sanitize_fts_query("   ") == '""'
 
 
