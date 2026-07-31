@@ -71,6 +71,7 @@ class LocalRecordBackend:
         keyword_overfetch_multiplier: float = 4.0,
         vector_engine: str = "exact",
         faiss_threshold: int = 50_000,
+        vector_snapshot_max_rows: int = 100_000,
     ) -> None:
         if db_manager is not None and db_path is not None:
             raise ValueError("pass db_path or db_manager, not both")
@@ -80,6 +81,8 @@ class LocalRecordBackend:
             raise ValueError("vector_engine must be exact, faiss, or auto")
         if faiss_threshold < 1:
             raise ValueError("faiss_threshold must be positive")
+        if vector_snapshot_max_rows < 1:
+            raise ValueError("vector_snapshot_max_rows must be positive")
         self._db = db_manager or (
             DatabaseManager(db_path) if db_path is not None else _EphemeralDatabase()
         )
@@ -89,6 +92,7 @@ class LocalRecordBackend:
         self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
         self._vector_engine = vector_engine
         self._faiss_threshold = faiss_threshold
+        self._vector_snapshot_max_rows = vector_snapshot_max_rows
         self._fts5_available = False
         self._keyword_search_diagnostic = (
             "FTS5 indexed lexical search has not been initialized"
@@ -776,6 +780,14 @@ class LocalRecordBackend:
         query = PackedVectorCodec.normalize(
             query_vector, dim, context="query vector"
         )
+        if self.vector_count(model_name, dim) > self._vector_snapshot_max_rows:
+            return self._search_vector_blocks(
+                query,
+                k,
+                model_name=model_name,
+                dim=dim,
+                filters=filters,
+            )
         snapshot = self._get_vector_snapshot(model_name, dim)
         eligible = snapshot.filter_mask(
             filters,
@@ -798,6 +810,71 @@ class LocalRecordBackend:
                 float(scores[index]),
             )
             for index, position in selected
+        ]
+
+    def _search_vector_blocks(
+        self,
+        query: np.ndarray,
+        k: int,
+        *,
+        model_name: str,
+        dim: int,
+        filters: dict[str, Any] | None,
+    ) -> list[RecordHit]:
+        best_keys: list[str] = []
+        best_scores: list[float] = []
+        offset = 0
+        while True:
+            with self._lock:
+                conn = self._db.get_connection()
+                rows = conn.execute(
+                    """
+                    SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                           r.status, v.embedding, v.format_version,
+                           v.normalization_policy
+                    FROM local_records r
+                    JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                    WHERE v.encoder_namespace = ? AND v.dim = ?
+                    ORDER BY r.storage_key
+                    LIMIT ? OFFSET ?
+                    """,
+                    (model_name, dim, self._vector_snapshot_max_rows, offset),
+                ).fetchall()
+            if not rows:
+                break
+            eligible_rows = [row for row in rows if self._matches(row, filters)]
+            if eligible_rows:
+                matrix = np.vstack(
+                    [
+                        PackedVectorCodec.decode(
+                            row["embedding"],
+                            dim,
+                            context=f"stored embedding for {row['storage_key']}",
+                        )
+                        for row in eligible_rows
+                    ]
+                )
+                scores = matrix @ query
+                best_keys.extend(row["storage_key"] for row in eligible_rows)
+                best_scores.extend(float(score) for score in scores)
+                if len(best_keys) > k:
+                    positions = np.arange(len(best_keys))
+                    selected = self._select_top_positions(
+                        positions,
+                        np.asarray(best_scores),
+                        tuple(best_keys),
+                        k,
+                    )
+                    best_keys = [best_keys[position] for _, position in selected]
+                    best_scores = [best_scores[position] for _, position in selected]
+            offset += len(rows)
+        ordered = sorted(
+            zip(best_keys, best_scores, strict=True),
+            key=lambda item: (-item[1], item[0]),
+        )
+        return [
+            RecordHit(RecordIdentity.from_storage_key(storage_key), score)
+            for storage_key, score in ordered[:k]
         ]
 
     @property
