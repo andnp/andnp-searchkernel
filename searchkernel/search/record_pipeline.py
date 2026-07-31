@@ -130,6 +130,7 @@ class RecordSearchConfig:
     candidate_multiplier: int = 5
     minimum_candidate_limit: int = 1
     rrf_k: float = 60.0
+    graph_fusion: Literal["rrf", "max"] = "rrf"
     graph_depth: int = 1
     max_graph_seeds: int = 10
     max_neighbors_per_seed: int = 10
@@ -248,13 +249,21 @@ class RecordSearchPipeline:
                 graph_ranking = self._expand_graph(base_candidates)
                 if graph_ranking:
                     rankings["graph"] = graph_ranking
-                    fused_scores = fuse_reciprocal_rank(
-                        [
-                            [record_id for record_id, _ in ranking]
-                            for ranking in rankings.values()
-                        ],
-                        k=self._config.rrf_k,
-                    )
+                    if self._config.graph_fusion == "max":
+                        fused_scores = dict(fused_scores)
+                        for record_id, score in graph_ranking:
+                            fused_scores[record_id] = max(
+                                fused_scores.get(record_id, 0.0),
+                                score,
+                            )
+                    else:
+                        fused_scores = fuse_reciprocal_rank(
+                            [
+                                [record_id for record_id, _ in ranking]
+                                for ranking in rankings.values()
+                            ],
+                            k=self._config.rrf_k,
+                        )
                     candidates = self._build_candidates(fused_scores, rankings)
                     candidates = self._apply_candidate_policy(candidates)
                 else:
@@ -444,6 +453,8 @@ class RecordSearchPipeline:
             raise ValueError("minimum_candidate_limit must be positive")
         if self._config.rrf_k <= 0:
             raise ValueError("rrf_k must be positive")
+        if self._config.graph_fusion not in {"rrf", "max"}:
+            raise ValueError("graph_fusion must be 'rrf' or 'max'")
         if self._config.graph_depth < 1:
             raise ValueError("graph_depth must be positive")
         if self._config.max_graph_seeds < 1:
