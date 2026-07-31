@@ -40,15 +40,21 @@ class CopilotLLMProvider:
         """Check if copilot CLI is available. Raises on first error, not import."""
         if self._checked_copilot:
             return
-        self._checked_copilot = True
 
-        self._copilot_path = shutil.which("copilot")
-        if self._copilot_path is None:
+        if self._copilot_path is not None:
+            self._checked_copilot = True
+            return
+
+        copilot_path = shutil.which("copilot")
+        if copilot_path is None:
             raise RuntimeError(
                 "copilot CLI not found in PATH. "
                 "Install GitHub Copilot CLI (https://github.com/github/copilot.vim) "
                 "or ensure it is available as `copilot` command."
             )
+
+        self._copilot_path = copilot_path
+        self._checked_copilot = True
 
     async def complete(
         self,
