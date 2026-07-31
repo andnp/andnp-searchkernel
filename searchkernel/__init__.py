@@ -5,7 +5,13 @@ A domain-agnostic library for building hybrid vector+keyword+graph search system
 with pluggable embedding/LLM/reranker providers.
 """
 
-from searchkernel.domain import Record, ScoredRef, SearchResult
+from searchkernel.domain import (
+    Chunk,
+    Record,
+    ScoredRef,
+    SearchResult,
+    canonical_storage_key,
+)
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
     ContentSource,
@@ -33,6 +39,7 @@ from searchkernel.search.utils import classify_query_type, truncate_content
 __version__ = "0.1.0"
 
 __all__ = [
+    "Chunk",
     "ContentSource",
     "EmbeddingProvider",
     "QueryEmbeddingProvider",
@@ -54,6 +61,7 @@ __all__ = [
     "SearchPipelineConfig",
     "SearchResult",
     "SearchableSource",
+    "canonical_storage_key",
     "classify_query_type",
     "truncate_content",
 ]

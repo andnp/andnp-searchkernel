@@ -10,9 +10,11 @@ import hashlib
 import json
 import logging
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg2
+import psycopg2.extras
 import psycopg2.pool
 from psycopg2 import sql
 
@@ -54,6 +56,13 @@ def _vector_literal(vec: Vector) -> str:
     return "[" + ",".join(repr(float(x)) for x in vec) + "]"
 
 
+def _utc_timestamp(value: datetime) -> datetime:
+    """Normalize timestamps before passing them to PostgreSQL."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 class PostgresConnection:
     """Thread-safe Postgres connection pool."""
 
@@ -76,6 +85,10 @@ class PostgresConnection:
 
     def put_connection(self, conn):
         """Return a connection to the pool."""
+        try:
+            conn.rollback()
+        except psycopg2.Error:
+            pass
         self.pool.putconn(conn)
 
     def execute(self, sql: str, params: tuple = ()) -> Any:
@@ -124,7 +137,7 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
                 model_name TEXT NOT NULL,
                 dim INT NOT NULL,
                 table_name TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (model_name, dim)
             );
         """)
@@ -138,11 +151,13 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
                 title TEXT NOT NULL,
                 body TEXT NOT NULL,
                 tsvector_body tsvector,
-                created_at TIMESTAMP,
-                updated_at TIMESTAMP,
+                workspace_id TEXT,
+                created_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ,
                 metadata JSONB DEFAULT '{}',
                 uri TEXT,
-                status TEXT DEFAULT 'active'
+                status TEXT DEFAULT 'active',
+                UNIQUE (workspace_id, source_kind, source_id)
             );
         """)
 
@@ -159,7 +174,7 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
                 target_id TEXT NOT NULL,
                 edge_type TEXT NOT NULL,
                 weight REAL DEFAULT 1.0,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (source_id, target_id, edge_type)
             );
         """)
@@ -180,7 +195,7 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
                 key TEXT PRIMARY KEY,
                 value JSONB NOT NULL,
                 epoch INT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
         """)
 
@@ -268,8 +283,8 @@ class PGVectorStore:
                 "CREATE TABLE IF NOT EXISTS {table} ("
                 "record_id TEXT PRIMARY KEY, "
                 "embedding vector({dim}) NOT NULL, "
-                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
-                "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+                "created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, "
+                "updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"
                 ");"
             ).format(table=sql.Identifier(table_name), dim=sql.SQL(str(int(dim))))
         )
@@ -305,10 +320,12 @@ class PGVectorStore:
         if not records:
             return
 
+        if dim < 1:
+            raise ValueError("dim must be positive")
         for record in records:
             if record.embedding is not None and len(record.embedding) != dim:
                 raise ValueError(
-                    f"Embedding dimension mismatch for record {record.source_id}: "
+                    f"Embedding dimension mismatch for record {record.storage_key}: "
                     f"expected {dim}, got {len(record.embedding)}"
                 )
 
@@ -323,30 +340,38 @@ class PGVectorStore:
             for record in records:
                 metadata_json = json.dumps(record.metadata)
                 tsvector_text = f"{record.title} {record.body}"
+                record_key = record.storage_key
 
                 cursor.execute(
                     """
                     INSERT INTO records
-                    (record_id, source_kind, source_id, title, body,
+                    (record_id, workspace_id, source_kind, source_id, title, body,
                      tsvector_body, created_at, updated_at, metadata, uri, status)
-                    VALUES (%s, %s, %s, %s, %s,
+                    VALUES (%s, %s, %s, %s, %s, %s,
                             to_tsvector('english', %s), %s, %s, %s, %s, %s)
                     ON CONFLICT (record_id) DO UPDATE SET
+                        workspace_id = EXCLUDED.workspace_id,
+                        source_kind = EXCLUDED.source_kind,
+                        source_id = EXCLUDED.source_id,
                         title = EXCLUDED.title,
                         body = EXCLUDED.body,
                         tsvector_body = to_tsvector('english', EXCLUDED.title || ' ' || EXCLUDED.body),
+                        created_at = EXCLUDED.created_at,
                         updated_at = EXCLUDED.updated_at,
-                        metadata = EXCLUDED.metadata;
+                        metadata = EXCLUDED.metadata,
+                        uri = EXCLUDED.uri,
+                        status = EXCLUDED.status;
                     """,
                     (
-                        record.source_id,
+                        record_key,
+                        record.workspace_id,
                         record.source_kind,
                         record.source_id,
                         record.title,
                         record.body,
                         tsvector_text,
-                        record.created_at,
-                        record.updated_at,
+                        _utc_timestamp(record.created_at),
+                        _utc_timestamp(record.updated_at),
                         metadata_json,
                         record.uri,
                         record.status.value,
@@ -361,12 +386,18 @@ class PGVectorStore:
                 "embedding = EXCLUDED.embedding, updated_at = CURRENT_TIMESTAMP;"
             ).format(table=sql.Identifier(table_name))
 
-            for record in records:
-                if record.embedding is None:
-                    continue
-                cursor.execute(
-                    upsert_vec_sql,
-                    (record.source_id, _vector_literal(record.embedding)),
+            vector_rows = [
+                (record.storage_key, _vector_literal(record.embedding))
+                for record in records
+                if record.embedding is not None
+            ]
+            if vector_rows:
+                psycopg2.extras.execute_values(
+                    cursor,
+                    upsert_vec_sql.as_string(cursor).replace(
+                        "VALUES (%s, %s::vector)", "VALUES %s"
+                    ),
+                    vector_rows,
                 )
 
             # Increment epoch
@@ -401,6 +432,12 @@ class PGVectorStore:
         Returns:
             List of (record_id, similarity_score) tuples, sorted descending
         """
+        if k < 1:
+            return []
+        if len(query_vector) != dim:
+            raise ValueError(
+                f"Query vector dimension mismatch: expected {dim}, got {len(query_vector)}"
+            )
         conn = self.conn_pool.get_connection()
         cursor = None
         try:
@@ -419,20 +456,34 @@ class PGVectorStore:
             # protocol parameters); the value is an internally-controlled int.
             cursor.execute(f"SET LOCAL hnsw.ef_search = {int(self.hnsw_ef_search)};")
 
-            where_clause = ""
-            kind_params: list[Any] = []
+            where_parts: list[str] = []
+            filter_params: list[Any] = []
+            status_values = ["active"]
             if filters and "source_kinds" in filters:
                 source_kinds = filters["source_kinds"]
+                if not source_kinds:
+                    return []
                 placeholders = ",".join(["%s"] * len(source_kinds))
-                where_clause = f"AND r.source_kind IN ({placeholders})"
-                kind_params = list(source_kinds)
+                where_parts.append(f"r.source_kind IN ({placeholders})")
+                filter_params.extend(source_kinds)
+            if filters and "statuses" in filters:
+                status_values = list(filters["statuses"])
+            if filters and "include_inactive" in filters and filters["include_inactive"]:
+                status_values = ["active", "stale", "archived"]
+            where_parts.append("r.status = ANY(%s)")
+            filter_params.append(status_values)
+            workspace_id = filters.get("workspace_id") if filters else None
+            if workspace_id is not None:
+                where_parts.append("r.workspace_id = %s")
+                filter_params.append(workspace_id)
+            where_clause = "AND " + " AND ".join(where_parts)
 
             vec_literal = _vector_literal(query_vector)
 
             # Order by the raw distance operator (not a wrapped/aliased
             # expression) so the planner can use the HNSW index for ANN.
             query_sql = sql.SQL(
-                "SELECT v.record_id, v.embedding <=> %s::vector AS distance "
+                "SELECT r.source_id, v.embedding <=> %s::vector AS distance "
                 "FROM {table} v "
                 "JOIN records r ON v.record_id = r.record_id "
                 "WHERE 1 = 1 " + where_clause + " "
@@ -440,7 +491,7 @@ class PGVectorStore:
                 "LIMIT %s;"
             ).format(table=sql.Identifier(table_name))
 
-            params = [vec_literal, *kind_params, vec_literal, k]
+            params = [vec_literal, *filter_params, vec_literal, k]
 
             cursor.execute(query_sql, params)
             results = cursor.fetchall()
@@ -464,6 +515,14 @@ class PGVectorStore:
         cursor = None
         try:
             cursor = conn.cursor()
+            cursor.execute(
+                "SELECT record_id FROM records "
+                "WHERE record_id = ANY(%s) OR source_id = ANY(%s);",
+                (record_ids, record_ids),
+            )
+            storage_ids = [row[0] for row in cursor.fetchall()]
+            if not storage_ids:
+                return
 
             cursor.execute("SELECT DISTINCT table_name FROM vector_tables;")
             table_names = [row[0] for row in cursor.fetchall()]
@@ -473,11 +532,11 @@ class PGVectorStore:
                     sql.SQL("DELETE FROM {table} WHERE record_id = ANY(%s);").format(
                         table=sql.Identifier(table_name)
                     ),
-                    (record_ids,),
+                    (storage_ids,),
                 )
 
             cursor.execute(
-                "DELETE FROM records WHERE record_id = ANY(%s);", (record_ids,)
+                "DELETE FROM records WHERE record_id = ANY(%s);", (storage_ids,)
             )
 
             # Increment epoch
@@ -500,6 +559,14 @@ class PGVectorStore:
         try:
             cursor = conn.cursor()
             cursor.execute(
+                "SELECT record_id FROM records "
+                "WHERE record_id = ANY(%s) OR source_id = ANY(%s);",
+                (record_ids, record_ids),
+            )
+            storage_ids = [row[0] for row in cursor.fetchall()]
+            if not storage_ids:
+                return
+            cursor.execute(
                 "SELECT table_name FROM vector_tables WHERE model_name = %s AND dim = %s;",
                 (model_name, dim),
             )
@@ -512,7 +579,7 @@ class PGVectorStore:
                 sql.SQL("DELETE FROM {table} WHERE record_id = ANY(%s);").format(
                     table=sql.Identifier(table_name)
                 ),
-                (record_ids,),
+                (storage_ids,),
             )
 
             cursor.execute("SELECT table_name FROM vector_tables;")
@@ -529,12 +596,12 @@ class PGVectorStore:
                     sql.SQL("DELETE FROM records r WHERE r.record_id = ANY(%s) AND {}").format(
                         sql.SQL(" AND ").join(remaining_checks)
                     ),
-                    (record_ids,),
+                    (storage_ids,),
                 )
             else:
                 cursor.execute(
                     "DELETE FROM records WHERE record_id = ANY(%s);",
-                    (record_ids,),
+                    (storage_ids,),
                 )
 
             cursor.execute("UPDATE index_epoch SET epoch = epoch + 1;")
@@ -584,16 +651,19 @@ class PGKeywordStore:
         try:
             cursor = conn.cursor()
 
-            for record in records:
-                tsvector_text = f"{record.title} {record.body}"
-                cursor.execute(
-                    """
-                    UPDATE records
-                    SET tsvector_body = to_tsvector('english', %s)
-                    WHERE record_id = %s;
-                    """,
-                    (tsvector_text, record.source_id),
-                )
+            psycopg2.extras.execute_values(
+                cursor,
+                """
+                UPDATE records AS r
+                SET tsvector_body = to_tsvector('english', data.search_text)
+                FROM (VALUES %s) AS data(record_id, search_text)
+                WHERE r.record_id = data.record_id;
+                """,
+                [
+                    (record.storage_key, f"{record.title} {record.body}")
+                    for record in records
+                ],
+            )
 
             conn.commit()
             logger.debug(f"Indexed {len(records)} records for keyword search")
@@ -620,17 +690,30 @@ class PGKeywordStore:
         try:
             cursor = conn.cursor()
 
-            # Build WHERE clause for filters
-            where_clause = ""
-            params: list[Any] = [query]
+            # Active records are the default search surface.
+            where_parts: list[str] = []
+            filter_params: list[Any] = []
+            status_values = ["active"]
             if filters and "source_kinds" in filters:
                 source_kinds = filters["source_kinds"]
+                if not source_kinds:
+                    return []
                 placeholders = ",".join(["%s"] * len(source_kinds))
-                where_clause = f"AND source_kind IN ({placeholders})"
-                params.extend(source_kinds)
+                where_parts.append(f"source_kind IN ({placeholders})")
+                filter_params.extend(source_kinds)
+            if filters and "statuses" in filters:
+                status_values = list(filters["statuses"])
+            if filters and filters.get("include_inactive"):
+                status_values = ["active", "stale", "archived"]
+            where_parts.append("status = ANY(%s)")
+            filter_params.append(status_values)
+            if filters and filters.get("workspace_id") is not None:
+                where_parts.append("workspace_id = %s")
+                filter_params.append(filters["workspace_id"])
+            where_clause = "AND " + " AND ".join(where_parts)
 
             sql = f"""
-                SELECT record_id,
+                SELECT source_id,
                        ts_rank(tsvector_body, plainto_tsquery('english', %s)) as relevance
                 FROM records
                 WHERE tsvector_body @@ plainto_tsquery('english', %s)
@@ -638,8 +721,7 @@ class PGKeywordStore:
                 ORDER BY relevance DESC
                 LIMIT %s;
             """
-            params.insert(1, query)
-            params.append(k)
+            params = [query, query, *filter_params, k]
 
             cursor.execute(sql, params)
             results = cursor.fetchall()
@@ -678,17 +760,17 @@ class PGGraphStore:
         try:
             cursor = conn.cursor()
 
-            for source_id, target_id, edge_type, weight in edges:
-                cursor.execute(
-                    """
-                    INSERT INTO graph_edges (source_id, target_id, edge_type, weight)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (source_id, target_id, edge_type) DO UPDATE SET
-                        weight = EXCLUDED.weight,
-                        updated_at = CURRENT_TIMESTAMP;
-                    """,
-                    (source_id, target_id, edge_type, weight),
-                )
+            psycopg2.extras.execute_values(
+                cursor,
+                """
+                INSERT INTO graph_edges (source_id, target_id, edge_type, weight)
+                VALUES %s
+                ON CONFLICT (source_id, target_id, edge_type) DO UPDATE SET
+                    weight = EXCLUDED.weight,
+                    updated_at = CURRENT_TIMESTAMP;
+                """,
+                edges,
+            )
 
             conn.commit()
             logger.debug(f"Upserted {len(edges)} edges")
@@ -713,26 +795,50 @@ class PGGraphStore:
         Returns:
             List of (neighbor_id, edge_type, cumulative_weight) tuples
         """
+        if depth < 1:
+            raise ValueError("depth must be positive")
         conn = self.conn_pool.get_connection()
         cursor = None
         try:
             cursor = conn.cursor()
 
-            # For now, just do one-hop neighbors (depth=1)
-            # A full recursive solution would use CTEs for deeper traversals
-            where_clause = ""
-            params = [record_id]
-
+            edge_filter = ""
+            params: list[Any] = [record_id]
             if edge_types:
                 placeholders = ",".join(["%s"] * len(edge_types))
-                where_clause = f"AND edge_type IN ({placeholders})"
+                edge_filter = f"AND edge_type IN ({placeholders})"
+                params.extend(edge_types)
+            params.append(depth)
+            if edge_types:
                 params.extend(edge_types)
 
             sql = f"""
+                WITH RECURSIVE walk AS (
+                    SELECT source_id, target_id, edge_type, weight, 1 AS hop,
+                           ARRAY[source_id, target_id] AS path
+                    FROM graph_edges
+                    WHERE source_id = %s {edge_filter}
+                    UNION ALL
+                    SELECT walk.source_id, edge.target_id, edge.edge_type,
+                           walk.weight * edge.weight, walk.hop + 1,
+                           walk.path || edge.target_id
+                    FROM walk
+                    JOIN graph_edges edge ON edge.source_id = walk.target_id
+                    WHERE walk.hop < %s
+                      AND NOT edge.target_id = ANY(walk.path)
+                      {edge_filter.replace("edge_type", "edge.edge_type")}
+                ),
+                ranked AS (
+                    SELECT target_id, edge_type, weight,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY target_id ORDER BY weight DESC
+                           ) AS row_number
+                    FROM walk
+                )
                 SELECT target_id, edge_type, weight
-                FROM graph_edges
-                WHERE source_id = %s {where_clause}
-                ORDER BY weight DESC;
+                FROM ranked
+                WHERE row_number = 1
+                ORDER BY weight DESC, target_id;
             """
 
             cursor.execute(sql, params)

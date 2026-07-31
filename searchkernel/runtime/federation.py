@@ -4,21 +4,32 @@ Sources are queried concurrently, fused by rank position, deduplicated, then
 optionally reranked once over the fused candidate set.
 """
 
-import logging
+import inspect
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
-from typing import Any
+from typing import Any, Literal
 
 from searchkernel.domain import ScoredRef
 from searchkernel.ports.rerank import Reranker
-from searchkernel.runtime.fanout import gather_with_timeout
+from searchkernel.runtime.fanout import FanoutDiagnostic, gather_with_timeout
 from searchkernel.runtime.registry import SourceRegistry
 from searchkernel.search.fusion import fuse_reciprocal_rank
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_PER_SOURCE_K = 10
 DEFAULT_PER_SOURCE_TIMEOUT_S = 5.0
 DEFAULT_RRF_K = 60.0
+
+
+class FederationSearchError(RuntimeError):
+    """Raised when strict federation cannot complete a retrieval stage."""
+
+
+@dataclass
+class FederationDiagnostic:
+    stage: Literal["source", "rerank"]
+    message: str
+    exception_type: str = "Exception"
 
 
 async def search_anything(
@@ -31,6 +42,11 @@ async def search_anything(
     per_source_k: int = DEFAULT_PER_SOURCE_K,
     per_source_timeout_s: float = DEFAULT_PER_SOURCE_TIMEOUT_S,
     filters: dict[str, Any] | None = None,
+    failure_mode: Literal["strict", "lenient"] = "lenient",
+    diagnostics: list[FederationDiagnostic] | None = None,
+    candidate_hydrator: (
+        Callable[[ScoredRef], str | None | Awaitable[str | None]] | None
+    ) = None,
 ) -> list[ScoredRef]:
     """Fuse the registered sources into one reranked list of ScoredRefs.
 
@@ -54,10 +70,22 @@ async def search_anything(
     if not selected:
         return []
 
+    fanout_diagnostics: list[FanoutDiagnostic] = []
     per_source_results = await gather_with_timeout(
         [source.search(query, per_source_k, filters) for source in selected],
         per_timeout_s=per_source_timeout_s,
+        failure_mode=failure_mode,
+        diagnostics=fanout_diagnostics,
     )
+    if diagnostics is not None:
+        diagnostics.extend(
+            FederationDiagnostic(
+                stage="source",
+                message=f"source {item.index}: {item.message}",
+                exception_type=item.exception_type,
+            )
+            for item in fanout_diagnostics
+        )
 
     rankings: list[list[str]] = []
     candidates: dict[str, ScoredRef] = {}
@@ -72,19 +100,20 @@ async def search_anything(
         ranking: list[str] = []
         seen_in_source: set[str] = set()
         for candidate in results:
-            if candidate.source_id in seen_in_source:
+            identity = candidate.storage_key
+            if identity in seen_in_source:
                 continue
-            seen_in_source.add(candidate.source_id)
-            ranking.append(candidate.source_id)
+            seen_in_source.add(identity)
+            ranking.append(identity)
 
-            if candidate.source_id not in candidates:
-                candidates[candidate.source_id] = candidate
-                first_seen[candidate.source_id] = len(first_seen)
+            if identity not in candidates:
+                candidates[identity] = candidate
+                first_seen[identity] = len(first_seen)
 
-            source_scores.setdefault(candidate.source_id, {})[
+            source_scores.setdefault(identity, {})[
                 candidate.source_kind
             ] = candidate.score
-            source_metadata.setdefault(candidate.source_id, {})[
+            source_metadata.setdefault(identity, {})[
                 candidate.source_kind
             ] = dict(candidate.metadata)
 
@@ -114,19 +143,30 @@ async def search_anything(
     if reranker is None:
         return fused[:top_n]
 
-    texts = [_candidate_text(candidate) for candidate in fused]
+    texts: list[str] = []
+    for candidate in fused:
+        text = _candidate_text(candidate)
+        if not text.strip() and candidate_hydrator is not None:
+            text = await _maybe_await(candidate_hydrator(candidate)) or ""
+        if not text.strip():
+            error = FederationSearchError(
+                f"rerank requires candidate text for "
+                f"{candidate.source_kind}:{candidate.source_id}"
+            )
+            _record_or_raise("rerank", error, failure_mode, diagnostics)
+            return fused[:top_n]
+        texts.append(text)
     try:
-        rerank_scores = reranker.rerank(query, texts)
-    except Exception:
-        logger.warning("Reranker failed; returning RRF results", exc_info=True)
+        rerank_scores = await _maybe_await(reranker.rerank(query, texts))
+    except Exception as error:  # noqa: BLE001 - heterogeneous reranker adapters
+        _record_or_raise("rerank", error, failure_mode, diagnostics)
         return fused[:top_n]
 
     if len(rerank_scores) != len(fused):
-        logger.warning(
-            "Reranker returned %d scores for %d candidates; returning RRF results",
-            len(rerank_scores),
-            len(fused),
+        error = FederationSearchError(
+            f"reranker returned {len(rerank_scores)} scores for {len(fused)} candidates"
         )
+        _record_or_raise("rerank", error, failure_mode, diagnostics)
         return fused[:top_n]
 
     reranked = [
@@ -140,6 +180,24 @@ async def search_anything(
 def _candidate_text(candidate: ScoredRef) -> str:
     text = candidate.metadata.get("text", "")
     return text if isinstance(text, str) else str(text)
+
+
+async def _maybe_await[T](value: T | Awaitable[T]) -> T:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _record_or_raise(
+    stage: Literal["source", "rerank"],
+    error: Exception,
+    failure_mode: Literal["strict", "lenient"],
+    diagnostics: list[FederationDiagnostic] | None,
+) -> None:
+    if failure_mode == "strict":
+        raise error
+    if diagnostics is not None:
+        diagnostics.append(FederationDiagnostic(stage, str(error), type(error).__name__))
 
 
 def _preserve_source_details(

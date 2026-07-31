@@ -155,6 +155,42 @@ class CacheStore(Protocol):
         """
         ...
 
+
+class AsyncVectorStore(Protocol):
+    """Async boundary for record-oriented vector retrieval."""
+
+    async def search(
+        self,
+        query_vector: Vector,
+        k: int,
+        *,
+        model_name: str,
+        dim: int,
+        filters: dict[str, Any] | None = None,
+    ) -> list[tuple[str, float]]:
+        ...
+
+
+class AsyncKeywordStore(Protocol):
+    """Async boundary for record-oriented keyword retrieval."""
+
+    async def search(
+        self, query: str, k: int, filters: dict[str, Any] | None = None
+    ) -> list[tuple[str, float]]:
+        ...
+
+
+class AsyncGraphStore(Protocol):
+    """Async boundary for record-oriented graph expansion."""
+
+    async def neighbors(
+        self,
+        record_id: str,
+        edge_types: list[str] | None = None,
+        depth: int = 1,
+    ) -> list[tuple[str, str, float]]:
+        ...
+
     def set(self, key: str, value: Any, epoch: int) -> None:
         """
         Store a value with an associated epoch.

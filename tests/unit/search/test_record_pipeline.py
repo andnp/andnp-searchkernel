@@ -10,6 +10,8 @@ from searchkernel.search.record_pipeline import (
     RecordSearchPolicy,
 )
 
+pytestmark = pytest.mark.asyncio
+
 
 def _record(record_id: str) -> Record:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
@@ -101,21 +103,21 @@ def _hydrator(records: dict[str, Record]):
     return lambda record_id: records.get(record_id)
 
 
-def test_keyword_only_hydrates_records_with_deterministic_ties() -> None:
+async def test_keyword_only_hydrates_records_with_deterministic_ties() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b")}
     pipeline = RecordSearchPipeline(
         keyword_store=FakeKeywordStore([("b", 1.0), ("a", 1.0)]),
         hydrator=_hydrator(records),
     )
 
-    outcome = pipeline.search("query", limit=2)
+    outcome = await pipeline.search("query", limit=2)
 
     assert [result.record_id for result in outcome.results] == ["a", "b"]
     assert all(result.record.source_kind == "fake" for result in outcome.results)
     assert outcome.results[0].provenance.strategies == ("keyword",)
 
 
-def test_minimum_candidate_limit_applies_to_store_acquisition() -> None:
+async def test_minimum_candidate_limit_applies_to_store_acquisition() -> None:
     records = {"a": _record("a")}
     keyword_store = FakeKeywordStore([("a", 1.0)])
     pipeline = RecordSearchPipeline(
@@ -124,12 +126,12 @@ def test_minimum_candidate_limit_applies_to_store_acquisition() -> None:
         config=RecordSearchConfig(minimum_candidate_limit=50),
     )
 
-    pipeline.search("query", limit=1)
+    await pipeline.search("query", limit=1)
 
     assert keyword_store.queries[0][1] == 50
 
 
-def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
+async def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b", "c")}
     pipeline = RecordSearchPipeline(
         keyword_store=FakeKeywordStore([("b", 10.0), ("a", 1.0)]),
@@ -138,13 +140,13 @@ def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
         hydrator=_hydrator(records),
     )
 
-    outcome = pipeline.search("query", limit=3)
+    outcome = await pipeline.search("query", limit=3)
 
     assert [result.record_id for result in outcome.results] == ["a", "b", "c"]
     assert outcome.results[0].provenance.strategies == ("keyword", "vector")
 
 
-def test_policy_can_bound_vector_acquisition_to_keyword_candidates() -> None:
+async def test_policy_can_bound_vector_acquisition_to_keyword_candidates() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b")}
     vector_store = FakeVectorStore([("a", 0.9)])
     pipeline = RecordSearchPipeline(
@@ -157,14 +159,18 @@ def test_policy_can_bound_vector_acquisition_to_keyword_candidates() -> None:
         ),
     )
 
-    pipeline.search("query", limit=2, filters={"workspace_id": "workspace-1"})
+    await pipeline.search("query", limit=2, filters={"workspace_id": "workspace-1"})
 
     assert vector_store.filters == [
-        {"workspace_id": "workspace-1", "candidate_ids": ["b", "a"]}
+        {
+            "workspace_id": "workspace-1",
+            "statuses": ["active"],
+            "candidate_ids": ["b", "a"],
+        }
     ]
 
 
-def test_policy_can_order_vector_candidates_before_fusion() -> None:
+async def test_policy_can_order_vector_candidates_before_fusion() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b")}
     vector_store = FakeVectorStore([("a", 0.9), ("b", 0.8)])
     pipeline = RecordSearchPipeline(
@@ -176,12 +182,12 @@ def test_policy_can_order_vector_candidates_before_fusion() -> None:
         ),
     )
 
-    outcome = pipeline.search("query", limit=2)
+    outcome = await pipeline.search("query", limit=2)
 
     assert [result.record_id for result in outcome.results] == ["b", "a"]
 
 
-def test_candidate_filter_runs_before_graph_expansion() -> None:
+async def test_candidate_filter_runs_before_graph_expansion() -> None:
     records = {record_id: _record(record_id) for record_id in ("seed", "blocked", "allowed")}
     pipeline = RecordSearchPipeline(
         keyword_store=FakeKeywordStore([("seed", 1.0)]),
@@ -194,14 +200,14 @@ def test_candidate_filter_runs_before_graph_expansion() -> None:
         ),
     )
 
-    outcome = pipeline.search("query", limit=3)
+    outcome = await pipeline.search("query", limit=3)
 
     assert [result.record_id for result in outcome.results] == ["seed", "allowed"]
     assert "blocked" not in {result.record_id for result in outcome.results}
     assert "graph" in outcome.results[-1].provenance.strategies
 
 
-def test_policy_can_adjust_scores_reject_results_and_post_process() -> None:
+async def test_policy_can_adjust_scores_reject_results_and_post_process() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b")}
     pipeline = RecordSearchPipeline(
         keyword_store=FakeKeywordStore([("a", 1.0), ("b", 0.5)]),
@@ -214,13 +220,13 @@ def test_policy_can_adjust_scores_reject_results_and_post_process() -> None:
         ),
     )
 
-    outcome = pipeline.search("query", limit=2)
+    outcome = await pipeline.search("query", limit=2)
 
     assert [result.record_id for result in outcome.results] == ["b"]
     assert outcome.results[0].score > 0
 
 
-def test_graph_expansion_is_bounded_and_missing_records_are_reported() -> None:
+async def test_graph_expansion_is_bounded_and_missing_records_are_reported() -> None:
     records = {"seed": _record("seed")}
     pipeline = RecordSearchPipeline(
         keyword_store=FakeKeywordStore([("seed", 1.0)]),
@@ -237,14 +243,14 @@ def test_graph_expansion_is_bounded_and_missing_records_are_reported() -> None:
         continue_on_error=True,
     )
 
-    outcome = pipeline.search("query", limit=3)
+    outcome = await pipeline.search("query", limit=3)
 
     assert [result.record_id for result in outcome.results] == ["seed"]
     assert outcome.missing_record_ids == ("missing",)
     assert outcome.degraded
 
 
-def test_callable_embedding_provider_accepts_explicit_vector_metadata() -> None:
+async def test_callable_embedding_provider_accepts_explicit_vector_metadata() -> None:
     records = {"a": _record("a")}
     pipeline = RecordSearchPipeline(
         vector_store=FakeVectorStore([("a", 1.0)]),
@@ -254,10 +260,11 @@ def test_callable_embedding_provider_accepts_explicit_vector_metadata() -> None:
         hydrator=_hydrator(records),
     )
 
-    assert [result.record_id for result in pipeline.search("query").results] == ["a"]
+    outcome = await pipeline.search("query")
+    assert [result.record_id for result in outcome.results] == ["a"]
 
 
-def test_store_errors_raise_by_default() -> None:
+async def test_store_errors_raise_by_default() -> None:
     class BrokenKeywordStore(FakeKeywordStore):
         def search(
             self,
@@ -273,10 +280,11 @@ def test_store_errors_raise_by_default() -> None:
     )
 
     with pytest.raises(RecordSearchError, match="keyword retrieval failed"):
-        pipeline.search("query")
+
+        await pipeline.search("query")
 
 
-def test_store_errors_can_be_explicitly_returned_as_degraded() -> None:
+async def test_store_errors_can_be_explicitly_returned_as_degraded() -> None:
     class BrokenKeywordStore(FakeKeywordStore):
         def search(
             self,
@@ -292,7 +300,7 @@ def test_store_errors_can_be_explicitly_returned_as_degraded() -> None:
         continue_on_error=True,
     )
 
-    outcome = pipeline.search("query")
+    outcome = await pipeline.search("query")
 
     assert not outcome.results
     assert outcome.degraded

@@ -41,3 +41,13 @@ class EmbeddingProvider(EmbeddingBatchProvider, Protocol):
     """Embedding provider with an explicit, stable vector dimension."""
 
     dim: int
+
+
+class AsyncEmbeddingProvider(Protocol):
+    """Async query-embedding boundary used by record search."""
+
+    model_name: str
+    dim: int
+
+    async def embed_query(self, text: str) -> Vector:
+        ...

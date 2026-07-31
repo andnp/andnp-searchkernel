@@ -20,6 +20,7 @@ from searchkernel.domain.models import (
     StrategyContribution,
     Tier,
     Vector,
+    canonical_storage_key,
 )
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "StrategyContribution",
     "Tier",
     "Vector",
+    "canonical_storage_key",
 ]

@@ -4,8 +4,9 @@ Pure data types representing the source-agnostic contracts between the kernel
 and the outside world. No I/O, no imports from adapters/runtime/stores.
 """
 
+import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -31,6 +32,27 @@ Vector = list[float]  # Embedding vector
 Cursor = str | None  # Watermark for incremental sync (e.g., commit SHA, timestamp)
 Filters = dict[str, Any]  # Query filters (source-specific, opaque to core)
 ChangeSignal = dict[str, Any]  # Source change info: {"watch": bool, "poll_interval": int}
+
+
+def canonical_storage_key(
+    workspace_id: str | None,
+    source_kind: str,
+    source_id: str,
+) -> str:
+    """Return a collision-free key for a record's composite identity.
+
+    JSON array encoding is deliberate: source identifiers may contain any
+    delimiter, and ``source_kind`` is part of identity rather than metadata.
+    """
+    if not source_kind:
+        raise ValueError("source_kind must not be empty")
+    if not source_id:
+        raise ValueError("source_id must not be empty")
+    return "record:" + json.dumps(
+        [workspace_id, source_kind, source_id],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 # ===== Core domain types =====
@@ -66,6 +88,11 @@ class Chunk:
         import hashlib
 
         return hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+
+    @property
+    def storage_key(self) -> str:
+        """Canonical identity for a chunk treated as a ``chunk`` record."""
+        return canonical_storage_key(None, "chunk", self.chunk_id)
 
 
 @dataclass
@@ -151,9 +178,23 @@ class Record:
     embedding_model: str | None = None
     """Model name that produced the embedding (if embedding is set)."""
 
+    workspace_id: str | None = None
+    """Optional workspace/tenant scope for the source identity."""
+
+    def __post_init__(self) -> None:
+        """Keep persisted timestamps comparable across source adapters."""
+        self.created_at = _as_utc(self.created_at)
+        self.updated_at = _as_utc(self.updated_at)
+
+    @property
+    def storage_key(self) -> str:
+        """Canonical storage identity used by stores, fusion, and hydration."""
+        return canonical_storage_key(self.workspace_id, self.source_kind, self.source_id)
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary for storage or RPC."""
         return {
+            "workspace_id": self.workspace_id,
             "source_kind": self.source_kind,
             "source_id": self.source_id,
             "title": self.title,
@@ -187,6 +228,7 @@ class Record:
             status = RecordStatus(status)
 
         return cls(
+            workspace_id=data.get("workspace_id"),
             source_kind=data["source_kind"],
             source_id=data["source_id"],
             title=data["title"],
@@ -199,6 +241,12 @@ class Record:
             embedding=data.get("embedding"),
             embedding_model=data.get("embedding_model"),
         )
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 @dataclass
@@ -221,12 +269,16 @@ class SearchResult:
     metadata: dict[str, Any] = field(default_factory=dict)
     """Additional metadata (e.g., strategy contributions, adjustments)."""
 
+    workspace_id: str | None = None
+    """Optional workspace scope of the matched record."""
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary."""
         return {
             "record_id": self.record_id,
             "score": self.score,
             "source_kind": self.source_kind,
+            "workspace_id": self.workspace_id,
             "metadata": self.metadata,
         }
 
@@ -364,11 +416,20 @@ class ScoredRef:
     metadata: dict[str, Any] = field(default_factory=dict)
     """Source-specific result metadata."""
 
+    workspace_id: str | None = None
+    """Optional workspace scope of the matched record."""
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary."""
         return {
             "source_id": self.source_id,
             "score": self.score,
             "source_kind": self.source_kind,
+            "workspace_id": self.workspace_id,
             "metadata": self.metadata,
         }
+
+    @property
+    def storage_key(self) -> str:
+        """Canonical identity used when fusing references."""
+        return canonical_storage_key(self.workspace_id, self.source_kind, self.source_id)

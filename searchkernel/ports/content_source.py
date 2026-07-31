@@ -62,6 +62,20 @@ class RecordIngestor(Protocol):
 
 
 @runtime_checkable
+class AsyncRecordIngestor(Protocol):
+    """Checkpointed batch indexing boundary for record ingestion."""
+
+    async def index_records(
+        self,
+        records: list[Record],
+        *,
+        checkpoint: Cursor | None = None,
+    ) -> Cursor:
+        """Index a batch and return the checkpoint safe to persist."""
+        ...
+
+
+@runtime_checkable
 class SearchableSource(Protocol):
     """Federated source: source runs its own retrieval; kernel merges results.
 
@@ -90,8 +104,8 @@ class SearchableSource(Protocol):
             k: Maximum number of results to return.
             filters: Optional source-specific filters (opaque to the kernel).
 
-        Yields:
-            ScoredRefs in descending source-local score order. The kernel
+        Returns:
+            An iterable of ScoredRefs in descending source-local score order. The kernel
             merges candidates and applies the optional or required late
             rerank defined by ``runtime.federation.search_anything``.
         """

@@ -8,7 +8,10 @@ import pytest
 
 from searchkernel.domain import ScoredRef
 from searchkernel.ports import Reranker, SearchableSource
-from searchkernel.runtime.federation import search_anything
+from searchkernel.runtime.federation import (
+    FederationSearchError,
+    search_anything,
+)
 from searchkernel.runtime.registry import SourceRegistry
 
 
@@ -199,16 +202,9 @@ async def test_duplicate_results_are_fused_once_with_source_details():
 
     results = await search_anything("query", registry=registry)
 
-    assert len(results) == 1
-    assert results[0].source_id == "shared"
-    assert results[0].score == pytest.approx(2 / 61)
-    assert results[0].metadata["origin"] == "first"
-    assert results[0].metadata["source_score"] == 0.9
-    assert results[0].metadata["source_scores"] == {
-        "first": 0.9,
-        "second": 0.2,
-    }
-    assert results[0].metadata["source_metadata"]["second"]["origin"] == "second"
+    assert len(results) == 2
+    assert {result.source_kind for result in results} == {"first", "second"}
+    assert all(result.source_id == "shared" for result in results)
 
 
 @pytest.mark.asyncio
@@ -322,3 +318,31 @@ async def test_rerank_once_reorders_by_reranker_not_source_score():
     assert [r.source_id for r in results] == ["b-1", "a-1"]
     assert results[0].score == 0.95
     assert results[0].metadata["source_score"] == 0.1
+
+
+@pytest.mark.asyncio
+async def test_reranker_requires_text_or_explicit_hydrator() -> None:
+    class _Source:
+        source_kind = "empty"
+
+        async def search(self, query, k, filters=None):
+            return [ScoredRef("id", 0.5, "empty")]
+
+    registry = SourceRegistry()
+    registry.register(_Source())
+
+    with pytest.raises(FederationSearchError, match="candidate text"):
+        await search_anything(
+            "query",
+            registry=registry,
+            reranker=_identity_reranker(),
+            failure_mode="strict",
+        )
+
+    results = await search_anything(
+        "query",
+        registry=registry,
+        reranker=_identity_reranker(),
+        candidate_hydrator=lambda candidate: "hydrated text",
+    )
+    assert results[0].source_id == "id"

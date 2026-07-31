@@ -247,3 +247,34 @@ async def test_very_large_timeout():
     )
 
     assert results == list(range(10))
+
+
+@pytest.mark.asyncio
+async def test_lenient_mode_reports_structured_failures():
+    diagnostics = []
+
+    async def fail():
+        raise RuntimeError("offline")
+
+    results = await gather_with_timeout(
+        [fail()],
+        per_timeout_s=1.0,
+        diagnostics=diagnostics,
+    )
+
+    assert results == [None]
+    assert diagnostics[0].stage == "source"
+    assert diagnostics[0].exception_type == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_strict_mode_propagates_failures():
+    async def fail():
+        raise RuntimeError("offline")
+
+    with pytest.raises(RuntimeError, match="offline"):
+        await gather_with_timeout(
+            [fail()],
+            per_timeout_s=1.0,
+            failure_mode="strict",
+        )

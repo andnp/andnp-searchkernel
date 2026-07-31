@@ -9,11 +9,13 @@ Dependency rule: ports import only from domain/ and stdlib/typing.
 from searchkernel.ports.candidate_filter import CandidateFilterSupport
 from searchkernel.ports.chunking_config import ChunkTuningConfig
 from searchkernel.ports.content_source import (
+    AsyncRecordIngestor,
     ContentSource,
     RecordIngestor,
     SearchableSource,
 )
 from searchkernel.ports.embedding import (
+    AsyncEmbeddingProvider,
     EmbeddingBatchProvider,
     EmbeddingProvider,
     EmbeddingSink,
@@ -26,11 +28,26 @@ from searchkernel.ports.live_indices import (
 )
 from searchkernel.ports.llm import LLMProvider
 from searchkernel.ports.orchestrator_config import OrchestratorConfig
+from searchkernel.ports.record_search import AsyncRecordHydrator
 from searchkernel.ports.rerank import Reranker
 from searchkernel.ports.search import SearchAPI
-from searchkernel.ports.stores import CacheStore, GraphStore, KeywordStore, VectorStore
+from searchkernel.ports.stores import (
+    AsyncGraphStore,
+    AsyncKeywordStore,
+    AsyncVectorStore,
+    CacheStore,
+    GraphStore,
+    KeywordStore,
+    VectorStore,
+)
 
 __all__ = [
+    "AsyncEmbeddingProvider",
+    "AsyncGraphStore",
+    "AsyncKeywordStore",
+    "AsyncRecordHydrator",
+    "AsyncRecordIngestor",
+    "AsyncVectorStore",
     "CacheStore",
     "CandidateFilterSupport",
     "ChunkTuningConfig",

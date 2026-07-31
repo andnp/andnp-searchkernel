@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+import inspect
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
@@ -12,7 +13,16 @@ from searchkernel.domain import (
     SearchResultProvenance,
     Vector,
 )
-from searchkernel.ports import EmbeddingProvider, GraphStore, KeywordStore, VectorStore
+from searchkernel.ports import (
+    AsyncEmbeddingProvider,
+    AsyncGraphStore,
+    AsyncKeywordStore,
+    AsyncVectorStore,
+    EmbeddingProvider,
+    GraphStore,
+    KeywordStore,
+    VectorStore,
+)
 from searchkernel.search.adaptive_limit import resolve_adaptive_result_limit
 from searchkernel.search.bounded_graph import (
     TypedGraphEdge,
@@ -20,15 +30,21 @@ from searchkernel.search.bounded_graph import (
 )
 from searchkernel.search.fusion import fuse_reciprocal_rank
 
-RecordHydratorCallable = Callable[[str], Record | None]
-QueryEmbeddingCallable = Callable[[str], Vector]
+RecordHydratorCallable = Callable[[str], Record | None | Awaitable[Record | None]]
+QueryEmbeddingCallable = Callable[[str], Vector | Awaitable[Vector]]
 FailureStage = Literal["keyword", "vector", "graph", "hydration"]
 
 
 class RecordHydrator(Protocol):
     """Hydrate a record without mutating source state."""
 
-    def hydrate_record(self, record_id: str) -> Record | None: ...
+    async def hydrate_record(
+        self,
+        record_id: str,
+        *,
+        source_kind: str | None = None,
+        workspace_id: str | None = None,
+    ) -> Record | None: ...
 
 
 class QueryEmbeddingProvider(Protocol):
@@ -40,7 +56,7 @@ class QueryEmbeddingProvider(Protocol):
     @property
     def dim(self) -> int: ...
 
-    def embed_query(self, query: str) -> Vector: ...
+    async def embed_query(self, query: str) -> Vector: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,12 +106,17 @@ class RecordSearchResult:
     def record_id(self) -> str:
         return self.record.source_id
 
+    @property
+    def storage_key(self) -> str:
+        return self.record.storage_key
+
     def as_search_result(self) -> SearchResult:
         """Adapt this record result to the kernel's generic result model."""
         return SearchResult(
             record_id=self.record_id,
             score=self.score,
             source_kind=self.record.source_kind,
+            workspace_id=self.record.workspace_id,
             metadata={"provenance": self.provenance.to_dict()},
         )
 
@@ -106,6 +127,7 @@ class RecordSearchFailure:
 
     stage: FailureStage
     message: str
+    exception_type: str = "Exception"
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +168,7 @@ class RecordSearchConfig:
     score_ratio_floor: float = 0.5
     minimum_score: float = 0.0
     maximum_score_gap: float = 1.0
+    failure_mode: Literal["strict", "lenient"] = "strict"
 
 
 class RecordSearchPipeline:
@@ -159,20 +182,21 @@ class RecordSearchPipeline:
         self,
         *,
         hydrator: RecordHydrator | RecordHydratorCallable,
-        keyword_store: KeywordStore | None = None,
-        vector_store: VectorStore | None = None,
-        graph_store: GraphStore | None = None,
+        keyword_store: KeywordStore | AsyncKeywordStore | None = None,
+        vector_store: VectorStore | AsyncVectorStore | None = None,
+        graph_store: GraphStore | AsyncGraphStore | None = None,
         embedding_provider: (
             EmbeddingProvider
+            | AsyncEmbeddingProvider
             | QueryEmbeddingProvider
-            | Callable[[str], Vector]
+            | Callable[[str], Vector | Awaitable[Vector]]
             | None
         ) = None,
         embedding_model_name: str | None = None,
         embedding_dim: int | None = None,
         policy: RecordSearchPolicy | None = None,
         config: RecordSearchConfig | None = None,
-        continue_on_error: bool = False,
+        continue_on_error: bool | None = None,
     ) -> None:
         if vector_store is not None and embedding_provider is None:
             raise ValueError("vector_store requires embedding_provider")
@@ -185,10 +209,14 @@ class RecordSearchPipeline:
         self._embedding_dim = embedding_dim
         self._policy = policy or RecordSearchPolicy()
         self._config = config or RecordSearchConfig()
-        self._continue_on_error = continue_on_error
+        self._continue_on_error = (
+            self._config.failure_mode == "lenient"
+            if continue_on_error is None
+            else continue_on_error
+        )
         self._validate_config()
 
-    def search(
+    async def search(
         self,
         query: str,
         *,
@@ -204,6 +232,7 @@ class RecordSearchPipeline:
         failures: list[RecordSearchFailure] = []
         missing_record_ids: list[str] = []
         filters = dict(filters or {})
+        filters.setdefault("statuses", ["active"])
         acquisition_limit = max(
             max(limit, 1) * self._config.candidate_multiplier,
             self._config.minimum_candidate_limit,
@@ -213,14 +242,16 @@ class RecordSearchPipeline:
         if self._keyword_store is not None:
             try:
                 rankings["keyword"] = _sorted_unique(
-                    self._keyword_store.search(query, acquisition_limit, filters)
+                    await _maybe_await(
+                        self._keyword_store.search(query, acquisition_limit, filters)
+                    )
                 )
             except Exception as error:  # noqa: BLE001 - degraded mode captures backend failures
                 self._handle_error("keyword", error, failures)
 
         if self._vector_store is not None:
             try:
-                vector, model_name, dim = self._query_embedding(query)
+                vector, model_name, dim = await self._query_embedding(query)
                 vector_filters = filters
                 if self._policy.vector_candidate_ids is not None:
                     candidate_ids = self._policy.vector_candidate_ids(
@@ -231,12 +262,14 @@ class RecordSearchPipeline:
                         vector_filters = dict(filters)
                         vector_filters["candidate_ids"] = list(candidate_ids)
                 vector_ranking = _sorted_unique(
-                    self._vector_store.search(
-                        vector,
-                        acquisition_limit,
-                        model_name=model_name,
-                        dim=dim,
-                        filters=vector_filters,
+                    await _maybe_await(
+                        self._vector_store.search(
+                            vector,
+                            acquisition_limit,
+                            model_name=model_name,
+                            dim=dim,
+                            filters=vector_filters,
+                        )
                     )
                 )
                 if self._policy.vector_ranking_order is not None:
@@ -258,7 +291,7 @@ class RecordSearchPipeline:
 
         if self._graph_store is not None and base_candidates:
             try:
-                graph_ranking = self._expand_graph(base_candidates)
+                graph_ranking = await self._expand_graph(base_candidates)
                 if graph_ranking:
                     rankings["graph"] = graph_ranking
                     if self._config.graph_fusion == "max":
@@ -301,7 +334,7 @@ class RecordSearchPipeline:
         hydrated: list[RecordSearchResult] = []
         for candidate in candidates[:result_limit]:
             try:
-                record = self._hydrate(candidate.record_id)
+                record = await self._hydrate(candidate.record_id)
             except Exception as error:  # noqa: BLE001 - degraded mode captures hydration failures
                 self._handle_error("hydration", error, failures)
                 continue
@@ -367,7 +400,7 @@ class RecordSearchPipeline:
             if self._policy.candidate_filter(candidate)
         ]
 
-    def _expand_graph(
+    async def _expand_graph(
         self, candidates: Sequence[RecordSearchCandidate]
     ) -> list[tuple[str, float]]:
         graph_store = self._graph_store
@@ -380,9 +413,14 @@ class RecordSearchPipeline:
         edges_by_seed: dict[str, list[TypedGraphEdge[str, tuple[str, float]]]] = {}
         discounts: dict[tuple[str, float], float] = {}
         for seed_id in seed_scores:
-            neighbors = graph_store.neighbors(
-                seed_id,
-                depth=self._config.graph_depth,
+            neighbors = cast(
+                list[tuple[str, str, float]],
+                await _maybe_await(
+                    graph_store.neighbors(
+                        seed_id,
+                        depth=self._config.graph_depth,
+                    )
+                ),
             )
             sorted_neighbors = sorted(
                 neighbors,
@@ -410,24 +448,30 @@ class RecordSearchPipeline:
             key=lambda item: (-item[1], item[0]),
         )
 
-    def _query_embedding(self, query: str) -> tuple[Vector, str, int]:
+    async def _query_embedding(self, query: str) -> tuple[Vector, str, int]:
         provider = self._embedding_provider
         if provider is None:
             raise ValueError("embedding_provider is required for vector search")
 
         if hasattr(provider, "embed_query"):
-            vector = cast(QueryEmbeddingProvider, provider).embed_query(query)
+            vector = await _maybe_await(
+                cast(QueryEmbeddingProvider, provider).embed_query(query)
+            )
         else:
             embed_method = getattr(provider, "embed", None)
             if callable(embed_method):
-                embeddings = cast(
+                embeddings = await _maybe_await(
+                    cast(
                     Callable[[list[str]], list[Vector]], embed_method
-                )([query])
+                    )([query])
+                )
                 if len(embeddings) != 1:
                     raise ValueError("embedding provider must return one query vector")
                 vector = embeddings[0]
             else:
-                vector = cast(QueryEmbeddingCallable, provider)(query)
+                vector = await _maybe_await(
+                    cast(QueryEmbeddingCallable, provider)(query)
+                )
 
         model_name = self._embedding_model_name or getattr(
             provider, "model_name", None
@@ -443,10 +487,12 @@ class RecordSearchPipeline:
             )
         return vector, model_name, dim
 
-    def _hydrate(self, record_id: str) -> Record | None:
+    async def _hydrate(self, record_id: str) -> Record | None:
         if hasattr(self._hydrator, "hydrate_record"):
-            return cast(RecordHydrator, self._hydrator).hydrate_record(record_id)
-        return cast(RecordHydratorCallable, self._hydrator)(record_id)
+            return await _maybe_await(
+                cast(RecordHydrator, self._hydrator).hydrate_record(record_id)
+            )
+        return await _maybe_await(cast(RecordHydratorCallable, self._hydrator)(record_id))
 
     def _handle_error(
         self,
@@ -456,7 +502,9 @@ class RecordSearchPipeline:
     ) -> None:
         if not self._continue_on_error:
             raise RecordSearchError(stage, error) from error
-        failures.append(RecordSearchFailure(stage, str(error)))
+        failures.append(
+            RecordSearchFailure(stage, str(error), type(error).__name__)
+        )
 
     def _validate_config(self) -> None:
         if self._config.candidate_multiplier < 1:
@@ -473,6 +521,8 @@ class RecordSearchPipeline:
             raise ValueError("max_graph_seeds must be positive")
         if self._config.max_neighbors_per_seed < 1:
             raise ValueError("max_neighbors_per_seed must be positive")
+        if self._config.failure_mode not in {"strict", "lenient"}:
+            raise ValueError("failure_mode must be 'strict' or 'lenient'")
 
     @staticmethod
     def _sort_candidates(
@@ -488,3 +538,10 @@ def _sorted_unique(
     for record_id, score in results:
         best_scores[record_id] = max(score, best_scores.get(record_id, score))
     return sorted(best_scores.items(), key=lambda item: (-item[1], item[0]))
+
+
+async def _maybe_await[T](value: T | Awaitable[T]) -> T:
+    """Allow synchronous adapters during the migration while ports go async."""
+    if inspect.isawaitable(value):
+        return await value
+    return value

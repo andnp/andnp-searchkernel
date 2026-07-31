@@ -1,18 +1,26 @@
 """Async per-source-timeout fan-out helper."""
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
-
-logger = logging.getLogger(__name__)
+from dataclasses import dataclass
+from typing import Literal, TypeVar
 
 T = TypeVar("T")
+
+
+@dataclass
+class FanoutDiagnostic:
+    index: int
+    stage: Literal["timeout", "source"]
+    message: str
+    exception_type: str = "Exception"
 
 
 async def gather_with_timeout[T](
     coros_or_factories: list[Awaitable[T] | Callable[[], Awaitable[T]]],
     per_timeout_s: float,
+    failure_mode: Literal["strict", "lenient"] = "lenient",
+    diagnostics: list[FanoutDiagnostic] | None = None,
 ) -> list[T | None]:
     """Run async tasks concurrently with per-task timeout.
 
@@ -43,7 +51,7 @@ async def gather_with_timeout[T](
     """
     tasks: list[asyncio.Task[T | None]] = []
 
-    for coro_or_factory in coros_or_factories:
+    for index, coro_or_factory in enumerate(coros_or_factories):
         # If it's a callable (factory), invoke it to create the coroutine
         if callable(coro_or_factory):
             coro = coro_or_factory()
@@ -52,22 +60,36 @@ async def gather_with_timeout[T](
 
         # Wrap the coroutine with timeout handling
         async def run_with_timeout(
-            c: Awaitable[T], timeout: float
+            c: Awaitable[T], timeout: float, task_index: int
         ) -> T | None:
             try:
                 return await asyncio.wait_for(c, timeout=timeout)
             except TimeoutError:
-                logger.debug(
-                    f"Task timed out after {timeout}s"
+                diagnostic = FanoutDiagnostic(
+                    task_index,
+                    "timeout",
+                    f"task timed out after {timeout}s",
+                    "TimeoutError",
                 )
+                if failure_mode == "strict":
+                    raise
+                if diagnostics is not None:
+                    diagnostics.append(diagnostic)
                 return None
-            except Exception as e:  # noqa: BLE001 -- generic fan-out executor over heterogeneous tasks
-                logger.debug(
-                    f"Task failed with exception: {type(e).__name__}: {e}"
+            except Exception as e:
+                diagnostic = FanoutDiagnostic(
+                    task_index,
+                    "source",
+                    str(e),
+                    type(e).__name__,
                 )
+                if failure_mode == "strict":
+                    raise
+                if diagnostics is not None:
+                    diagnostics.append(diagnostic)
                 return None
 
-        task = asyncio.create_task(run_with_timeout(coro, per_timeout_s))
+        task = asyncio.create_task(run_with_timeout(coro, per_timeout_s, index))
         tasks.append(task)
 
     # Run all tasks and collect results

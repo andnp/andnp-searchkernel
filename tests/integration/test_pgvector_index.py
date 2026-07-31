@@ -302,7 +302,7 @@ def test_search_skips_missing_record_rows(index, prefix):
     cursor = None
     try:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM records WHERE record_id = %s;", (chunk.chunk_id,))
+        cursor.execute("DELETE FROM records WHERE record_id = %s;", (chunk.storage_key,))
         conn.commit()
     finally:
         if cursor is not None:

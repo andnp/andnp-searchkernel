@@ -31,7 +31,13 @@ from searchkernel.adapters.stores.pgvector import (
     PostgresConnection,
     _create_schema,
 )
-from searchkernel.domain import Chunk, Record, RecordStatus, Vector
+from searchkernel.domain import (
+    Chunk,
+    Record,
+    RecordStatus,
+    Vector,
+    canonical_storage_key,
+)
 from searchkernel.search.types import SearchResultDict
 
 logger = logging.getLogger(__name__)
@@ -91,6 +97,7 @@ def _chunk_to_record(chunk: Chunk) -> Record:
     return Record(
         source_kind=_SOURCE_KIND,
         source_id=chunk.chunk_id,
+        workspace_id=chunk.metadata.get("workspace_id"),
         title=header_path or file_path,
         body=chunk.content,
         created_at=modified_time,
@@ -171,8 +178,17 @@ class PGVectorIndex:
             return
 
         vectors = self._embedder.embed([_embedding_text(c) for c in chunks])
+        if len(vectors) != len(chunks):
+            raise ValueError(
+                f"embedder returned {len(vectors)} vectors for {len(chunks)} chunks"
+            )
         records = []
         for chunk, vector in zip(chunks, vectors):
+            if len(vector) != self._dim:
+                raise ValueError(
+                    f"embedding dimension mismatch for {chunk.chunk_id}: "
+                    f"expected {self._dim}, got {len(vector)}"
+                )
             record = _chunk_to_record(chunk)
             record.embedding = vector
             records.append(record)
@@ -203,7 +219,7 @@ class PGVectorIndex:
             row = rows.get(record_id)
             if row is None:
                 continue
-            body, metadata = row
+            source_id, body, metadata = row
 
             if excluded_files and docs_root:
                 file_path = metadata.get("file_path", "")
@@ -213,7 +229,7 @@ class PGVectorIndex:
                     if matches_any_excluded(file_path, excluded_files, docs_root):
                         continue
 
-            results.append(_row_to_result(record_id, body, metadata, score))
+            results.append(_row_to_result(source_id, body, metadata, score))
             if len(results) >= top_k:
                 break
 
@@ -223,8 +239,8 @@ class PGVectorIndex:
         row = self._fetch_records([chunk_id]).get(chunk_id)
         if row is None:
             return None
-        body, metadata = row
-        return _row_to_result(chunk_id, body, metadata, 1.0)
+        source_id, body, metadata = row
+        return _row_to_result(source_id, body, metadata, 1.0)
 
     def get_parent_content(self, parent_chunk_id: str) -> str | None:
         chunk = self.get_chunk_by_id(parent_chunk_id)
@@ -249,7 +265,7 @@ class PGVectorIndex:
                 return []
             cursor.execute(
                 sql.SQL(
-                    "SELECT r.record_id FROM records r "
+                    "SELECT r.source_id FROM records r "
                     "JOIN {table} v ON v.record_id = r.record_id "
                     "WHERE r.source_kind = %s AND r.metadata->>'doc_id' = %s;"
                 ).format(table=sql.Identifier(table_name)),
@@ -316,15 +332,25 @@ class PGVectorIndex:
     def remove(self, document_id: str) -> None:
         chunk_ids = self.get_chunk_ids_for_document(document_id)
         if chunk_ids:
-            self._store.delete_for_model(chunk_ids, self._model_name, self._dim)
+            self._store.delete_for_model(
+                [self._storage_key(chunk_id) for chunk_id in chunk_ids],
+                self._model_name,
+                self._dim,
+            )
 
     def remove_chunk(self, chunk_id: str) -> None:
-        self._store.delete_for_model([chunk_id], self._model_name, self._dim)
+        self._store.delete_for_model(
+            [self._storage_key(chunk_id)], self._model_name, self._dim
+        )
 
     def prune_document(self, doc_id: str) -> int:
         chunk_ids = self.get_chunk_ids_for_document(doc_id)
         if chunk_ids:
-            self._store.delete_for_model(chunk_ids, self._model_name, self._dim)
+            self._store.delete_for_model(
+                [self._storage_key(chunk_id) for chunk_id in chunk_ids],
+                self._model_name,
+                self._dim,
+            )
         return len(chunk_ids)
 
     def update_chunk_path(
@@ -333,7 +359,7 @@ class PGVectorIndex:
         row = self._fetch_records([old_chunk_id]).get(old_chunk_id)
         if row is None:
             return False
-        body, _old_metadata = row
+        _source_id, body, _old_metadata = row
 
         record = Record(
             source_kind=_SOURCE_KIND,
@@ -348,7 +374,9 @@ class PGVectorIndex:
         )
         record.embedding = self._embedder.embed([body])[0]
         self._store.upsert([record], self._model_name, self._dim)
-        self._store.delete_for_model([old_chunk_id], self._model_name, self._dim)
+        self._store.delete_for_model(
+            [self._storage_key(old_chunk_id)], self._model_name, self._dim
+        )
         return True
 
     def is_ready(self) -> bool:
@@ -388,7 +416,12 @@ class PGVectorIndex:
         if record_ids:
             self._store.delete_for_model(record_ids, self._model_name, self._dim)
 
-    def _fetch_records(self, record_ids: list[str]) -> dict[str, tuple[str, dict[str, Any]]]:
+    def _storage_key(self, chunk_id: str) -> str:
+        return canonical_storage_key(None, _SOURCE_KIND, chunk_id)
+
+    def _fetch_records(
+        self, record_ids: list[str]
+    ) -> dict[str, tuple[str, str, dict[str, Any]]]:
         if not record_ids:
             return {}
         conn = self._conn_pool.get_connection()
@@ -398,15 +431,31 @@ class PGVectorIndex:
             table_name = self._own_vector_table_name(cursor)
             if table_name is None:
                 return {}
+            storage_ids = [
+                record_id
+                if record_id.startswith("record:")
+                else self._storage_key(record_id)
+                for record_id in record_ids
+            ]
             cursor.execute(
                 sql.SQL(
-                    "SELECT r.record_id, r.body, r.metadata "
+                    "SELECT r.record_id, r.source_id, r.body, r.metadata "
                     "FROM records r JOIN {table} v ON v.record_id = r.record_id "
                     "WHERE r.record_id = ANY(%s);"
                 ).format(table=sql.Identifier(table_name)),
-                (record_ids,),
+                (storage_ids,),
             )
-            return {row[0]: (row[1], row[2] or {}) for row in cursor.fetchall()}
+            return {
+                requested_id: (row[1], row[2], row[3] or {})
+                for row in cursor.fetchall()
+                for requested_id in record_ids
+                if row[0]
+                == (
+                    requested_id
+                    if requested_id.startswith("record:")
+                    else self._storage_key(requested_id)
+                )
+            }
         finally:
             if cursor is not None:
                 cursor.close()
