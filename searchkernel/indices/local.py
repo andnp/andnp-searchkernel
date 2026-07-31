@@ -33,6 +33,7 @@ from searchkernel.indices.local_vectors import (
     NORMALIZATION_POLICY,
     VECTOR_FORMAT_VERSION,
     PackedVectorCodec,
+    VectorSnapshot,
 )
 from searchkernel.storage.db import DatabaseManager
 
@@ -75,6 +76,8 @@ class LocalRecordBackend:
             DatabaseManager(db_path) if db_path is not None else _EphemeralDatabase()
         )
         self._lock = threading.RLock()
+        self._snapshot_lock = threading.RLock()
+        self._vector_snapshots: dict[tuple[str, int], VectorSnapshot] = {}
         self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
         self._fts5_available = False
         self._keyword_search_diagnostic = (
@@ -760,49 +763,96 @@ class LocalRecordBackend:
             raise ValueError(
                 f"query vector dimension mismatch: expected {dim}, got {len(query_vector)}"
             )
-        query = PackedVectorCodec._validated_array(
+        query = PackedVectorCodec.normalize(
             query_vector, dim, context="query vector"
         )
-        with self._lock:
-            conn = self._db.get_connection()
-            rows = conn.execute(
-                """
-                SELECT r.*, v.embedding, v.format_version, v.normalization_policy
-                FROM local_records r
-                JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
-                WHERE v.encoder_namespace = ? AND v.dim = ?
-                """,
-                (model_name, dim),
-            ).fetchall()
-            hits: list[RecordHit] = []
-            for row in rows:
-                if not self._matches(row, filters):
-                    continue
-                if (
-                    row["format_version"] != VECTOR_FORMAT_VERSION
-                    or row["normalization_policy"] != NORMALIZATION_POLICY
-                ):
-                    raise ValueError(
-                        f"unsupported vector format for {row['storage_key']}"
-                    )
-                vector = PackedVectorCodec.decode(
-                    row["embedding"],
-                    dim,
-                    context=f"stored embedding for {row['storage_key']}",
+        snapshot = self._get_vector_snapshot(model_name, dim)
+        eligible = snapshot.filter_mask(
+            filters,
+            status_values=self._status_values(filters),
+            filter_values=self._filter_values,
+        )
+        positions = np.flatnonzero(eligible)
+        if not len(positions):
+            return []
+        scores = snapshot.matrix[positions] @ query
+        selected = self._select_top_positions(
+            positions,
+            scores,
+            snapshot.storage_keys,
+            k,
+        )
+        return [
+            RecordHit(
+                RecordIdentity.from_storage_key(snapshot.storage_keys[position]),
+                float(scores[index]),
+            )
+            for index, position in selected
+        ]
+
+    def _get_vector_snapshot(self, model_name: str, dim: int) -> VectorSnapshot:
+        key = (model_name, dim)
+        with self._snapshot_lock:
+            with self._lock:
+                conn = self._db.get_connection()
+                current_epoch = self._epoch_locked(conn)
+                cached = self._vector_snapshots.get(key)
+                if cached is not None and cached.epoch == current_epoch:
+                    return cached
+                rows = conn.execute(
+                    """
+                    SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                           r.status, v.embedding, v.format_version,
+                           v.normalization_policy
+                    FROM local_records r
+                    JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                    WHERE v.encoder_namespace = ? AND v.dim = ?
+                    ORDER BY r.storage_key
+                    """,
+                    (model_name, dim),
+                ).fetchall()
+                snapshot_epoch = self._epoch_locked(conn)
+            snapshot = VectorSnapshot.from_rows(
+                rows,
+                encoder_namespace=model_name,
+                dim=dim,
+                epoch=snapshot_epoch,
+            )
+            self._vector_snapshots[key] = snapshot
+            return snapshot
+
+    @staticmethod
+    def _select_top_positions(
+        positions: np.ndarray,
+        scores: np.ndarray,
+        storage_keys: tuple[str, ...],
+        k: int,
+    ) -> list[tuple[int, int]]:
+        if len(positions) <= k:
+            candidates = np.arange(len(positions))
+        else:
+            partition = np.argpartition(-scores, k - 1)[:k]
+            threshold = float(np.min(scores[partition]))
+            above = np.flatnonzero(scores > threshold)
+            ties = np.flatnonzero(scores == threshold)
+            ties = ties[
+                np.argsort(
+                    np.asarray(
+                        [storage_keys[int(positions[index])] for index in ties],
+                        dtype=str,
+                    ),
+                    kind="stable",
                 )
-                score = float(np.dot(query, vector))
-                hits.append(
-                    RecordHit(
-                        RecordIdentity(
-                            row["workspace_id"],
-                            row["source_kind"],
-                            row["source_id"],
-                        ),
-                        score,
-                    )
-                )
-        hits.sort(key=lambda item: (-item.score, item.storage_key))
-        return hits[:k]
+            ]
+            candidates = np.concatenate((above, ties[: max(0, k - len(above))]))
+        ordered = sorted(
+            (int(index) for index in candidates),
+            key=lambda index: (
+                -float(scores[index]),
+                storage_keys[int(positions[index])],
+            ),
+        )
+        return [(index, int(positions[index])) for index in ordered[:k]]
 
     def hydrate_record(
         self,
@@ -994,10 +1044,14 @@ class LocalRecordBackend:
     def epoch(self) -> int:
         with self._lock:
             conn = self._db.get_connection()
-            row = conn.execute(
-                "SELECT value FROM system_state WHERE key = 'local_record_epoch'"
-            ).fetchone()
-            return int(row[0]) if row else 0
+            return self._epoch_locked(conn)
+
+    @staticmethod
+    def _epoch_locked(conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "SELECT value FROM system_state WHERE key = 'local_record_epoch'"
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     def upsert_edges(
         self,
