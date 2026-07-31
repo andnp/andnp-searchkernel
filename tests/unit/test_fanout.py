@@ -1,6 +1,7 @@
 """Unit tests for the gather_with_timeout fan-out helper."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 
 import pytest
 
@@ -81,7 +82,7 @@ async def test_with_factory_functions():
         return task_id
 
     # Pass callables instead of coroutines
-    factories = [
+    factories: list[Awaitable[int] | Callable[[], Awaitable[int]]] = [
         lambda i=i: task_factory(i)
         for i in range(3)
     ]

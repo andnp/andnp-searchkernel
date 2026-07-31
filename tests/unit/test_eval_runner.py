@@ -84,7 +84,9 @@ def test_run_eval_partial_search():
     assert report.metrics[1].recall_at_k == 0.0
 
     # Aggregate recall = (2/3 + 0) / 2 = 0.333
-    assert abs(report.mean_recall_at_k - 1.0 / 3.0) < 0.001
+    mean_recall = report.mean_recall_at_k
+    assert mean_recall is not None
+    assert abs(mean_recall - 1.0 / 3.0) < 0.001
 
 
 def test_run_eval_latency_percentiles():
@@ -108,8 +110,14 @@ def test_run_eval_latency_percentiles():
     assert report.latency_p99_ms is not None
 
     # Percentiles should be ordered
-    assert report.latency_p50_ms <= report.latency_p95_ms
-    assert report.latency_p95_ms <= report.latency_p99_ms
+    p50 = report.latency_p50_ms
+    p95 = report.latency_p95_ms
+    p99 = report.latency_p99_ms
+    assert p50 is not None
+    assert p95 is not None
+    assert p99 is not None
+    assert p50 <= p95
+    assert p95 <= p99
 
 
 def test_run_eval_empty_golden_set():
@@ -177,6 +185,12 @@ def test_ab_eval_regression():
     ab_report = ab_eval(golden_set, search_good, search_bad, k=5)
 
     # Good should have higher recall
-    assert ab_report.report_a.mean_recall_at_k > ab_report.report_b.mean_recall_at_k
+    recall_a = ab_report.report_a.mean_recall_at_k
+    recall_b = ab_report.report_b.mean_recall_at_k
+    assert recall_a is not None
+    assert recall_b is not None
+    assert recall_a > recall_b
     # Delta should be negative
-    assert ab_report.recall_at_k_delta < 0
+    recall_delta = ab_report.recall_at_k_delta
+    assert recall_delta is not None
+    assert recall_delta < 0

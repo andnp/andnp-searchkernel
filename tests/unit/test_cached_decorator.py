@@ -1,11 +1,27 @@
 """Unit tests for the @cached decorator and get_or_compute helper."""
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from searchkernel.adapters.cache.memory_lru import MemoryLRUCacheStore
 from searchkernel.adapters.cache.sqlite import SQLiteCacheStore
 from searchkernel.runtime.cache import cached, get_or_compute
+
+
+class CacheMarkedFunction(Protocol):
+    """Callable decorated with the cache marker attribute."""
+
+    _cache_key_prefix: str
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+def cache_key_prefix(function: Callable[..., Any]) -> str:
+    """Read the marker from a decorated function after asserting it exists."""
+    marked_function = cast(CacheMarkedFunction, function)
+    assert hasattr(marked_function, "_cache_key_prefix")
+    return marked_function._cache_key_prefix
 
 
 class TestGetOrCompute:
@@ -167,8 +183,7 @@ class TestCachedDecorator:
         def my_function(x: int) -> int:
             return x * 2
 
-        assert hasattr(my_function, "_cache_key_prefix")
-        assert my_function._cache_key_prefix == "my_fn"
+        assert cache_key_prefix(my_function) == "my_fn"
 
     def test_decorated_function_still_works(self):
         """Test that decorated function is still callable."""
@@ -190,8 +205,8 @@ class TestCachedDecorator:
         def mul_fn(a: int, b: int) -> int:
             return a * b
 
-        assert add_fn._cache_key_prefix == "add_fn"
-        assert mul_fn._cache_key_prefix == "mul_fn"
+        assert cache_key_prefix(add_fn) == "add_fn"
+        assert cache_key_prefix(mul_fn) == "mul_fn"
         assert add_fn(2, 3) == 5
         assert mul_fn(2, 3) == 6
 

@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime
 
+import pytest
+
 from searchkernel.domain import Chunk, Record, RecordStatus
 from searchkernel.indexing.stages import (
     GraphStage,
@@ -187,27 +189,10 @@ class TestIterPreparedIndexBatches:
         assert len(batches[2].chunks) == 3  # 1 doc * 3 chunks
 
     def test_batch_iterator_raises_on_zero_bounds(self) -> None:
-        with_pytest_raises = True
-        try:
-            import pytest
-            import_pytest_error = False
-        except ImportError:
-            import_pytest_error = True
-
-        if import_pytest_error:
-            with_pytest_raises = False
-
         prepared_records = []
 
-        if with_pytest_raises:
-            with pytest.raises(ValueError):
-                list(iter_prepared_index_batches(prepared_records, max_records=0, max_chunks=10))
-        else:
-            try:
-                list(iter_prepared_index_batches(prepared_records, max_records=0, max_chunks=10))
-                assert False, "Should have raised ValueError"
-            except ValueError:
-                pass
+        with pytest.raises(ValueError):
+            list(iter_prepared_index_batches(prepared_records, max_records=0, max_chunks=10))
 
 
 class TestKeywordStage:

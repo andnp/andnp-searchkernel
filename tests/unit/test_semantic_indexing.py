@@ -413,7 +413,11 @@ class TestLlamaIndexEmbeddingCacheAdapter:
             adapter.put("text a", {"id-a": [0.1, 0.2, 0.3]})
             adapter.put("text b", {"id-b": [0.4, 0.5, 0.6]})
 
-            (vec_a,) = adapter.get("text a").values()
-            (vec_b,) = adapter.get("text b").values()
+            result_a = adapter.get("text a")
+            result_b = adapter.get("text b")
+            assert result_a is not None
+            assert result_b is not None
+            (vec_a,) = result_a.values()
+            (vec_b,) = result_b.values()
             assert list(vec_a) == [0.1, 0.2, 0.3]
             assert list(vec_b) == [0.4, 0.5, 0.6]

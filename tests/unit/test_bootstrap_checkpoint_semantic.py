@@ -58,7 +58,9 @@ class TestBootstrapCheckpointSemantic:
         data = checkpoint.to_dict()
 
         assert data["semantic_encoder_namespace"] == "encoder-v1"
-        assert data["semantic_completed"]["file-1"] is True
+        semantic_completed = data["semantic_completed"]
+        assert isinstance(semantic_completed, dict)
+        assert semantic_completed["file-1"] is True
 
     def test_checkpoint_default_semantic_values(self) -> None:
         checkpoint = BootstrapCheckpoint(

@@ -1,5 +1,7 @@
 """Unit tests for CacheStore adapters (memory_lru and sqlite)."""
 
+import gc
+import warnings
 from pathlib import Path
 
 from searchkernel.adapters.cache.memory_lru import MemoryLRUCacheStore
@@ -122,11 +124,27 @@ class TestMemoryLRUCacheStore:
         retrieved = cache.get("complex")
 
         assert retrieved == complex_value
-        assert retrieved["nested"]["b"] == [4, 5, 6]
+        assert isinstance(retrieved, dict)
+        nested = retrieved["nested"]
+        assert isinstance(nested, dict)
+        assert nested["b"] == [4, 5, 6]
 
 
 class TestSQLiteCacheStore:
     """Tests for SQLite-backed cache store."""
+
+    def test_operations_close_sqlite_connections(self, tmp_path: Path):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            cache = SQLiteCacheStore(tmp_path / "cache.db")
+            cache.set("key", "value", epoch=1)
+            assert cache.get("key") == "value"
+            cache.invalidate_epoch(1)
+            gc.collect()
+
+        assert not [
+            warning for warning in caught if warning.category is ResourceWarning
+        ]
 
     def test_get_set_roundtrip(self, tmp_path: Path):
         """Test basic get/set functionality."""
@@ -217,7 +235,10 @@ class TestSQLiteCacheStore:
         retrieved = cache.get("complex")
 
         assert retrieved == complex_value
-        assert retrieved["nested"]["b"] == [4, 5, 6]
+        assert isinstance(retrieved, dict)
+        nested = retrieved["nested"]
+        assert isinstance(nested, dict)
+        assert nested["b"] == [4, 5, 6]
 
     def test_db_path_creation(self, tmp_path: Path):
         """Test that parent directories are created if they don't exist."""
