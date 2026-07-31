@@ -3,10 +3,89 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class SQLiteTuning:
+    """Validated connection and checkpoint settings for local SQLite stores."""
+
+    busy_timeout_ms: int = 5_000
+    page_size: int | None = None
+    cache_size: int | None = -2_000
+    mmap_size: int = 0
+    temp_store: str | int = "memory"
+    checkpoint_policy: str = "passive"
+    checkpoint_interval: int = 1_000
+
+    def __post_init__(self) -> None:
+        if self.busy_timeout_ms < 0:
+            raise ValueError("busy_timeout_ms must be non-negative")
+        if self.page_size is not None and (
+            self.page_size < 512
+            or self.page_size > 65_536
+            or self.page_size & (self.page_size - 1)
+        ):
+            raise ValueError("page_size must be a power of two between 512 and 65536")
+        if self.cache_size == 0:
+            raise ValueError("cache_size must be non-zero when configured")
+        if self.mmap_size < 0:
+            raise ValueError("mmap_size must be non-negative")
+        if isinstance(self.temp_store, str):
+            temp_store = self.temp_store.lower()
+            if temp_store not in {"default", "file", "memory"}:
+                raise ValueError("temp_store must be default, file, or memory")
+        elif self.temp_store not in {0, 1, 2}:
+            raise ValueError("temp_store must be 0, 1, or 2")
+        if self.checkpoint_policy not in {
+            "none",
+            "manual",
+            "passive",
+            "full",
+            "restart",
+            "truncate",
+        }:
+            raise ValueError("unsupported checkpoint_policy")
+        if self.checkpoint_interval < 0:
+            raise ValueError("checkpoint_interval must be non-negative")
+
+    @property
+    def temp_store_value(self) -> int:
+        if isinstance(self.temp_store, int):
+            return self.temp_store
+        return {"default": 0, "file": 1, "memory": 2}[self.temp_store.lower()]
+
+    @property
+    def auto_checkpoint(self) -> int:
+        if self.checkpoint_policy in {"none", "manual"}:
+            return 0
+        return self.checkpoint_interval
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        if self.page_size is not None:
+            conn.execute(f"PRAGMA page_size = {self.page_size}")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+        if self.cache_size is not None:
+            conn.execute(f"PRAGMA cache_size = {self.cache_size}")
+        conn.execute(f"PRAGMA mmap_size = {self.mmap_size}")
+        conn.execute(f"PRAGMA temp_store = {self.temp_store_value}")
+        conn.execute(f"PRAGMA wal_autocheckpoint = {self.auto_checkpoint}")
+
+    def checkpoint(self, conn: sqlite3.Connection) -> tuple[int, int, int]:
+        if self.checkpoint_policy in {"none", "manual"}:
+            return (0, 0, 0)
+        row = conn.execute(
+            f"PRAGMA wal_checkpoint({self.checkpoint_policy})"
+        ).fetchone()
+        if row is None:
+            return (0, 0, 0)
+        return (int(row[0]), int(row[1]), int(row[2]))
 
 
 class _ManagedConnection(sqlite3.Connection):
@@ -20,8 +99,14 @@ class _ManagedConnection(sqlite3.Connection):
 class DatabaseManager:
     """Thread-safe SQLite database manager with WAL mode."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        tuning: SQLiteTuning | None = None,
+    ) -> None:
         self._db_path = db_path
+        self._tuning = tuning or SQLiteTuning()
         self._local = threading.local()
         self._connections: dict[int, sqlite3.Connection] = {}
         self._connections_lock = threading.Lock()
@@ -34,11 +119,11 @@ class DatabaseManager:
     def _open_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(
             str(self._db_path),
+            timeout=self._tuning.busy_timeout_ms / 1_000,
             check_same_thread=False,
             factory=_ManagedConnection,
         )
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
+        self._tuning.apply(conn)
         conn.execute("PRAGMA foreign_keys=ON;")
         conn.row_factory = sqlite3.Row
         return conn
@@ -120,6 +205,13 @@ class DatabaseManager:
 
     def initialize_schema(self) -> None:
         self._initialize_schema_on(self.get_connection())
+
+    @property
+    def tuning(self) -> SQLiteTuning:
+        return self._tuning
+
+    def checkpoint(self) -> tuple[int, int, int]:
+        return self._tuning.checkpoint(self.get_connection())
 
     def close(self) -> None:
         with self._connections_lock:

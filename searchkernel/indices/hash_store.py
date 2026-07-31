@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from searchkernel.domain import Chunk
+from searchkernel.storage.db import SQLiteTuning
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +24,15 @@ class ChunkHashStore:
     does not scale with the number of chunks.
     """
 
-    def __init__(self, storage_path: Path):
+    def __init__(
+        self,
+        storage_path: Path,
+        *,
+        tuning: SQLiteTuning | None = None,
+    ):
         self._storage_path = Path(storage_path)
         self._db_path = self._storage_path.with_suffix(".sqlite3")
+        self._tuning = tuning or SQLiteTuning()
         self._dirty: set[str] = set()
         self._initialize_database()
 
@@ -33,11 +40,17 @@ class ChunkHashStore:
     def db_path(self) -> Path:
         return self._db_path
 
+    @property
+    def tuning(self) -> SQLiteTuning:
+        return self._tuning
+
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path), timeout=5.0)
+        conn = sqlite3.connect(
+            str(self._db_path),
+            timeout=self._tuning.busy_timeout_ms / 1_000,
+        )
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        self._tuning.apply(conn)
         return conn
 
     def _initialize_database(self) -> None:

@@ -41,7 +41,7 @@ from searchkernel.indices.local_vectors import (
     PackedVectorCodec,
     VectorSnapshot,
 )
-from searchkernel.storage.db import DatabaseManager
+from searchkernel.storage.db import DatabaseManager, SQLiteTuning
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 _LOCAL_KEYWORD_SCHEMA = "local_records_fts"
@@ -52,9 +52,10 @@ _FALLBACK_SCAN_MAX_ROWS = 10_000
 
 
 class _EphemeralDatabase:
-    def __init__(self) -> None:
+    def __init__(self, tuning: SQLiteTuning | None = None) -> None:
         self._connection = sqlite3.connect(":memory:", check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        (tuning or SQLiteTuning()).apply(self._connection)
         self._connection.execute("PRAGMA foreign_keys=ON")
 
     def get_connection(self) -> sqlite3.Connection:
@@ -73,6 +74,7 @@ class LocalRecordBackend:
         db_path: Path | None = None,
         *,
         db_manager: DatabaseManager | None = None,
+        sqlite_tuning: SQLiteTuning | None = None,
         keyword_overfetch_multiplier: float = 4.0,
         vector_engine: str = "exact",
         faiss_threshold: int = 50_000,
@@ -80,6 +82,8 @@ class LocalRecordBackend:
     ) -> None:
         if db_manager is not None and db_path is not None:
             raise ValueError("pass db_path or db_manager, not both")
+        if db_manager is not None and sqlite_tuning is not None:
+            raise ValueError("sqlite_tuning belongs to a new database manager")
         if not math.isfinite(keyword_overfetch_multiplier) or keyword_overfetch_multiplier < 1.0:
             raise ValueError("keyword_overfetch_multiplier must be finite and at least 1")
         if vector_engine not in {"exact", "faiss", "auto"}:
@@ -89,7 +93,9 @@ class LocalRecordBackend:
         if vector_snapshot_max_rows < 1:
             raise ValueError("vector_snapshot_max_rows must be positive")
         self._db = db_manager or (
-            DatabaseManager(db_path) if db_path is not None else _EphemeralDatabase()
+            DatabaseManager(db_path, tuning=sqlite_tuning)
+            if db_path is not None
+            else _EphemeralDatabase(sqlite_tuning)
         )
         self._lock = threading.RLock()
         self._snapshot_lock = threading.RLock()
@@ -714,10 +720,9 @@ class LocalRecordBackend:
     ) -> list[RecordHit]:
         if k < 1 or not query.strip():
             return []
-        with self._lock:
-            if self._fts5_available:
-                return self._search_keyword_fts(query, k, filters)
-            return self._search_keyword_fallback(query, k, filters)
+        if self._fts5_available:
+            return self._search_keyword_fts(query, k, filters)
+        return self._search_keyword_fallback(query, k, filters)
 
     @staticmethod
     def _keyword_filter_sql(
@@ -778,27 +783,28 @@ class LocalRecordBackend:
         limit = k
         if needs_artifact_rerank:
             limit = max(k, math.ceil(k * self._keyword_overfetch_multiplier))
-        conn = self._db.get_connection()
-        rows = conn.execute(
-            f"""
-            SELECT
-                r.storage_key,
-                r.workspace_id,
-                r.source_kind,
-                r.source_id,
-                r.title,
-                r.body,
-                r.uri,
-                r.keywords,
-                -bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0) AS score
-            FROM {_LOCAL_FTS_TABLE}
-            JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
-            WHERE {" AND ".join(clauses)}
-            ORDER BY score DESC, r.storage_key ASC
-            LIMIT ?
-            """,
-            (*parameters, limit),
-        ).fetchall()
+        with self._lock:
+            conn = self._db.get_connection()
+            rows = conn.execute(
+                f"""
+                SELECT
+                    r.storage_key,
+                    r.workspace_id,
+                    r.source_kind,
+                    r.source_id,
+                    r.title,
+                    r.body,
+                    r.uri,
+                    r.keywords,
+                    -bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0) AS score
+                FROM {_LOCAL_FTS_TABLE}
+                JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
+                WHERE {" AND ".join(clauses)}
+                ORDER BY score DESC, r.storage_key ASC
+                LIMIT ?
+                """,
+                (*parameters, limit),
+            ).fetchall()
         hits: list[RecordHit] = []
         for row in rows:
             score = float(row["score"])
@@ -842,16 +848,17 @@ class LocalRecordBackend:
         if not terms:
             return []
         clauses, parameters = self._keyword_filter_sql(filters)
-        conn = self._db.get_connection()
-        rows = conn.execute(
-            f"""
-            SELECT storage_key, workspace_id, source_kind, source_id, title, body
-            FROM local_records r
-            WHERE {" AND ".join(clause.replace("r.", "") for clause in clauses)}
-            LIMIT ?
-            """,
-            (*parameters, _FALLBACK_SCAN_MAX_ROWS + 1),
-        ).fetchall()
+        with self._lock:
+            conn = self._db.get_connection()
+            rows = conn.execute(
+                f"""
+                SELECT storage_key, workspace_id, source_kind, source_id, title, body
+                FROM local_records r
+                WHERE {" AND ".join(clause.replace("r.", "") for clause in clauses)}
+                LIMIT ?
+                """,
+                (*parameters, _FALLBACK_SCAN_MAX_ROWS + 1),
+            ).fetchall()
         if len(rows) > _FALLBACK_SCAN_MAX_ROWS:
             self._keyword_search_diagnostic = (
                 "FTS5 indexed lexical search is unavailable; "

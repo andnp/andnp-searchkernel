@@ -7,6 +7,8 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from searchkernel.storage.db import SQLiteTuning
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,19 +19,35 @@ class SQLiteCacheStore:
     an epoch for invalidation support. Designed for durability across restarts.
     """
 
-    def __init__(self, db_path: Path | str):
+    def __init__(
+        self,
+        db_path: Path | str,
+        *,
+        tuning: SQLiteTuning | None = None,
+    ):
         """Initialize SQLite cache store.
 
         Args:
             db_path: Path to SQLite database file.
         """
         self.db_path = Path(db_path)
+        self._tuning = tuning or SQLiteTuning()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
+    @property
+    def tuning(self) -> SQLiteTuning:
+        return self._tuning
+
     def _init_schema(self) -> None:
         """Create the cache table if it doesn't exist."""
-        with closing(sqlite3.connect(self.db_path)) as conn:
+        with closing(
+            sqlite3.connect(
+                self.db_path,
+                timeout=self._tuning.busy_timeout_ms / 1_000,
+            )
+        ) as conn:
+            self._tuning.apply(conn)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS cache_store (
                     key TEXT PRIMARY KEY,
@@ -54,7 +72,13 @@ class SQLiteCacheStore:
             Cached value, or None if not found.
         """
         try:
-            with closing(sqlite3.connect(self.db_path)) as conn:
+            with closing(
+                sqlite3.connect(
+                    self.db_path,
+                    timeout=self._tuning.busy_timeout_ms / 1_000,
+                )
+            ) as conn:
+                self._tuning.apply(conn)
                 cursor = conn.execute(
                     "SELECT value FROM cache_store WHERE key = ?;",
                     (key,),
@@ -78,7 +102,13 @@ class SQLiteCacheStore:
         """
         try:
             value_json = json.dumps(value)
-            with closing(sqlite3.connect(self.db_path)) as conn:
+            with closing(
+                sqlite3.connect(
+                    self.db_path,
+                    timeout=self._tuning.busy_timeout_ms / 1_000,
+                )
+            ) as conn:
+                self._tuning.apply(conn)
                 conn.execute(
                     """
                     INSERT INTO cache_store (key, value, epoch)
@@ -100,7 +130,13 @@ class SQLiteCacheStore:
             epoch: Entries with epoch <= this are discarded.
         """
         try:
-            with closing(sqlite3.connect(self.db_path)) as conn:
+            with closing(
+                sqlite3.connect(
+                    self.db_path,
+                    timeout=self._tuning.busy_timeout_ms / 1_000,
+                )
+            ) as conn:
+                self._tuning.apply(conn)
                 cursor = conn.execute(
                     "DELETE FROM cache_store WHERE epoch <= ?;",
                     (epoch,),
