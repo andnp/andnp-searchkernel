@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
@@ -29,6 +30,7 @@ from searchkernel.ports import (
     KeywordStore,
     VectorStore,
 )
+from searchkernel.ports.rerank import Reranker
 from searchkernel.runtime import (
     CandidateCacheKey,
     CandidateResultCache,
@@ -59,7 +61,7 @@ RecordHydratorCallable = Callable[
     Record | None | Awaitable[Record | None],
 ]
 QueryEmbeddingCallable = Callable[[str], Vector | Awaitable[Vector]]
-FailureStage = Literal["keyword", "vector", "graph", "hydration"]
+FailureStage = Literal["keyword", "vector", "graph", "hydration", "rerank"]
 
 
 class RecordHydrator(Protocol):
@@ -252,6 +254,7 @@ class RecordSearchPipeline:
         ) = None,
         embedding_model_name: str | None = None,
         embedding_dim: int | None = None,
+        reranker: Reranker | None = None,
         policy: RecordSearchPolicy | None = None,
         config: RecordSearchConfig | None = None,
         continue_on_error: bool | None = None,
@@ -278,6 +281,7 @@ class RecordSearchPipeline:
         self._embedding_provider = embedding_provider
         self._embedding_model_name = embedding_model_name
         self._embedding_dim = embedding_dim
+        self._reranker = reranker
         self._policy = policy or RecordSearchPolicy()
         self._config = config or RecordSearchConfig()
         self._continue_on_error = (
@@ -363,7 +367,7 @@ class RecordSearchPipeline:
             vector_available=self._vector_store is not None,
             graph_available=self._graph_store is not None,
             graph_enabled=self._config.graph_enabled,
-            rerank_available=False,
+            rerank_available=self._reranker is not None,
         )
         diagnostics.extend(_plan_diagnostics(plan))
         if trace is not None:
@@ -653,6 +657,13 @@ class RecordSearchPipeline:
             if self._policy.result_filter is None or self._policy.result_filter(result):
                 hydrated.append(result)
 
+        hydrated = await self._rerank_results(
+            query,
+            hydrated,
+            plan,
+            failures,
+            diagnostics,
+        )
         if self._policy.post_process is not None:
             hydrated = list(self._policy.post_process(hydrated))
 
@@ -671,6 +682,52 @@ class RecordSearchPipeline:
             diagnostics=tuple(diagnostics),
             trace=trace,
         )
+
+    async def _rerank_results(
+        self,
+        query: str,
+        results: Sequence[RecordSearchResult],
+        plan: QueryPlan,
+        failures: list[RecordSearchFailure],
+        diagnostics: list[str],
+    ) -> list[RecordSearchResult]:
+        reranker = self._reranker
+        if reranker is None or plan.rerank_budget <= 0 or not results:
+            return list(results)
+        selected = list(results[: plan.rerank_budget])
+        texts = [
+            f"{result.record.title}\n{result.record.body[:1000]}".strip()
+            for result in selected
+        ]
+        if not all(texts):
+            diagnostics.append("rerank:fallback:empty_text")
+            return list(results)
+        try:
+            scores = await _call_async(reranker.rerank, query, texts)
+            if len(scores) != len(selected):
+                raise ValueError(
+                    f"reranker returned {len(scores)} scores for "
+                    f"{len(selected)} candidates"
+                )
+            reranked = []
+            for result, score in zip(selected, scores):
+                score = float(score)
+                if not math.isfinite(score):
+                    raise ValueError("reranker returned a non-finite score")
+                reranked.append(
+                    RecordSearchResult(
+                        record=result.record,
+                        score=score,
+                        provenance=result.provenance,
+                    )
+                )
+        except Exception as error:  # noqa: BLE001 - reranking is optional
+            self._handle_error("rerank", error, failures)
+            diagnostics.append(f"rerank:fallback:{type(error).__name__}")
+            return list(results)
+        reranked.sort(key=lambda item: (-item.score, item.storage_key))
+        diagnostics.append(f"rerank:applied:{len(reranked)}")
+        return [*reranked, *results[len(selected) :]]
 
     async def _acquire_keyword(
         self,
