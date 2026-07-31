@@ -501,6 +501,59 @@ class TestVectorStore:
             f"Expected an HNSW index on {table_name}, found: {indexdefs}"
         )
 
+    def test_filtered_query_plan_is_measurable(self, pg_conn, fixture_records):
+        store = PGVectorStore(pg_conn)
+        store.upsert(fixture_records, model_name="plan-model", dim=4)
+
+        conn = pg_conn.get_connection()
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE tablename = 'records'
+                  AND indexname IN (
+                      'idx_records_vector_filters',
+                      'idx_records_project_filter',
+                      'idx_records_document_filter',
+                      'idx_records_path_filter'
+                  );
+                """
+            )
+            assert {
+                row[0] for row in cursor.fetchall()
+            } == {
+                "idx_records_vector_filters",
+                "idx_records_project_filter",
+                "idx_records_document_filter",
+                "idx_records_path_filter",
+            }
+            table_name = _vector_table_name("plan-model", 4)
+            cursor.execute(
+                f"""
+                EXPLAIN (ANALYZE, BUFFERS)
+                SELECT r.record_id
+                FROM "{table_name}" v
+                JOIN records r ON r.record_id = v.record_id
+                WHERE r.workspace_id IS NULL
+                  AND r.source_kind = %s
+                  AND r.status = %s
+                ORDER BY v.embedding <=> %s::vector, v.record_id
+                LIMIT %s;
+                """,
+                ("test", "active", "[1,0,0,0]", 3),
+            )
+            plan = [row[0] for row in cursor.fetchall()]
+        finally:
+            if cursor is not None:
+                cursor.close()
+            pg_conn.put_connection(conn)
+
+        assert plan
+        assert any("Limit" in line for line in plan)
+
     def test_ann_recall_at_10(self, pg_conn):
         """Test that HNSW ANN search achieves recall@10 >= 0.9 vs brute-force cosine.
 
