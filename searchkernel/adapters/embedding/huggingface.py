@@ -55,6 +55,14 @@ class HuggingFaceEmbeddingProvider:
         # Whether the model ships a named "query" prompt we can reference.
         self._has_query_prompt = "query" in getattr(self._model, "prompts", {})
 
+    @property
+    def encoder_namespace(self) -> str:
+        prompt = "named-query" if self._has_query_prompt else _QWEN3_QUERY_INSTRUCTION
+        return (
+            f"{self.model_name}|dim={self.dim}|truncate_dim={self._truncate_dim}"
+            f"|normalize=l2|query_prompt={prompt}"
+        )
+
     def embed(self, texts: list[str]) -> list[Vector]:
         """Embed DOCUMENTS (no instruction prompt), L2-normalized."""
         embeddings = self._model.encode(

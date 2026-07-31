@@ -39,6 +39,7 @@ from searchkernel.domain import (
     Vector,
     canonical_storage_key,
 )
+from searchkernel.runtime import QueryEmbeddingCache
 from searchkernel.search.types import SearchResultDict
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,8 @@ class PGVectorIndex:
         *,
         truncate_dim: int | None = None,
         workspace_id: str | None = None,
+        query_embedding_cache: QueryEmbeddingCache | None = None,
+        encoder_namespace: str | None = None,
     ):
         self._conn_pool = PostgresConnection(pg_dsn)
         _create_schema(self._conn_pool)
@@ -171,6 +174,12 @@ class PGVectorIndex:
         self._workspace_id = workspace_id
         self._model_name = self._embedder.model_name
         self._dim = self._embedder.dim
+        self._query_embedding_cache = query_embedding_cache or QueryEmbeddingCache()
+        self._encoder_namespace = (
+            encoder_namespace
+            or getattr(self._embedder, "encoder_namespace", None)
+            or f"{self._model_name}|dim={self._dim}"
+        )
 
     def warm_up(self) -> None:
         """No-op: the embedding model loads eagerly in `__init__`."""
@@ -213,7 +222,11 @@ class PGVectorIndex:
             return []
 
         fetch_k = top_k * 2 if excluded_files else top_k
-        query_vector = self._embedder.embed_query(query)
+        query_vector = self._query_embedding_cache.get_or_compute(
+            encoder_namespace=self._encoder_namespace,
+            query=query,
+            compute=lambda: self._embedder.embed_query(query),
+        )
         hits = cast(
             list[RecordHit],
             self._store.search(
