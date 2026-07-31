@@ -194,10 +194,12 @@ class LocalRecordBackend:
             identity = RecordIdentity.from_storage_key(storage_key)
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                f"invalid graph storage key: {storage_key!r}"
+                f"invalid canonical storage key for graph: {storage_key!r}"
             ) from exc
         if not identity.source_kind or not identity.source_id:
-            raise ValueError(f"invalid graph storage key: {storage_key!r}")
+            raise ValueError(
+                f"invalid canonical storage key for graph: {storage_key!r}"
+            )
         if identity.storage_key != storage_key:
             raise ValueError(f"non-canonical graph storage key: {storage_key!r}")
         return storage_key
@@ -1216,15 +1218,15 @@ class LocalRecordBackend:
                         "DELETE FROM local_vectors WHERE storage_key = ?",
                         (record.storage_key,),
                     )
-                    conn.execute(
-                        "DELETE FROM local_records WHERE storage_key = ?",
-                        (record.storage_key,),
-                    )
                     deleted_graph_edges += conn.execute(
                         "DELETE FROM local_graph_edges "
                         "WHERE source_id = ? OR target_id = ?",
                         (record.storage_key, record.storage_key),
                     ).rowcount
+                    conn.execute(
+                        "DELETE FROM local_records WHERE storage_key = ?",
+                        (record.storage_key,),
+                    )
                 self._bump_epoch(
                     conn,
                     keyword=existing_records > 0,
