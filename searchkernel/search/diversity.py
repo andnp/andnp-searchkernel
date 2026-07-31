@@ -87,6 +87,8 @@ def apply_source_diversity(
     if not _has_constraints(effective_policy):
         _diagnose(diagnostics, "no_constraints")
         return ordered[:top_n]
+    if effective_policy.mmr_lambda is not None and embeddings is None:
+        _diagnose(diagnostics, "mmr:skipped:embeddings_unavailable")
 
     best_score = max(candidate.score for candidate in ordered)
     score_floor = best_score * effective_policy.min_score_ratio

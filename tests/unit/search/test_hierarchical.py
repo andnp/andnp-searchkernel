@@ -149,11 +149,14 @@ async def test_federation_falls_back_to_flat_search_without_capability():
 async def test_disabled_hierarchical_mode_keeps_flat_retrieval():
     registry = SourceRegistry()
     registry.register(_HierarchicalSource())
+    diagnostics = []
 
     results = await search_anything(
         "query",
         registry=registry,
         hierarchical_config=HierarchicalRetrievalConfig(enabled=False),
+        diagnostics=diagnostics,
     )
 
     assert [result.source_id for result in results] == ["flat"]
+    assert diagnostics[0].message == "hierarchical:disabled"

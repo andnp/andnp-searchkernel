@@ -128,6 +128,21 @@ def test_disabled_policy_preserves_order_and_reports_reason():
     assert [item.reason for item in diagnostics] == ["disabled"]
 
 
+def test_mmr_reports_embedding_fallback():
+    diagnostics = []
+
+    apply_source_diversity(
+        [_ref("source", "one", 1.0), _ref("source", "two", 0.9)],
+        top_n=2,
+        policy=SourceDiversityPolicy(enabled=True, mmr_lambda=0.5),
+        diagnostics=diagnostics,
+    )
+
+    assert [item.reason for item in diagnostics] == [
+        "mmr:skipped:embeddings_unavailable"
+    ]
+
+
 def test_invalid_diversity_settings_are_rejected():
     with pytest.raises(ValueError, match="mmr_lambda"):
         SourceDiversityPolicy(enabled=True, mmr_lambda=1.1)

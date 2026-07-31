@@ -285,12 +285,12 @@ async def _search_source(
     filters: dict[str, Any] | None,
     hierarchical_config: HierarchicalRetrievalConfig | None,
 ) -> _SourceSearchOutput:
-    if (
-        hierarchical_config is None
-        or not hierarchical_config.enabled
-    ):
+    if hierarchical_config is None:
         results = await _call_source_search(source, query, k, filters)
         return _SourceSearchOutput(results)
+    if not hierarchical_config.enabled:
+        results = await _call_source_search(source, query, k, filters)
+        return _SourceSearchOutput(results, "hierarchical:disabled")
 
     capabilities = getattr(source, "capabilities", None)
     supports_hierarchical = (
