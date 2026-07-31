@@ -30,6 +30,11 @@ from searchkernel.domain import (
 from searchkernel.storage.db import DatabaseManager
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+_LOCAL_KEYWORD_SCHEMA = "local_records_fts"
+_LOCAL_KEYWORD_SCHEMA_VERSION = 1
+_LOCAL_FTS_TABLE = "local_records_fts"
+_LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
+_FALLBACK_SCAN_MAX_ROWS = 10_000
 
 
 class _EphemeralDatabase:
@@ -60,6 +65,10 @@ class LocalRecordBackend:
             DatabaseManager(db_path) if db_path is not None else _EphemeralDatabase()
         )
         self._lock = threading.RLock()
+        self._fts5_available = False
+        self._keyword_search_diagnostic = (
+            "FTS5 indexed lexical search has not been initialized"
+        )
         self._initialize_schema()
 
     @property
@@ -81,6 +90,7 @@ class LocalRecordBackend:
                 updated_at TEXT NOT NULL,
                 metadata TEXT NOT NULL,
                 uri TEXT,
+                keywords TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_local_records_identity
@@ -111,7 +121,148 @@ class LocalRecordBackend:
             );
             """
         )
+        self._ensure_local_record_column(conn, "keywords", "TEXT NOT NULL DEFAULT ''")
+        self._initialize_keyword_schema(conn)
         conn.commit()
+
+    @staticmethod
+    def _ensure_local_record_column(
+        conn: sqlite3.Connection,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(local_records)")
+        }
+        if column not in columns:
+            conn.execute(f"ALTER TABLE local_records ADD COLUMN {column} {definition}")
+
+    @staticmethod
+    def _metadata_keyword_text(metadata: dict[str, Any]) -> str:
+        values: list[str] = []
+        for key in ("tags", "keywords", "source_keywords", "aliases"):
+            value = metadata.get(key)
+            if value is None:
+                continue
+            if isinstance(value, (list, tuple, set)):
+                values.extend(str(item) for item in value)
+            else:
+                values.append(str(value))
+        return " ".join(" ".join(value.strip().lower().split()) for value in values if value)
+
+    @staticmethod
+    def _record_uri(record: Record) -> str:
+        if record.uri:
+            return record.uri
+        for key in ("uri", "source_file", "file_path", "path"):
+            value = record.metadata.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    @classmethod
+    def _migrate_keyword_columns(cls, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            "SELECT rowid, metadata, keywords FROM local_records"
+        ).fetchall()
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"])
+            except (TypeError, ValueError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            keywords = cls._metadata_keyword_text(metadata)
+            if row["keywords"] != keywords:
+                conn.execute(
+                    "UPDATE local_records SET keywords = ? WHERE rowid = ?",
+                    (keywords, row["rowid"]),
+                )
+
+    @staticmethod
+    def _fts_table_columns(conn: sqlite3.Connection) -> tuple[str, ...] | None:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (_LOCAL_FTS_TABLE,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return tuple(
+                column[1]
+                for column in conn.execute(f"PRAGMA table_info({_LOCAL_FTS_TABLE})")
+            )
+        except sqlite3.DatabaseError:
+            return None
+
+    def _initialize_keyword_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS local_keyword_schema (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL
+            )
+            """
+        )
+        self._migrate_keyword_columns(conn)
+
+        table_columns = self._fts_table_columns(conn)
+        needs_rebuild = table_columns != _LOCAL_FTS_COLUMNS
+        if table_columns is not None and needs_rebuild:
+            conn.execute(f"DROP TABLE IF EXISTS {_LOCAL_FTS_TABLE}")
+
+        if table_columns != _LOCAL_FTS_COLUMNS:
+            try:
+                conn.execute(
+                    f"""
+                    CREATE VIRTUAL TABLE {_LOCAL_FTS_TABLE} USING fts5(
+                        title,
+                        body,
+                        uri,
+                        keywords,
+                        content='local_records',
+                        content_rowid='rowid',
+                        tokenize='unicode61'
+                    )
+                    """
+                )
+            except sqlite3.OperationalError as exc:
+                if "fts5" not in str(exc).lower():
+                    raise
+                self._fts5_available = False
+                self._keyword_search_diagnostic = (
+                    "FTS5 indexed lexical search is unavailable; "
+                    "using the bounded SQLite scan fallback"
+                )
+            else:
+                self._fts5_available = True
+                needs_rebuild = True
+        else:
+            self._fts5_available = True
+
+        version_row = conn.execute(
+            "SELECT version FROM local_keyword_schema WHERE name = ?",
+            (_LOCAL_KEYWORD_SCHEMA,),
+        ).fetchone()
+        if self._fts5_available and (
+            needs_rebuild
+            or version_row is None
+            or version_row[0] != _LOCAL_KEYWORD_SCHEMA_VERSION
+        ):
+            conn.execute(
+                f"INSERT INTO {_LOCAL_FTS_TABLE}({_LOCAL_FTS_TABLE}) VALUES ('rebuild')"
+            )
+
+        conn.execute(
+            """
+            INSERT INTO local_keyword_schema (name, version)
+            VALUES (?, ?)
+            ON CONFLICT(name) DO UPDATE SET version = excluded.version
+            """,
+            (_LOCAL_KEYWORD_SCHEMA, _LOCAL_KEYWORD_SCHEMA_VERSION),
+        )
+        if self._fts5_available:
+            self._keyword_search_diagnostic = "FTS5 indexed lexical search is active"
 
     def _bump_epoch(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -133,8 +284,37 @@ class LocalRecordBackend:
             record.created_at.isoformat(),
             record.updated_at.isoformat(),
             json.dumps(record.metadata, sort_keys=True),
-            record.uri,
+            LocalRecordBackend._record_uri(record),
+            LocalRecordBackend._metadata_keyword_text(record.metadata),
             record.status.value,
+        )
+
+    @staticmethod
+    def _delete_fts_row(
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+    ) -> None:
+        conn.execute(
+            f"""
+            INSERT INTO {_LOCAL_FTS_TABLE}
+                ({_LOCAL_FTS_TABLE}, rowid, title, body, uri, keywords)
+            VALUES ('delete', ?, ?, ?, ?, ?)
+            """,
+            (row["rowid"], row["title"], row["body"], row["uri"], row["keywords"]),
+        )
+
+    @staticmethod
+    def _insert_fts_row(
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+    ) -> None:
+        conn.execute(
+            f"""
+            INSERT INTO {_LOCAL_FTS_TABLE}
+                (rowid, title, body, uri, keywords)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (row["rowid"], row["title"], row["body"], row["uri"], row["keywords"]),
         )
 
     def _upsert_records(self, records: Iterable[Record]) -> None:
@@ -143,28 +323,55 @@ class LocalRecordBackend:
             return
         with self._lock:
             conn = self._db.get_connection()
-            conn.executemany(
-                """
-                INSERT INTO local_records (
-                    storage_key, workspace_id, source_kind, source_id, title, body,
-                    created_at, updated_at, metadata, uri, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(storage_key) DO UPDATE SET
-                    workspace_id = excluded.workspace_id,
-                    source_kind = excluded.source_kind,
-                    source_id = excluded.source_id,
-                    title = excluded.title,
-                    body = excluded.body,
-                    created_at = excluded.created_at,
-                    updated_at = excluded.updated_at,
-                    metadata = excluded.metadata,
-                    uri = excluded.uri,
-                    status = excluded.status
-                """,
-                [self._record_values(record) for record in rows],
-            )
-            self._bump_epoch(conn)
-            conn.commit()
+            try:
+                for record in rows:
+                    old_row = conn.execute(
+                        """
+                        SELECT rowid, title, body, uri, keywords
+                        FROM local_records
+                        WHERE storage_key = ?
+                        """,
+                        (record.storage_key,),
+                    ).fetchone()
+                    if old_row is not None and self._fts5_available:
+                        self._delete_fts_row(conn, old_row)
+                    conn.execute(
+                        """
+                        INSERT INTO local_records (
+                            storage_key, workspace_id, source_kind, source_id, title, body,
+                            created_at, updated_at, metadata, uri, keywords, status
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(storage_key) DO UPDATE SET
+                            workspace_id = excluded.workspace_id,
+                            source_kind = excluded.source_kind,
+                            source_id = excluded.source_id,
+                            title = excluded.title,
+                            body = excluded.body,
+                            created_at = excluded.created_at,
+                            updated_at = excluded.updated_at,
+                            metadata = excluded.metadata,
+                            uri = excluded.uri,
+                            keywords = excluded.keywords,
+                            status = excluded.status
+                        """,
+                        self._record_values(record),
+                    )
+                    if self._fts5_available:
+                        new_row = conn.execute(
+                            """
+                            SELECT rowid, title, body, uri, keywords
+                            FROM local_records
+                            WHERE storage_key = ?
+                            """,
+                            (record.storage_key,),
+                        ).fetchone()
+                        assert new_row is not None
+                        self._insert_fts_row(conn, new_row)
+                self._bump_epoch(conn)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def index(self, records: list[Record]) -> None:
         """Index records for keyword retrieval."""
@@ -381,6 +588,16 @@ class LocalRecordBackend:
                 record = self.hydrate_record(record_id)
                 if record is None:
                     continue
+                old_row = conn.execute(
+                    """
+                    SELECT rowid, title, body, uri, keywords
+                    FROM local_records
+                    WHERE storage_key = ?
+                    """,
+                    (record.storage_key,),
+                ).fetchone()
+                if old_row is not None and self._fts5_available:
+                    self._delete_fts_row(conn, old_row)
                 conn.execute(
                     "DELETE FROM local_vectors WHERE storage_key = ?",
                     (record.storage_key,),
@@ -391,6 +608,81 @@ class LocalRecordBackend:
                 )
             self._bump_epoch(conn)
             conn.commit()
+
+    @property
+    def keyword_index_available(self) -> bool:
+        return self._fts5_available
+
+    @property
+    def keyword_search_diagnostic(self) -> str:
+        return self._keyword_search_diagnostic
+
+    def check_keyword_index(self) -> bool:
+        """Return whether the external-content keyword index matches records."""
+        if not self._fts5_available:
+            return False
+        with self._lock:
+            conn = self._db.get_connection()
+            try:
+                conn.execute(
+                    f"INSERT INTO {_LOCAL_FTS_TABLE}({_LOCAL_FTS_TABLE}) "
+                    "VALUES ('integrity-check')"
+                )
+                missing = conn.execute(
+                    f"""
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM local_records r
+                        LEFT JOIN {_LOCAL_FTS_TABLE} f ON f.rowid = r.rowid
+                        WHERE f.rowid IS NULL
+                    )
+                    OR EXISTS(
+                        SELECT 1
+                        FROM {_LOCAL_FTS_TABLE} f
+                        LEFT JOIN local_records r ON r.rowid = f.rowid
+                        WHERE r.rowid IS NULL
+                    )
+                    """
+                ).fetchone()[0]
+            except sqlite3.DatabaseError:
+                return False
+            return not bool(missing)
+
+    def rebuild_keyword_index(self) -> None:
+        """Rebuild the external-content keyword index from local records."""
+        with self._lock:
+            conn = self._db.get_connection()
+            if not self._fts5_available:
+                self._keyword_search_diagnostic = (
+                    "FTS5 indexed lexical search is unavailable; "
+                    "the keyword index cannot be rebuilt"
+                )
+                return
+            try:
+                conn.execute(
+                    f"INSERT INTO {_LOCAL_FTS_TABLE}({_LOCAL_FTS_TABLE}) VALUES ('rebuild')"
+                )
+                conn.commit()
+            except sqlite3.DatabaseError:
+                conn.rollback()
+                conn.execute(f"DROP TABLE IF EXISTS {_LOCAL_FTS_TABLE}")
+                conn.execute(
+                    f"""
+                    CREATE VIRTUAL TABLE {_LOCAL_FTS_TABLE} USING fts5(
+                        title,
+                        body,
+                        uri,
+                        keywords,
+                        content='local_records',
+                        content_rowid='rowid',
+                        tokenize='unicode61'
+                    )
+                    """
+                )
+                conn.execute(
+                    f"INSERT INTO {_LOCAL_FTS_TABLE}({_LOCAL_FTS_TABLE}) VALUES ('rebuild')"
+                )
+                conn.commit()
 
     def epoch(self) -> int:
         with self._lock:
