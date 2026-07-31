@@ -118,6 +118,15 @@ class HeaderBasedChunker(ChunkingStrategy):
         def byte_to_char_pos(byte_pos: int) -> int:
             return len(content_bytes[:byte_pos].decode("utf8"))
 
+        def find_inline(node):
+            if node.type == "inline":
+                return node
+            for child in node.children:
+                inline = find_inline(child)
+                if inline is not None:
+                    return inline
+            return None
+
         def visit(node):
             if node.type in ("atx_heading", "setext_heading"):
                 level = 1
@@ -125,12 +134,16 @@ class HeaderBasedChunker(ChunkingStrategy):
                 marker_start = node.start_byte
 
                 for child in node.children:
-                    if child.type in ("atx_h1_marker", "setext_h1_underline"):
+                    if child.type == "atx_h1_marker":
                         level = 1
                         marker_start = child.start_byte
-                    elif child.type in ("atx_h2_marker", "setext_h2_underline"):
+                    elif child.type == "setext_h1_underline":
+                        level = 1
+                    elif child.type == "atx_h2_marker":
                         level = 2
                         marker_start = child.start_byte
+                    elif child.type == "setext_h2_underline":
+                        level = 2
                     elif child.type == "atx_h3_marker":
                         level = 3
                         marker_start = child.start_byte
@@ -143,9 +156,12 @@ class HeaderBasedChunker(ChunkingStrategy):
                     elif child.type == "atx_h6_marker":
                         level = 6
                         marker_start = child.start_byte
-                    elif child.type == "inline":
+                    else:
+                        inline = find_inline(child)
+                        if inline is None:
+                            continue
                         text = (
-                            content_bytes[child.start_byte : child.end_byte]
+                            content_bytes[inline.start_byte : inline.end_byte]
                             .decode("utf8")
                             .strip()
                         )
