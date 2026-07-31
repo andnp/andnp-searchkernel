@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from searchkernel.domain import (
     Record,
+    RecordHit,
+    RecordIdentity,
     SearchResult,
     SearchResultProvenance,
     Vector,
@@ -30,7 +33,10 @@ from searchkernel.search.bounded_graph import (
 )
 from searchkernel.search.fusion import fuse_reciprocal_rank
 
-RecordHydratorCallable = Callable[[str], Record | None | Awaitable[Record | None]]
+RecordHydratorCallable = Callable[
+    [RecordIdentity | str],
+    Record | None | Awaitable[Record | None],
+]
 QueryEmbeddingCallable = Callable[[str], Vector | Awaitable[Vector]]
 FailureStage = Literal["keyword", "vector", "graph", "hydration"]
 
@@ -40,10 +46,7 @@ class RecordHydrator(Protocol):
 
     async def hydrate_record(
         self,
-        record_id: str,
-        *,
-        source_kind: str | None = None,
-        workspace_id: str | None = None,
+        identity: RecordIdentity,
     ) -> Record | None: ...
 
 
@@ -89,9 +92,25 @@ class RecordSearchPolicy:
 class RecordSearchCandidate:
     """An unhydrated ranked record candidate."""
 
-    record_id: str
+    identity: RecordIdentity
     score: float
     provenance: SearchResultProvenance
+
+    @property
+    def record_id(self) -> str:
+        return self.identity.source_id
+
+    @property
+    def workspace_id(self) -> str | None:
+        return self.identity.workspace_id
+
+    @property
+    def source_kind(self) -> str:
+        return self.identity.source_kind
+
+    @property
+    def storage_key(self) -> str:
+        return self.identity.storage_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,7 +235,23 @@ class RecordSearchPipeline:
         )
         self._validate_config()
 
-    async def search(
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        filters: dict[str, object] | None = None,
+    ) -> RecordSearchOutcome | Awaitable[RecordSearchOutcome]:
+        """Search synchronously outside a loop or awaitably inside one."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                self.async_search(query, limit=limit, filters=filters)
+            )
+        return self.async_search(query, limit=limit, filters=filters)
+
+    async def async_search(
         self,
         query: str,
         *,
@@ -237,14 +272,15 @@ class RecordSearchPipeline:
             max(limit, 1) * self._config.candidate_multiplier,
             self._config.minimum_candidate_limit,
         )
-        rankings: dict[str, list[tuple[str, float]]] = {}
+        rankings: dict[str, list[RecordHit]] = {}
 
         if self._keyword_store is not None:
             try:
-                rankings["keyword"] = _sorted_unique(
+                rankings["keyword"] = _normalize_hits(
                     await _maybe_await(
                         self._keyword_store.search(query, acquisition_limit, filters)
-                    )
+                    ),
+                    filters,
                 )
             except Exception as error:  # noqa: BLE001 - degraded mode captures backend failures
                 self._handle_error("keyword", error, failures)
@@ -255,13 +291,16 @@ class RecordSearchPipeline:
                 vector_filters = filters
                 if self._policy.vector_candidate_ids is not None:
                     candidate_ids = self._policy.vector_candidate_ids(
-                        rankings.get("keyword", ()),
+                        [
+                            (hit.source_id, hit.score)
+                            for hit in rankings.get("keyword", ())
+                        ],
                         filters,
                     )
                     if candidate_ids is not None:
                         vector_filters = dict(filters)
                         vector_filters["candidate_ids"] = list(candidate_ids)
-                vector_ranking = _sorted_unique(
+                vector_ranking = _normalize_hits(
                     await _maybe_await(
                         self._vector_store.search(
                             vector,
@@ -270,11 +309,21 @@ class RecordSearchPipeline:
                             dim=dim,
                             filters=vector_filters,
                         )
-                    )
+                    ),
+                    filters,
+                    sort=False,
                 )
                 if self._policy.vector_ranking_order is not None:
-                    vector_ranking = list(
-                        self._policy.vector_ranking_order(vector_ranking, filters)
+                    vector_ranking = _normalize_hits(
+                        self._policy.vector_ranking_order(
+                            [
+                                (hit.source_id, hit.score)
+                                for hit in vector_ranking
+                            ],
+                            filters,
+                        ),
+                        filters,
+                        sort=False,
                     )
                 rankings["vector"] = vector_ranking
             except Exception as error:  # noqa: BLE001 - degraded mode captures backend failures
@@ -283,7 +332,7 @@ class RecordSearchPipeline:
         fused_scores: dict[str, float] = {}
         if rankings:
             fused_scores = fuse_reciprocal_rank(
-                [[record_id for record_id, _ in ranking] for ranking in rankings.values()],
+                [[hit.storage_key for hit in ranking] for ranking in rankings.values()],
                 k=self._config.rrf_k,
             )
         base_candidates = self._build_candidates(fused_scores, rankings)
@@ -296,15 +345,15 @@ class RecordSearchPipeline:
                     rankings["graph"] = graph_ranking
                     if self._config.graph_fusion == "max":
                         fused_scores = dict(fused_scores)
-                        for record_id, score in graph_ranking:
-                            fused_scores[record_id] = max(
-                                fused_scores.get(record_id, 0.0),
-                                score,
+                        for hit in graph_ranking:
+                            fused_scores[hit.storage_key] = max(
+                                fused_scores.get(hit.storage_key, 0.0),
+                                hit.score,
                             )
                     else:
                         fused_scores = fuse_reciprocal_rank(
                             [
-                                [record_id for record_id, _ in ranking]
+                                [hit.storage_key for hit in ranking]
                                 for ranking in rankings.values()
                             ],
                             k=self._config.rrf_k,
@@ -334,7 +383,7 @@ class RecordSearchPipeline:
         hydrated: list[RecordSearchResult] = []
         for candidate in candidates[:result_limit]:
             try:
-                record = await self._hydrate(candidate.record_id)
+                record = await self._hydrate(candidate.identity)
             except Exception as error:  # noqa: BLE001 - degraded mode captures hydration failures
                 self._handle_error("hydration", error, failures)
                 continue
@@ -361,17 +410,25 @@ class RecordSearchPipeline:
     def _build_candidates(
         self,
         fused_scores: Mapping[str, float],
-        rankings: Mapping[str, Sequence[tuple[str, float]]],
+        rankings: Mapping[str, Sequence[RecordHit]],
     ) -> list[RecordSearchCandidate]:
         candidates: list[RecordSearchCandidate] = []
-        for record_id, score in fused_scores.items():
-            provenance = SearchResultProvenance()
+        identities = {
+            hit.storage_key: hit.identity
+            for ranking in rankings.values()
+            for hit in ranking
+        }
+        for storage_key, score in fused_scores.items():
+            identity = identities[storage_key]
+            provenance = SearchResultProvenance(record_identity=identity)
             for strategy, ranking in rankings.items():
-                for rank, (candidate_id, raw_score) in enumerate(ranking, start=1):
-                    if candidate_id == record_id:
-                        provenance.add_strategy(strategy, rank, raw_score)
+                for rank, hit in enumerate(ranking, start=1):
+                    if hit.storage_key == storage_key:
+                        provenance.add_strategy(strategy, rank, hit.score)
                         break
-            candidate = RecordSearchCandidate(record_id, score, provenance)
+            candidate = RecordSearchCandidate(
+                identity, score, provenance
+            )
             candidates.append(candidate)
         return candidates
 
@@ -382,7 +439,7 @@ class RecordSearchPipeline:
             return list(candidates)
         return [
             RecordSearchCandidate(
-                record_id=candidate.record_id,
+                identity=candidate.identity,
                 score=self._policy.score_adjuster(candidate),
                 provenance=candidate.provenance,
             )
@@ -402,26 +459,41 @@ class RecordSearchPipeline:
 
     async def _expand_graph(
         self, candidates: Sequence[RecordSearchCandidate]
-    ) -> list[tuple[str, float]]:
+    ) -> list[RecordHit]:
         graph_store = self._graph_store
         if graph_store is None:
             return []
         seed_scores = {
-            candidate.record_id: candidate.score
+            candidate.storage_key: candidate.score
             for candidate in self._sort_candidates(candidates)
         }
         edges_by_seed: dict[str, list[TypedGraphEdge[str, tuple[str, float]]]] = {}
         discounts: dict[tuple[str, float], float] = {}
-        for seed_id in seed_scores:
+        seed_by_key = {
+            candidate.storage_key: candidate
+            for candidate in self._sort_candidates(candidates)
+        }
+        for seed_key in seed_scores:
+            seed = seed_by_key[seed_key]
             neighbors = cast(
                 list[tuple[str, str, float]],
                 await _maybe_await(
                     graph_store.neighbors(
-                        seed_id,
+                        seed.identity,
                         depth=self._config.graph_depth,
                     )
                 ),
             )
+            if not neighbors:
+                neighbors = cast(
+                    list[tuple[str, str, float]],
+                    await _maybe_await(
+                        graph_store.neighbors(
+                            seed.record_id,
+                            depth=self._config.graph_depth,
+                        )
+                    ),
+                )
             sorted_neighbors = sorted(
                 neighbors,
                 key=lambda item: (-item[2], item[0], item[1]),
@@ -431,7 +503,7 @@ class RecordSearchPipeline:
                 edge_key = (edge_type, weight)
                 edges.append(TypedGraphEdge(target_id, edge_key))
                 discounts[edge_key] = weight
-            edges_by_seed[seed_id] = edges
+            edges_by_seed[seed_key] = edges
 
         expanded = expand_bounded_typed_graph(
             seed_scores,
@@ -442,10 +514,10 @@ class RecordSearchPipeline:
         )
         return sorted(
             (
-                (record_id, expansion.contribution)
+                _graph_hit(record_id, expansion, seed_by_key)
                 for record_id, expansion in expanded.items()
             ),
-            key=lambda item: (-item[1], item[0]),
+            key=lambda item: (-item.score, item.storage_key),
         )
 
     async def _query_embedding(self, query: str) -> tuple[Vector, str, int]:
@@ -487,12 +559,14 @@ class RecordSearchPipeline:
             )
         return vector, model_name, dim
 
-    async def _hydrate(self, record_id: str) -> Record | None:
+    async def _hydrate(self, identity: RecordIdentity) -> Record | None:
         if hasattr(self._hydrator, "hydrate_record"):
             return await _maybe_await(
-                cast(RecordHydrator, self._hydrator).hydrate_record(record_id)
+                cast(RecordHydrator, self._hydrator).hydrate_record(identity)
             )
-        return await _maybe_await(cast(RecordHydratorCallable, self._hydrator)(record_id))
+        return await _maybe_await(
+            cast(RecordHydratorCallable, self._hydrator)(identity.source_id)
+        )
 
     def _handle_error(
         self,
@@ -531,13 +605,55 @@ class RecordSearchPipeline:
         return sorted(candidates, key=lambda item: (-item.score, item.record_id))
 
 
-def _sorted_unique(
-    results: Sequence[tuple[str, float]],
-) -> list[tuple[str, float]]:
-    best_scores: dict[str, float] = {}
-    for record_id, score in results:
-        best_scores[record_id] = max(score, best_scores.get(record_id, score))
-    return sorted(best_scores.items(), key=lambda item: (-item[1], item[0]))
+def _normalize_hits(
+    results: Sequence[RecordHit | tuple[str, float]],
+    filters: Mapping[str, object],
+    *,
+    sort: bool = True,
+) -> list[RecordHit]:
+    workspace_id = filters.get("workspace_id")
+    if workspace_id is not None and not isinstance(workspace_id, str):
+        workspace_id = str(workspace_id)
+    source_kind = filters.get("source_kind")
+    if not isinstance(source_kind, str):
+        source_kinds = filters.get("source_kinds")
+        source_kind = (
+            source_kinds[0]
+            if isinstance(source_kinds, list)
+            and len(source_kinds) == 1
+            and isinstance(source_kinds[0], str)
+            else "legacy"
+        )
+    normalized: list[RecordHit] = []
+    for result in results:
+        if isinstance(result, RecordHit):
+            normalized.append(result)
+        else:
+            source_id, score = result
+            normalized.append(
+                RecordHit(
+                    RecordIdentity(workspace_id, source_kind, source_id),
+                    score,
+                )
+            )
+    best: dict[str, RecordHit] = {}
+    for hit in normalized:
+        current = best.get(hit.storage_key)
+        if current is None or hit.score > current.score:
+            best[hit.storage_key] = hit
+    normalized = list(best.values())
+    if sort:
+        normalized.sort(key=lambda hit: (-hit.score, hit.storage_key))
+    return normalized
+
+
+def _graph_hit(record_id: str, expansion: Any, seed_by_key: Mapping[str, RecordSearchCandidate]) -> RecordHit:
+    seed = seed_by_key[expansion.provenance.seed_id]
+    source_id = seed.record_id if record_id == seed.storage_key else record_id
+    return RecordHit(
+        RecordIdentity(seed.workspace_id, seed.source_kind, source_id),
+        expansion.contribution,
+    )
 
 
 async def _maybe_await[T](value: T | Awaitable[T]) -> T:

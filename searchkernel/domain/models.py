@@ -55,6 +55,58 @@ def canonical_storage_key(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RecordIdentity:
+    """Composite identity carried across retrieval, graph, and hydration."""
+
+    workspace_id: str | None
+    source_kind: str
+    source_id: str
+
+    @property
+    def storage_key(self) -> str:
+        return canonical_storage_key(
+            self.workspace_id,
+            self.source_kind,
+            self.source_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RecordHit:
+    """A scored store result with complete record identity."""
+
+    identity: RecordIdentity
+    score: float
+
+    @property
+    def workspace_id(self) -> str | None:
+        return self.identity.workspace_id
+
+    @property
+    def source_kind(self) -> str:
+        return self.identity.source_kind
+
+    @property
+    def source_id(self) -> str:
+        return self.identity.source_id
+
+    @property
+    def storage_key(self) -> str:
+        return self.identity.storage_key
+
+    def __iter__(self):
+        """Retain tuple unpacking for adapters during the contract migration."""
+        yield self.source_id
+        yield self.score
+
+    def __getitem__(self, index: int):
+        return (self.source_id, self.score)[index]
+
+    def __len__(self) -> int:
+        return 2
+
+
 # ===== Core domain types =====
 
 @dataclass
@@ -306,6 +358,7 @@ class SearchResultProvenance:
     community_boost: float | None = None
     project_uplift: float | None = None
     parent_expanded_from: str | None = None
+    record_identity: RecordIdentity | None = None
 
     def add_strategy(self, strategy: str, rank: int, raw_score: float) -> None:
         if strategy in self.strategy_details:
@@ -320,6 +373,7 @@ class SearchResultProvenance:
 
     def clone(self) -> "SearchResultProvenance":
         return SearchResultProvenance(
+            record_identity=self.record_identity,
             strategies=tuple(self.strategies),
             strategy_details=dict(self.strategy_details),
             community_boost=self.community_boost,
@@ -331,6 +385,12 @@ class SearchResultProvenance:
         result: dict[str, object] = {
             "strategies": list(self.strategies),
         }
+        if self.record_identity is not None:
+            result["record_identity"] = {
+                "workspace_id": self.record_identity.workspace_id,
+                "source_kind": self.record_identity.source_kind,
+                "source_id": self.record_identity.source_id,
+            }
         if self.strategy_details:
             result["strategy_details"] = {
                 strategy: contribution.to_dict()

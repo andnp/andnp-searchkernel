@@ -346,3 +346,32 @@ async def test_reranker_requires_text_or_explicit_hydrator() -> None:
         candidate_hydrator=lambda candidate: "hydrated text",
     )
     assert results[0].source_id == "id"
+
+
+@pytest.mark.asyncio
+async def test_lenient_candidate_hydrator_failure_returns_diagnostic() -> None:
+    class _Source:
+        source_kind = "empty"
+
+        async def search(self, query, k, filters=None):
+            return [ScoredRef("id", 0.5, "empty")]
+
+    registry = SourceRegistry()
+    registry.register(_Source())
+    diagnostics = []
+
+    async def hydrate(_candidate):
+        raise RuntimeError("hydrate failed")
+
+    results = await search_anything(
+        "query",
+        registry=registry,
+        reranker=_identity_reranker(),
+        candidate_hydrator=hydrate,
+        diagnostics=diagnostics,
+        failure_mode="lenient",
+    )
+
+    assert [result.source_id for result in results] == ["id"]
+    assert diagnostics[0].stage == "rerank"
+    assert diagnostics[0].exception_type == "RuntimeError"

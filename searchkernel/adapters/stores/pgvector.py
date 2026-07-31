@@ -18,7 +18,13 @@ import psycopg2.extras
 import psycopg2.pool
 from psycopg2 import sql
 
-from searchkernel.domain import Record, Vector
+from searchkernel.domain import (
+    Record,
+    RecordHit,
+    RecordIdentity,
+    Vector,
+    canonical_storage_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +67,83 @@ def _utc_timestamp(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _canonical_ids(values: list[str | RecordIdentity]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if isinstance(value, RecordIdentity):
+            result.append(value.storage_key)
+        elif value.startswith("record:"):
+            result.append(value)
+        else:
+            raise ValueError(
+                "record deletion requires a canonical storage key or RecordIdentity"
+            )
+    return result
+
+
+def _migrate_records_schema(cursor) -> None:
+    """Upgrade legacy records in the same transaction as schema creation."""
+    cursor.execute(
+        "ALTER TABLE records ADD COLUMN IF NOT EXISTS workspace_id TEXT;"
+    )
+    cursor.execute(
+        "SELECT record_id, workspace_id, source_kind, source_id FROM records;"
+    )
+    rows = cursor.fetchall()
+    cursor.execute("SELECT table_name FROM vector_tables;")
+    vector_tables = [row[0] for row in cursor.fetchall()]
+
+    for old_key, workspace_id, source_kind, source_id in rows:
+        new_key = canonical_storage_key(workspace_id, source_kind, source_id)
+        if old_key == new_key:
+            continue
+        cursor.execute(
+            "SELECT 1 FROM records WHERE record_id = %s;",
+            (new_key,),
+        )
+        if cursor.fetchone() is not None:
+            raise ValueError(
+                f"cannot migrate duplicate record identity {new_key!r}"
+            )
+        for table_name in vector_tables:
+            cursor.execute(
+                sql.SQL("UPDATE {table} SET record_id = %s WHERE record_id = %s;").format(
+                    table=sql.Identifier(table_name)
+                ),
+                (new_key, old_key),
+            )
+        cursor.execute(
+            "UPDATE records SET record_id = %s WHERE record_id = %s;",
+            (new_key, old_key),
+        )
+
+    cursor.execute(
+        """
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_attribute a
+          ON a.attrelid = c.conrelid
+         AND a.attnum = ANY(c.conkey)
+        WHERE c.conrelid = 'records'::regclass
+          AND c.contype = 'u'
+        GROUP BY c.oid
+        HAVING array_agg(
+            a.attname::text ORDER BY array_position(c.conkey, a.attnum)
+        )
+            = ARRAY['workspace_id', 'source_kind', 'source_id'];
+        """
+    )
+    if cursor.fetchone() is None:
+        cursor.execute(
+            "ALTER TABLE records ADD CONSTRAINT records_identity_unique "
+            "UNIQUE (workspace_id, source_kind, source_id);"
+        )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_records_workspace "
+        "ON records (workspace_id);"
+    )
 
 
 class PostgresConnection:
@@ -157,9 +240,11 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
                 metadata JSONB DEFAULT '{}',
                 uri TEXT,
                 status TEXT DEFAULT 'active',
-                UNIQUE (workspace_id, source_kind, source_id)
+                CONSTRAINT records_identity_unique
+                    UNIQUE (workspace_id, source_kind, source_id)
             );
         """)
+        _migrate_records_schema(cursor)
 
         # Full-text search index
         cursor.execute("""
@@ -418,7 +503,7 @@ class PGVectorStore:
         model_name: str,
         dim: int,
         filters: dict[str, Any] | None = None,
-    ) -> list[tuple[str, float]]:
+    ) -> list[RecordHit | tuple[str, float]]:
         """Search for nearest neighbors using cosine similarity (ANN via HNSW).
 
         Args:
@@ -483,7 +568,8 @@ class PGVectorStore:
             # Order by the raw distance operator (not a wrapped/aliased
             # expression) so the planner can use the HNSW index for ANN.
             query_sql = sql.SQL(
-                "SELECT r.source_id, v.embedding <=> %s::vector AS distance "
+                "SELECT r.workspace_id, r.source_kind, r.source_id, "
+                "v.embedding <=> %s::vector AS distance "
                 "FROM {table} v "
                 "JOIN records r ON v.record_id = r.record_id "
                 "WHERE 1 = 1 " + where_clause + " "
@@ -496,13 +582,21 @@ class PGVectorStore:
             cursor.execute(query_sql, params)
             results = cursor.fetchall()
             conn.commit()
-            return [(row[0], 1.0 - float(row[1])) for row in results]
+            return [
+                (
+                    RecordHit(
+                        RecordIdentity(row[0], row[1], row[2]),
+                        1.0 - float(row[3]),
+                    )
+                )
+                for row in results
+            ]
         finally:
             if cursor is not None:
                 cursor.close()
             self.conn_pool.put_connection(conn)
 
-    def delete(self, record_ids: list[str]) -> None:
+    def delete(self, record_ids: list[str | RecordIdentity]) -> None:
         """Delete records by ID.
 
         Args:
@@ -511,19 +605,11 @@ class PGVectorStore:
         if not record_ids:
             return
 
+        storage_ids = _canonical_ids(record_ids)
         conn = self.conn_pool.get_connection()
         cursor = None
         try:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT record_id FROM records "
-                "WHERE record_id = ANY(%s) OR source_id = ANY(%s);",
-                (record_ids, record_ids),
-            )
-            storage_ids = [row[0] for row in cursor.fetchall()]
-            if not storage_ids:
-                return
-
             cursor.execute("SELECT DISTINCT table_name FROM vector_tables;")
             table_names = [row[0] for row in cursor.fetchall()]
 
@@ -549,23 +635,21 @@ class PGVectorStore:
                 cursor.close()
             self.conn_pool.put_connection(conn)
 
-    def delete_for_model(self, record_ids: list[str], model_name: str, dim: int) -> None:
+    def delete_for_model(
+        self,
+        record_ids: list[str | RecordIdentity],
+        model_name: str,
+        dim: int,
+    ) -> None:
         """Delete records from one model while preserving other model vectors."""
         if not record_ids:
             return
 
+        storage_ids = _canonical_ids(record_ids)
         conn = self.conn_pool.get_connection()
         cursor = None
         try:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT record_id FROM records "
-                "WHERE record_id = ANY(%s) OR source_id = ANY(%s);",
-                (record_ids, record_ids),
-            )
-            storage_ids = [row[0] for row in cursor.fetchall()]
-            if not storage_ids:
-                return
             cursor.execute(
                 "SELECT table_name FROM vector_tables WHERE model_name = %s AND dim = %s;",
                 (model_name, dim),
@@ -674,7 +758,7 @@ class PGKeywordStore:
 
     def search(
         self, query: str, k: int, filters: dict[str, Any] | None = None
-    ) -> list[tuple[str, float]]:
+    ) -> list[RecordHit | tuple[str, float]]:
         """Search for records matching the query.
 
         Args:
@@ -713,7 +797,7 @@ class PGKeywordStore:
             where_clause = "AND " + " AND ".join(where_parts)
 
             sql = f"""
-                SELECT source_id,
+                SELECT workspace_id, source_kind, source_id,
                        ts_rank(tsvector_body, plainto_tsquery('english', %s)) as relevance
                 FROM records
                 WHERE tsvector_body @@ plainto_tsquery('english', %s)
@@ -725,7 +809,13 @@ class PGKeywordStore:
 
             cursor.execute(sql, params)
             results = cursor.fetchall()
-            return [(row[0], float(row[1])) for row in results]
+            return [
+                RecordHit(
+                    RecordIdentity(row[0], row[1], row[2]),
+                    float(row[3]),
+                )
+                for row in results
+            ]
         finally:
             if cursor is not None:
                 cursor.close()
@@ -781,7 +871,7 @@ class PGGraphStore:
 
     def neighbors(
         self,
-        record_id: str,
+        record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
     ) -> list[tuple[str, str, float]]:
@@ -803,7 +893,9 @@ class PGGraphStore:
             cursor = conn.cursor()
 
             edge_filter = ""
-            params: list[Any] = [record_id]
+            params: list[Any] = [
+                record_id.source_id if isinstance(record_id, RecordIdentity) else record_id
+            ]
             if edge_types:
                 placeholders = ",".join(["%s"] * len(edge_types))
                 edge_filter = f"AND edge_type IN ({placeholders})"

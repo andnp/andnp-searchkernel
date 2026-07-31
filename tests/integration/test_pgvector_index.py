@@ -310,3 +310,30 @@ def test_search_skips_missing_record_rows(index, prefix):
         index._conn_pool.put_connection(conn)
 
     assert index.search("orphan content") == []
+
+
+def test_workspace_scopes_hydration_and_delete(pg_dsn, prefix):
+    embedder = _StubEmbedder(f"workspace-{prefix}")
+    first = PGVectorIndex(
+        pg_dsn=pg_dsn,
+        embedder=embedder,
+        workspace_id="workspace-a",
+    )
+    second = PGVectorIndex(
+        pg_dsn=pg_dsn,
+        embedder=_StubEmbedder(f"workspace-{prefix}"),
+        workspace_id="workspace-b",
+    )
+    chunk = _chunk(f"{prefix}_shared_chunk_0", f"{prefix}_shared", "shared")
+
+    first.add_chunk(chunk)
+    second.add_chunk(chunk)
+
+    assert first.get_chunk_by_id(chunk.chunk_id) is not None
+    assert second.get_chunk_by_id(chunk.chunk_id) is not None
+
+    first.remove_chunk(chunk.chunk_id)
+
+    assert first.get_chunk_by_id(chunk.chunk_id) is None
+    assert second.get_chunk_by_id(chunk.chunk_id) is not None
+    second.clear()

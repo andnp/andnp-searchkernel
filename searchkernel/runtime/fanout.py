@@ -92,6 +92,12 @@ async def gather_with_timeout[T](
         task = asyncio.create_task(run_with_timeout(coro, per_timeout_s, index))
         tasks.append(task)
 
-    # Run all tasks and collect results
-    results = await asyncio.gather(*tasks, return_exceptions=False)
-    return results
+    try:
+        return await asyncio.gather(*tasks, return_exceptions=False)
+    except BaseException:
+        if failure_mode == "strict":
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        raise

@@ -151,7 +151,11 @@ async def search_anything(
     for candidate in fused:
         text = _candidate_text(candidate)
         if not text.strip() and candidate_hydrator is not None:
-            text = await _maybe_await(candidate_hydrator(candidate)) or ""
+            try:
+                text = await _maybe_await(candidate_hydrator(candidate)) or ""
+            except Exception as error:  # noqa: BLE001 - heterogeneous hydrators
+                _record_or_raise("rerank", error, failure_mode, diagnostics)
+                return fused[:top_n]
         if not text.strip():
             error = FederationSearchError(
                 f"rerank requires candidate text for "

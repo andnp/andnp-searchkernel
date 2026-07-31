@@ -6,7 +6,7 @@ uses Postgres + pgvector; legacy FAISS/SQLite adapters are kept as fallbacks.
 
 from typing import Any, Protocol, runtime_checkable
 
-from searchkernel.domain import Record, Vector
+from searchkernel.domain import Record, RecordHit, RecordIdentity, Vector
 
 
 @runtime_checkable
@@ -36,7 +36,7 @@ class VectorStore(Protocol):
         model_name: str,
         dim: int,
         filters: dict[str, Any] | None = None,
-    ) -> list[tuple[str, float]]:
+    ) -> list[RecordHit | tuple[str, float]]:
         """
         Search for the k nearest neighbors to a query vector.
 
@@ -87,7 +87,7 @@ class KeywordStore(Protocol):
 
     def search(
         self, query: str, k: int, filters: dict[str, Any] | None = None
-    ) -> list[tuple[str, float]]:
+    ) -> list[RecordHit | tuple[str, float]]:
         """
         Search for top-k records matching the query.
 
@@ -121,7 +121,7 @@ class GraphStore(Protocol):
 
     def neighbors(
         self,
-        record_id: str,
+        record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
     ) -> list[tuple[str, str, float]]:
@@ -167,7 +167,7 @@ class AsyncVectorStore(Protocol):
         model_name: str,
         dim: int,
         filters: dict[str, Any] | None = None,
-    ) -> list[tuple[str, float]]:
+    ) -> list[RecordHit | tuple[str, float]]:
         ...
 
 
@@ -176,7 +176,7 @@ class AsyncKeywordStore(Protocol):
 
     async def search(
         self, query: str, k: int, filters: dict[str, Any] | None = None
-    ) -> list[tuple[str, float]]:
+    ) -> list[RecordHit | tuple[str, float]]:
         ...
 
 
@@ -185,7 +185,7 @@ class AsyncGraphStore(Protocol):
 
     async def neighbors(
         self,
-        record_id: str,
+        record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
     ) -> list[tuple[str, str, float]]:

@@ -194,7 +194,7 @@ class TestVectorStore:
         store.upsert(fixture_records, model_name="test-model", dim=4)
 
         # Delete first two records
-        store.delete([fixture_records[0].source_id, fixture_records[1].source_id])
+        store.delete([fixture_records[0].storage_key, fixture_records[1].storage_key])
 
         # Search should only return third record
         query_vec = [0.0, 0.0, 1.0, 0.0]
@@ -204,6 +204,38 @@ class TestVectorStore:
         assert fixture_records[0].source_id not in result_ids
         assert fixture_records[1].source_id not in result_ids
         assert fixture_records[2].source_id in result_ids
+
+    def test_delete_rejects_bare_source_id(self, pg_conn, fixture_records):
+        store = PGVectorStore(pg_conn)
+        store.upsert(fixture_records[:1], model_name="test-model", dim=4)
+
+        with pytest.raises(ValueError, match="canonical storage key"):
+            store.delete([fixture_records[0].source_id])
+
+    def test_schema_migrates_legacy_record_identity(self, pg_conn):
+        conn = pg_conn.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO records (
+                record_id, source_kind, source_id, title, body, status
+            ) VALUES (%s, %s, %s, %s, %s, %s);
+            """,
+            ("legacy-id", "note", "note-1", "Legacy", "Body", "active"),
+        )
+        conn.commit()
+        cursor.close()
+        pg_conn.put_connection(conn)
+
+        _create_schema(pg_conn)
+
+        migrated = pg_conn.execute_one(
+            "SELECT record_id FROM records WHERE source_id = %s;",
+            ("note-1",),
+        )
+        assert migrated == (
+            'record:[null,"note","note-1"]',
+        )
 
     def test_epoch_tracking(self, pg_conn, fixture_records):
         """Test that epoch is incremented on upsert/delete."""
@@ -215,7 +247,7 @@ class TestVectorStore:
 
         assert epoch1 > epoch0
 
-        store.delete([fixture_records[0].source_id])
+        store.delete([fixture_records[0].storage_key])
         epoch2 = store.epoch()
 
         assert epoch2 > epoch1
@@ -285,12 +317,14 @@ class TestVectorStore:
             model_name="model-four",
             dim=3,
         ) == []
-        assert store.search(
+        result = store.search(
             [1.0, 0.0, 0.0],
             k=10,
             model_name="model-three",
             dim=3,
-        ) == [("three:1", pytest.approx(1.0))]
+        )[0]
+        assert result.source_id == "three:1"
+        assert result.score == pytest.approx(1.0)
 
     def test_delete_removes_records_from_all_models(self, pg_conn, fixture_records):
         """Test global deletion removes vectors from every model table."""
@@ -298,7 +332,7 @@ class TestVectorStore:
         store.upsert(fixture_records, model_name="model-v1", dim=4)
         store.upsert(fixture_records, model_name="model-v2", dim=4)
 
-        store.delete(["test:1"])
+        store.delete([fixture_records[0].storage_key])
 
         for model_name in ("model-v1", "model-v2"):
             results = store.search(
@@ -611,7 +645,7 @@ class TestRoundTrip:
         assert len(results) > 0
 
         # Delete a record
-        vector_store.delete([fixture_records[0].source_id])
+        vector_store.delete([fixture_records[0].storage_key])
 
         epoch_after = vector_store.epoch()
         assert epoch_after > epoch_before

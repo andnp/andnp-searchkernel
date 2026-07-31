@@ -1,8 +1,9 @@
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
 
-from searchkernel.domain import Record
+from searchkernel.domain import Record, RecordHit, RecordIdentity
 from searchkernel.search.record_pipeline import (
     RecordSearchConfig,
     RecordSearchError,
@@ -305,3 +306,48 @@ async def test_store_errors_can_be_explicitly_returned_as_degraded() -> None:
     assert not outcome.results
     assert outcome.degraded
     assert outcome.failures[0].stage == "keyword"
+
+
+async def test_search_keeps_sync_compatibility_outside_event_loop() -> None:
+    records = {"a": _record("a")}
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        hydrator=_hydrator(records),
+    )
+
+    outcome = await asyncio.to_thread(lambda: pipeline.search("query"))
+
+    assert outcome.results[0].record_id == "a"
+
+
+@pytest.mark.asyncio
+async def test_composite_identity_reaches_async_hydrator() -> None:
+    identity = RecordIdentity("workspace-a", "note", "note-1")
+    record = Record(
+        workspace_id="workspace-a",
+        source_kind="note",
+        source_id="note-1",
+        title="note-1",
+        body="body for note-1",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    class Hydrator:
+        async def hydrate_record(self, received: RecordIdentity) -> Record:
+            assert received == identity
+            return record
+
+    class Store:
+        def search(self, query, k, filters=None):
+            return [RecordHit(identity, 1.0)]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=Store(),
+        hydrator=Hydrator(),
+    )
+
+    outcome = await pipeline.search("query")
+
+    assert outcome.results[0].storage_key == identity.storage_key
+    assert outcome.results[0].provenance.record_identity == identity

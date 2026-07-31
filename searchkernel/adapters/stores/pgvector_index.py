@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from psycopg2 import sql
 
@@ -34,6 +34,7 @@ from searchkernel.adapters.stores.pgvector import (
 from searchkernel.domain import (
     Chunk,
     Record,
+    RecordHit,
     RecordStatus,
     Vector,
     canonical_storage_key,
@@ -81,7 +82,7 @@ def _parse_modified_time(raw: Any) -> datetime:
     return datetime.now(UTC)
 
 
-def _chunk_to_record(chunk: Chunk) -> Record:
+def _chunk_to_record(chunk: Chunk, workspace_id: str | None = None) -> Record:
     header_path = chunk.metadata.get("header_path", "")
     file_path = chunk.metadata.get("file_path", "")
     modified_time = _parse_modified_time(chunk.metadata.get("modified_time"))
@@ -97,7 +98,9 @@ def _chunk_to_record(chunk: Chunk) -> Record:
     return Record(
         source_kind=_SOURCE_KIND,
         source_id=chunk.chunk_id,
-        workspace_id=chunk.metadata.get("workspace_id"),
+        workspace_id=workspace_id
+        if workspace_id is not None
+        else chunk.metadata.get("workspace_id"),
         title=header_path or file_path,
         body=chunk.content,
         created_at=modified_time,
@@ -159,11 +162,13 @@ class PGVectorIndex:
         embedder: _Embedder | None = None,
         *,
         truncate_dim: int | None = None,
+        workspace_id: str | None = None,
     ):
         self._conn_pool = PostgresConnection(pg_dsn)
         _create_schema(self._conn_pool)
         self._store = PGVectorStore(self._conn_pool)
         self._embedder = embedder or _default_embedder(embedding_model_name, truncate_dim=truncate_dim)
+        self._workspace_id = workspace_id
         self._model_name = self._embedder.model_name
         self._dim = self._embedder.dim
 
@@ -189,7 +194,7 @@ class PGVectorIndex:
                     f"embedding dimension mismatch for {chunk.chunk_id}: "
                     f"expected {self._dim}, got {len(vector)}"
                 )
-            record = _chunk_to_record(chunk)
+            record = _chunk_to_record(chunk, self._workspace_id)
             record.embedding = vector
             records.append(record)
         self._store.upsert(records, self._model_name, self._dim)
@@ -206,17 +211,28 @@ class PGVectorIndex:
 
         fetch_k = top_k * 2 if excluded_files else top_k
         query_vector = self._embedder.embed_query(query)
-        hits = self._store.search(
-            query_vector, fetch_k, model_name=self._model_name, dim=self._dim
+        hits = cast(
+            list[RecordHit],
+            self._store.search(
+            query_vector,
+            fetch_k,
+            model_name=self._model_name,
+            dim=self._dim,
+            filters=(
+                {"workspace_id": self._workspace_id}
+                if self._workspace_id is not None
+                else None
+            ),
+            ),
         )
         if not hits:
             return []
 
-        rows = self._fetch_records([record_id for record_id, _score in hits])
+        rows = self._fetch_records([hit.storage_key for hit in hits])
 
         results: list[SearchResultDict] = []
-        for record_id, score in hits:
-            row = rows.get(record_id)
+        for hit in hits:
+            row = rows.get(hit.storage_key)
             if row is None:
                 continue
             source_id, body, metadata = row
@@ -229,7 +245,7 @@ class PGVectorIndex:
                     if matches_any_excluded(file_path, excluded_files, docs_root):
                         continue
 
-            results.append(_row_to_result(source_id, body, metadata, score))
+            results.append(_row_to_result(source_id, body, metadata, hit.score))
             if len(results) >= top_k:
                 break
 
@@ -267,9 +283,10 @@ class PGVectorIndex:
                 sql.SQL(
                     "SELECT r.source_id FROM records r "
                     "JOIN {table} v ON v.record_id = r.record_id "
-                    "WHERE r.source_kind = %s AND r.metadata->>'doc_id' = %s;"
+                    "WHERE r.source_kind = %s AND r.metadata->>'doc_id' = %s "
+                    "AND r.workspace_id IS NOT DISTINCT FROM %s;"
                 ).format(table=sql.Identifier(table_name)),
-                (_SOURCE_KIND, doc_id),
+                (_SOURCE_KIND, doc_id, self._workspace_id),
             )
             return [row[0] for row in cursor.fetchall()]
         finally:
@@ -289,9 +306,10 @@ class PGVectorIndex:
                 sql.SQL(
                     "SELECT DISTINCT r.metadata->>'doc_id' FROM records r "
                     "JOIN {table} v ON v.record_id = r.record_id "
-                    "WHERE r.source_kind = %s;"
+                    "WHERE r.source_kind = %s "
+                    "AND r.workspace_id IS NOT DISTINCT FROM %s;"
                 ).format(table=sql.Identifier(table_name)),
-                (_SOURCE_KIND,),
+                (_SOURCE_KIND, self._workspace_id),
             )
             return [row[0] for row in cursor.fetchall() if row[0] is not None]
         finally:
@@ -360,6 +378,11 @@ class PGVectorIndex:
         if row is None:
             return False
         _source_id, body, _old_metadata = row
+        workspace_id = self._workspace_id
+        if workspace_id is None:
+            raw_workspace_id = _old_metadata.get("workspace_id")
+            if isinstance(raw_workspace_id, str):
+                workspace_id = raw_workspace_id
 
         record = Record(
             source_kind=_SOURCE_KIND,
@@ -368,14 +391,17 @@ class PGVectorIndex:
             body=body,
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
-            metadata=dict(new_metadata),
+            workspace_id=workspace_id,
+            metadata={**new_metadata, "workspace_id": workspace_id},
             uri=new_metadata.get("file_path"),
             status=RecordStatus.ACTIVE,
         )
         record.embedding = self._embedder.embed([body])[0]
         self._store.upsert([record], self._model_name, self._dim)
         self._store.delete_for_model(
-            [self._storage_key(old_chunk_id)], self._model_name, self._dim
+            [canonical_storage_key(workspace_id, _SOURCE_KIND, old_chunk_id)],
+            self._model_name,
+            self._dim,
         )
         return True
 
@@ -417,7 +443,7 @@ class PGVectorIndex:
             self._store.delete_for_model(record_ids, self._model_name, self._dim)
 
     def _storage_key(self, chunk_id: str) -> str:
-        return canonical_storage_key(None, _SOURCE_KIND, chunk_id)
+        return canonical_storage_key(self._workspace_id, _SOURCE_KIND, chunk_id)
 
     def _fetch_records(
         self, record_ids: list[str]
@@ -439,14 +465,23 @@ class PGVectorIndex:
             ]
             cursor.execute(
                 sql.SQL(
-                    "SELECT r.record_id, r.source_id, r.body, r.metadata "
+                    "SELECT r.record_id, r.source_id, r.workspace_id, "
+                    "r.source_kind, r.body, r.metadata "
                     "FROM records r JOIN {table} v ON v.record_id = r.record_id "
                     "WHERE r.record_id = ANY(%s);"
                 ).format(table=sql.Identifier(table_name)),
                 (storage_ids,),
             )
             return {
-                requested_id: (row[1], row[2], row[3] or {})
+                requested_id: (
+                    row[1],
+                    row[4],
+                    {
+                        **(row[5] or {}),
+                        "workspace_id": row[2],
+                        "source_kind": row[3],
+                    },
+                )
                 for row in cursor.fetchall()
                 for requested_id in record_ids
                 if row[0]

@@ -278,3 +278,27 @@ async def test_strict_mode_propagates_failures():
             per_timeout_s=1.0,
             failure_mode="strict",
         )
+
+
+@pytest.mark.asyncio
+async def test_strict_mode_cancels_and_awaits_siblings():
+    sibling_cancelled = asyncio.Event()
+
+    async def fail():
+        raise RuntimeError("offline")
+
+    async def sibling():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+
+    with pytest.raises(RuntimeError, match="offline"):
+        await gather_with_timeout(
+            [fail(), sibling()],
+            per_timeout_s=1.0,
+            failure_mode="strict",
+        )
+
+    assert sibling_cancelled.is_set()
