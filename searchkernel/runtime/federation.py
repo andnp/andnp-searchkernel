@@ -46,6 +46,7 @@ async def search_anything(
     per_source_k: int = DEFAULT_PER_SOURCE_K,
     per_source_timeout_s: float = DEFAULT_PER_SOURCE_TIMEOUT_S,
     source_weights: dict[str, float] | None = None,
+    rerank_budget: int | None = None,
     filters: dict[str, Any] | None = None,
     failure_mode: Literal["strict", "lenient"] = "lenient",
     diagnostics: list[FederationDiagnostic] | None = None,
@@ -155,8 +156,20 @@ async def search_anything(
     if reranker is None:
         return fused[:top_n]
 
+    rerank_candidates = (
+        fused
+        if rerank_budget is None
+        else fused[: max(rerank_budget, 0)]
+    )
+    if not rerank_candidates:
+        if diagnostics is not None:
+            diagnostics.append(
+                FederationDiagnostic("rerank", "rerank skipped: empty budget")
+            )
+        return fused[:top_n]
+
     texts: list[str] = []
-    for candidate in fused:
+    for candidate in rerank_candidates:
         text = _candidate_text(candidate)
         if not text.strip() and candidate_hydrator is not None:
             try:
@@ -178,19 +191,20 @@ async def search_anything(
         _record_or_raise("rerank", error, failure_mode, diagnostics)
         return fused[:top_n]
 
-    if len(rerank_scores) != len(fused):
+    if len(rerank_scores) != len(rerank_candidates):
         error = FederationSearchError(
-            f"reranker returned {len(rerank_scores)} scores for {len(fused)} candidates"
+            f"reranker returned {len(rerank_scores)} scores for "
+            f"{len(rerank_candidates)} candidates"
         )
         _record_or_raise("rerank", error, failure_mode, diagnostics)
         return fused[:top_n]
 
     reranked = [
         dataclass_replace(candidate, score=rerank_score)
-        for candidate, rerank_score in zip(fused, rerank_scores)
+        for candidate, rerank_score in zip(rerank_candidates, rerank_scores)
     ]
     reranked.sort(key=lambda ref: ref.score, reverse=True)
-    return reranked[:top_n]
+    return [*reranked, *fused[len(rerank_candidates) :]][:top_n]
 
 
 def _candidate_text(candidate: ScoredRef) -> str:

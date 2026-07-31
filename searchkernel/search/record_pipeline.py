@@ -7,6 +7,7 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from typing import Any, Literal, Protocol, cast
 
 from searchkernel.domain import (
@@ -44,6 +45,11 @@ from searchkernel.search.bounded_graph import (
     expand_bounded_typed_graph,
 )
 from searchkernel.search.fusion import fuse_reciprocal_rank
+from searchkernel.search.query_plan import (
+    QueryPlan,
+    QueryRouter,
+    QueryRouterConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +174,7 @@ class RecordSearchOutcome:
     failures: tuple[RecordSearchFailure, ...] = ()
     missing_record_ids: tuple[str, ...] = ()
     cache_diagnostics: tuple[str, ...] = ()
+    diagnostics: tuple[str, ...] = ()
 
     @property
     def degraded(self) -> bool:
@@ -189,13 +196,23 @@ class RecordSearchConfig:
 
     candidate_multiplier: int = 5
     minimum_candidate_limit: int = 1
+    keyword_candidate_multiplier: int | None = None
+    vector_candidate_multiplier: int | None = None
     rrf_k: float = 60.0
+    weighted_rrf_enabled: bool = False
     graph_fusion: Literal["rrf", "max"] = "rrf"
     graph_depth: int = 1
     max_graph_seeds: int = 10
+    graph_enabled: bool = True
     max_neighbors_per_seed: int = 10
     max_graph_concurrency: int = 8
     max_hydration_concurrency: int = 8
+    artifact_confidence_threshold: float = 0.75
+    rerank_budget: int = 0
+    expansion_enabled: bool = False
+    expansion_timeout_s: float = 0.25
+    expansion_top_k: int = 3
+    expansion_similarity_threshold: float = 0.5
     adaptive_enabled: bool = False
     maximum_limit: int = 100
     score_ratio_floor: float = 0.5
@@ -268,6 +285,22 @@ class RecordSearchPipeline:
         self._policy_version = policy_version
         self._hydration_version = hydration_version
         self._hydration_version_provider = hydration_version_provider
+        self._router = QueryRouter(
+            QueryRouterConfig(
+                candidate_multiplier=self._config.candidate_multiplier,
+                minimum_candidate_limit=self._config.minimum_candidate_limit,
+                keyword_candidate_multiplier=(
+                    self._config.keyword_candidate_multiplier
+                ),
+                vector_candidate_multiplier=(
+                    self._config.vector_candidate_multiplier
+                ),
+                graph_seed_budget=self._config.max_graph_seeds,
+                graph_depth=self._config.graph_depth,
+                rerank_budget=self._config.rerank_budget,
+                expansion_enabled=self._config.expansion_enabled,
+            )
+        )
         self._validate_config()
 
     def search(
@@ -302,11 +335,22 @@ class RecordSearchPipeline:
         failures: list[RecordSearchFailure] = []
         missing_record_ids: list[str] = []
         cache_diagnostics: list[str] = []
+        diagnostics: list[str] = []
         filters = dict(filters or {})
         filters.setdefault("statuses", ["active"])
+        plan = self._router.route(
+            query,
+            limit=limit,
+            keyword_available=self._keyword_store is not None,
+            vector_available=self._vector_store is not None,
+            graph_available=self._graph_store is not None,
+            graph_enabled=self._config.graph_enabled,
+            rerank_available=False,
+        )
+        diagnostics.extend(_plan_diagnostics(plan))
         acquisition_limit = max(
-            max(limit, 1) * self._config.candidate_multiplier,
-            self._config.minimum_candidate_limit,
+            plan.keyword_candidate_budget,
+            plan.vector_candidate_budget,
         )
         candidate_key = self._candidate_cache_key(
             query,
@@ -332,18 +376,48 @@ class RecordSearchPipeline:
 
         if candidates is None:
             rankings: dict[str, list[RecordHit]] = {}
-            if self._policy.vector_candidate_ids is not None:
+            if plan.signals.artifact:
+                keyword_result = await self._capture_optional_stage(
+                    "keyword",
+                    plan.keyword_enabled,
+                    lambda: self._acquire_keyword(
+                        query,
+                        plan.keyword_candidate_budget,
+                        filters,
+                    ),
+                    failures,
+                )
+                if keyword_result is not None:
+                    rankings["keyword"] = keyword_result
+                if _artifact_results_are_confident(
+                    rankings.get("keyword", ()),
+                    requested_limit=limit,
+                    threshold=self._config.artifact_confidence_threshold,
+                ):
+                    plan = dataclass_replace(
+                        plan,
+                        vector_enabled=False,
+                        diagnostic_skip_reasons=(
+                            *plan.diagnostic_skip_reasons,
+                            "vector:artifact_keyword_confident",
+                        ),
+                    )
+                    diagnostics.append("vector:artifact_keyword_confident")
+
+            if plan.vector_enabled and plan.signals.artifact is False and (
+                self._policy.vector_candidate_ids is not None
+            ):
                 stage_results = await _gather_tasks(
                     [
                         asyncio.create_task(
                             _capture_stage(
                                 "keyword",
                                 lambda: self._acquire_keyword(
-                                    query, acquisition_limit, filters
+                                    query, plan.keyword_candidate_budget, filters
                                 ),
                             )
                         )
-                        if self._keyword_store is not None
+                        if plan.keyword_enabled
                         else None,
                         asyncio.create_task(
                             _capture_stage(
@@ -370,40 +444,42 @@ class RecordSearchPipeline:
                         "vector",
                         lambda: self._acquire_vector(
                             cast(tuple[Vector, str, int], embedding_result),
-                            acquisition_limit,
+                            plan.vector_candidate_budget,
                             filters,
                             rankings,
+                            plan=plan,
                         ),
                     )
                     vector_value = self._consume_stage(vector_result, failures)
                     if vector_value is not None:
                         rankings["vector"] = cast(list[RecordHit], vector_value)
-            else:
+            elif plan.vector_enabled or plan.keyword_enabled:
                 stage_results = await _gather_tasks(
                     [
                         asyncio.create_task(
                             _capture_stage(
                                 "keyword",
                                 lambda: self._acquire_keyword(
-                                    query, acquisition_limit, filters
+                                    query, plan.keyword_candidate_budget, filters
                                 ),
                             )
                         )
-                        if self._keyword_store is not None
+                        if plan.keyword_enabled and "keyword" not in rankings
                         else None,
                         asyncio.create_task(
                             _capture_stage(
                                 "vector",
                                 lambda: self._acquire_vector(
                                     None,
-                                    acquisition_limit,
+                                    plan.vector_candidate_budget,
                                     filters,
                                     rankings,
                                     query=query,
+                                    plan=plan,
                                 ),
                             )
                         )
-                        if self._vector_store is not None
+                        if plan.vector_enabled
                         else None,
                     ]
                 )
@@ -418,18 +494,23 @@ class RecordSearchPipeline:
             fused_scores: dict[str, float] = {}
             if rankings:
                 fused_scores = fuse_reciprocal_rank(
-                    [
-                        [hit.storage_key for hit in ranking]
-                        for ranking in rankings.values()
-                    ],
+                    {
+                        strategy: [hit.storage_key for hit in ranking]
+                        for strategy, ranking in rankings.items()
+                    },
                     k=self._config.rrf_k,
+                    strategy_weights=(
+                        plan.fusion_weight_map
+                        if self._config.weighted_rrf_enabled
+                        else None
+                    ),
                 )
             base_candidates = self._build_candidates(fused_scores, rankings)
             base_candidates = self._apply_candidate_policy(base_candidates)
 
-            if self._graph_store is not None and base_candidates:
+            if plan.graph_enabled and base_candidates:
                 try:
-                    graph_ranking = await self._expand_graph(base_candidates)
+                    graph_ranking = await self._expand_graph(base_candidates, plan)
                     if graph_ranking:
                         rankings["graph"] = graph_ranking
                         if self._config.graph_fusion == "max":
@@ -441,11 +522,18 @@ class RecordSearchPipeline:
                                 )
                         else:
                             fused_scores = fuse_reciprocal_rank(
-                                [
-                                    [hit.storage_key for hit in ranking]
-                                    for ranking in rankings.values()
-                                ],
+                                {
+                                    strategy: [
+                                        hit.storage_key for hit in ranking
+                                    ]
+                                    for strategy, ranking in rankings.items()
+                                },
                                 k=self._config.rrf_k,
+                                strategy_weights=(
+                                    plan.fusion_weight_map
+                                    if self._config.weighted_rrf_enabled
+                                    else None
+                                ),
                             )
                         candidates = self._build_candidates(fused_scores, rankings)
                         candidates = self._apply_candidate_policy(candidates)
@@ -456,6 +544,46 @@ class RecordSearchPipeline:
                     candidates = base_candidates
             else:
                 candidates = base_candidates
+
+            if (
+                plan.expansion_strategy is not None
+                and _needs_conditional_expansion(candidates, limit)
+            ):
+                expanded_query = await self._expand_query(
+                    query,
+                    plan.expansion_strategy,
+                    diagnostics,
+                )
+                if expanded_query is not None and expanded_query != query:
+                    expansion_ranking = await self._capture_optional_stage(
+                        "keyword",
+                        plan.keyword_enabled,
+                        lambda: self._acquire_keyword(
+                            expanded_query,
+                            plan.keyword_candidate_budget,
+                            filters,
+                        ),
+                        failures,
+                    )
+                    if expansion_ranking:
+                        rankings["expansion"] = expansion_ranking
+                        fused_scores = fuse_reciprocal_rank(
+                            {
+                                strategy: [
+                                    hit.storage_key for hit in ranking
+                                ]
+                                for strategy, ranking in rankings.items()
+                            },
+                            k=self._config.rrf_k,
+                            strategy_weights=(
+                                plan.fusion_weight_map
+                                if self._config.weighted_rrf_enabled
+                                else None
+                            ),
+                        )
+                        candidates = self._apply_candidate_policy(
+                            self._build_candidates(fused_scores, rankings)
+                        )
 
             candidates = self._apply_score_adjustments(candidates)
             candidates = self._sort_candidates(candidates)
@@ -505,6 +633,7 @@ class RecordSearchPipeline:
             failures=tuple(failures),
             missing_record_ids=tuple(missing_record_ids),
             cache_diagnostics=tuple(cache_diagnostics),
+            diagnostics=tuple(diagnostics),
         )
 
     async def _acquire_keyword(
@@ -520,6 +649,58 @@ class RecordSearchPipeline:
             await _call_async(store.search, query, acquisition_limit, filters),
             filters,
         )
+
+    async def _capture_optional_stage(
+        self,
+        stage: FailureStage,
+        enabled: bool,
+        operation: Callable[[], Awaitable[Any]],
+        failures: list[RecordSearchFailure],
+    ) -> Any | None:
+        if not enabled:
+            return None
+        return self._consume_stage(
+            await _capture_stage(stage, operation),
+            failures,
+        )
+
+    async def _expand_query(
+        self,
+        query: str,
+        strategy: str,
+        diagnostics: list[str],
+    ) -> str | None:
+        if strategy != "query_expansion":
+            diagnostics.append(f"expansion:fallback:unsupported:{strategy}")
+            return None
+        vector_store = self._vector_store
+        expand_query = getattr(vector_store, "expand_query", None)
+        if not callable(expand_query):
+            diagnostics.append("expansion:skip:unsupported")
+            return None
+        try:
+            expanded = await asyncio.wait_for(
+                _call_async(
+                    expand_query,
+                    query,
+                    top_k=self._config.expansion_top_k,
+                    similarity_threshold=self._config.expansion_similarity_threshold,
+                ),
+                timeout=self._config.expansion_timeout_s,
+            )
+        except TimeoutError:
+            diagnostics.append("expansion:fallback:timeout")
+            return None
+        except Exception as error:  # noqa: BLE001 - expansion is optional
+            diagnostics.append(
+                f"expansion:fallback:{type(error).__name__}"
+            )
+            return None
+        if not isinstance(expanded, str) or not expanded.strip():
+            diagnostics.append("expansion:fallback:empty")
+            return None
+        diagnostics.append("expansion:applied")
+        return expanded
 
     def _candidate_cache_key(
         self,
@@ -547,11 +728,19 @@ class RecordSearchPipeline:
                     {
                         "name": self._routing_fingerprint,
                         "candidate_multiplier": self._config.candidate_multiplier,
+                        "keyword_candidate_multiplier": (
+                            self._config.keyword_candidate_multiplier
+                        ),
+                        "vector_candidate_multiplier": (
+                            self._config.vector_candidate_multiplier
+                        ),
                         "minimum_candidate_limit": (
                             self._config.minimum_candidate_limit
                         ),
                         "rrf_k": self._config.rrf_k,
+                        "weighted_rrf_enabled": self._config.weighted_rrf_enabled,
                         "graph_fusion": self._config.graph_fusion,
+                        "graph_enabled": self._config.graph_enabled,
                         "graph_depth": self._config.graph_depth,
                         "max_graph_seeds": self._config.max_graph_seeds,
                         "max_neighbors_per_seed": (
@@ -643,6 +832,7 @@ class RecordSearchPipeline:
         rankings: Mapping[str, Sequence[RecordHit]],
         *,
         query: str | None = None,
+        plan: QueryPlan | None = None,
     ) -> list[RecordHit]:
         if embedding is None:
             if query is None:
@@ -661,6 +851,11 @@ class RecordSearchPipeline:
             if candidate_ids is not None:
                 vector_filters = dict(filters)
                 vector_filters["candidate_ids"] = list(candidate_ids)
+        elif plan is not None and plan.vector_candidates_keyword_bounded:
+            vector_filters = dict(filters)
+            vector_filters["candidate_storage_keys"] = [
+                hit.storage_key for hit in rankings.get("keyword", ())
+            ]
         vector_store = self._vector_store
         if vector_store is None:
             return []
@@ -898,13 +1093,15 @@ class RecordSearchPipeline:
         ]
 
     async def _expand_graph(
-        self, candidates: Sequence[RecordSearchCandidate]
+        self,
+        candidates: Sequence[RecordSearchCandidate],
+        plan: QueryPlan,
     ) -> list[RecordHit]:
         graph_store = self._graph_store
         if graph_store is None:
             return []
         graph_seeds = self._sort_candidates(candidates)[
-            : self._config.max_graph_seeds
+            : plan.graph_seed_budget
         ]
         seed_scores = {
             candidate.storage_key: candidate.score
@@ -916,7 +1113,11 @@ class RecordSearchPipeline:
             candidate.storage_key: candidate
             for candidate in graph_seeds
         }
-        neighbors_by_seed = await self._load_graph_neighbors(graph_store, graph_seeds)
+        neighbors_by_seed = await self._load_graph_neighbors(
+            graph_store,
+            graph_seeds,
+            plan,
+        )
         for seed_key in seed_scores:
             seed = seed_by_key[seed_key]
             raw_neighbors = neighbors_by_seed.get(seed_key, ())
@@ -938,7 +1139,7 @@ class RecordSearchPipeline:
             seed_scores,
             lambda seed_id: edges_by_seed[seed_id],
             discounts,
-            max_seed_count=self._config.max_graph_seeds,
+            max_seed_count=plan.graph_seed_budget,
             max_neighbors_per_seed=self._config.max_neighbors_per_seed,
         )
         return sorted(
@@ -953,6 +1154,7 @@ class RecordSearchPipeline:
         self,
         graph_store: GraphStore | AsyncGraphStore,
         graph_seeds: Sequence[RecordSearchCandidate],
+        plan: QueryPlan,
     ) -> dict[str, Sequence[GraphNeighbor | tuple[str, str, float]]]:
         identities = [candidate.identity for candidate in graph_seeds]
         neighbors_many = getattr(graph_store, "neighbors_many", None)
@@ -960,7 +1162,7 @@ class RecordSearchPipeline:
             result = await _call_async(
                 neighbors_many,
                 identities,
-                depth=self._config.graph_depth,
+                depth=plan.graph_depth,
             )
             return dict(
                 cast(
@@ -982,7 +1184,7 @@ class RecordSearchPipeline:
                     neighbors = await _call_async(
                         graph_store.neighbors,
                         seed.identity,
-                        depth=self._config.graph_depth,
+                        depth=plan.graph_depth,
                     )
                 except TypeError:
                     logger.warning(
@@ -993,7 +1195,7 @@ class RecordSearchPipeline:
                     neighbors = await _call_async(
                         graph_store.neighbors,
                         seed.record_id,
-                        depth=self._config.graph_depth,
+                        depth=plan.graph_depth,
                     )
                 return seed.storage_key, cast(
                     Sequence[GraphNeighbor | tuple[str, str, float]],
@@ -1083,8 +1285,27 @@ class RecordSearchPipeline:
             raise ValueError("candidate_multiplier must be positive")
         if self._config.minimum_candidate_limit < 1:
             raise ValueError("minimum_candidate_limit must be positive")
+        for name in (
+            "keyword_candidate_multiplier",
+            "vector_candidate_multiplier",
+        ):
+            value = getattr(self._config, name)
+            if value is not None and value < 1:
+                raise ValueError(f"{name} must be positive")
         if self._config.rrf_k <= 0:
             raise ValueError("rrf_k must be positive")
+        if self._config.artifact_confidence_threshold < 0:
+            raise ValueError("artifact_confidence_threshold must not be negative")
+        if self._config.rerank_budget < 0:
+            raise ValueError("rerank_budget must not be negative")
+        if self._config.expansion_timeout_s <= 0:
+            raise ValueError("expansion_timeout_s must be positive")
+        if self._config.expansion_top_k < 1:
+            raise ValueError("expansion_top_k must be positive")
+        if self._config.expansion_similarity_threshold < 0:
+            raise ValueError(
+                "expansion_similarity_threshold must not be negative"
+            )
         if self._config.graph_fusion not in {"rrf", "max"}:
             raise ValueError("graph_fusion must be 'rrf' or 'max'")
         if self._config.graph_depth < 1:
@@ -1253,6 +1474,48 @@ async def _gather_tasks(
                 task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
         raise
+
+
+def _plan_diagnostics(plan: QueryPlan) -> list[str]:
+    diagnostics = [
+        f"query_plan:type:{plan.query_type.name.lower()}",
+        f"query_plan:signals:{','.join(plan.signals.names) or 'none'}",
+        f"query_plan:lanes:{','.join(plan.enabled_lanes) or 'none'}",
+        (
+            "query_plan:budgets:"
+            f"keyword={plan.keyword_candidate_budget},"
+            f"vector={plan.vector_candidate_budget},"
+            f"graph_seeds={plan.graph_seed_budget},"
+            f"rerank={plan.rerank_budget}"
+        ),
+    ]
+    diagnostics.extend(
+        f"query_plan:skip:{reason}"
+        for reason in plan.diagnostic_skip_reasons
+    )
+    return diagnostics
+
+
+def _artifact_results_are_confident(
+    ranking: Sequence[RecordHit],
+    *,
+    requested_limit: int,
+    threshold: float,
+) -> bool:
+    return (
+        len(ranking) >= requested_limit
+        and bool(ranking)
+        and ranking[0].score >= threshold
+    )
+
+
+def _needs_conditional_expansion(
+    candidates: Sequence[RecordSearchCandidate],
+    requested_limit: int,
+) -> bool:
+    if len(candidates) < requested_limit:
+        return True
+    return not candidates or candidates[0].score <= 0.0
 
 
 def _find_stage(
