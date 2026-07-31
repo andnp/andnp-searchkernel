@@ -1069,6 +1069,51 @@ class PGGraphStore:
                 cursor.close()
             self.conn_pool.put_connection(conn)
 
+    def delete_edges(
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+    ) -> None:
+        if not edges:
+            return
+        conn = self.conn_pool.get_connection()
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            rows = [
+                (
+                    edge.source.workspace_id or "",
+                    edge.source.source_kind,
+                    edge.source.source_id,
+                    edge.target.workspace_id or "",
+                    edge.target.source_kind,
+                    edge.target.source_id,
+                    edge.edge_type,
+                )
+                if isinstance(edge, GraphEdge)
+                else ("", "legacy", edge[0], "", "legacy", edge[1], edge[2])
+                for edge in edges
+            ]
+            cursor.executemany(
+                """
+                DELETE FROM graph_edges
+                WHERE source_workspace_id = %s
+                  AND source_kind = %s
+                  AND source_id = %s
+                  AND target_workspace_id = %s
+                  AND target_kind = %s
+                  AND target_id = %s
+                  AND edge_type = %s;
+                """,
+                rows,
+            )
+            if cursor.rowcount:
+                _bump_epochs(cursor, graph=True)
+            conn.commit()
+        finally:
+            if cursor is not None:
+                cursor.close()
+            self.conn_pool.put_connection(conn)
+
     def graph_epoch(self) -> int:
         return _read_epochs(self.conn_pool)["graph"]
 

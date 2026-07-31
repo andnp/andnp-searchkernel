@@ -127,6 +127,13 @@ class GraphStore(Protocol):
         """
         ...
 
+    def delete_edges(
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+    ) -> None:
+        """Delete graph edges and advance the graph mutation epoch."""
+        ...
+
     def neighbors(
         self,
         record_id: str | RecordIdentity,

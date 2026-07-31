@@ -1088,6 +1088,7 @@ class LocalRecordBackend:
             try:
                 existing_records = 0
                 existing_vectors = 0
+                deleted_graph_edges = 0
                 for record_id in record_ids:
                     record = self.hydrate_record(record_id)
                     if record is None:
@@ -1123,10 +1124,16 @@ class LocalRecordBackend:
                         "DELETE FROM local_records WHERE storage_key = ?",
                         (record.storage_key,),
                     )
+                    deleted_graph_edges += conn.execute(
+                        "DELETE FROM local_graph_edges "
+                        "WHERE source_id = ? OR target_id = ?",
+                        (record.storage_key, record.storage_key),
+                    ).rowcount
                 self._bump_epoch(
                     conn,
                     keyword=existing_records > 0,
                     vector=existing_vectors > 0,
+                    graph=deleted_graph_edges > 0,
                 )
                 conn.commit()
             except Exception:
@@ -1302,6 +1309,40 @@ class LocalRecordBackend:
                     rows,
                 )
                 self._bump_epoch(conn, graph=True)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+    def delete_edges(
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+    ) -> None:
+        rows = [
+            (
+                edge.source.storage_key,
+                edge.target.storage_key,
+                edge.edge_type,
+            )
+            if isinstance(edge, GraphEdge)
+            else edge[:3]
+            for edge in edges
+        ]
+        if not rows:
+            return
+        with self._lock:
+            conn = self._db.get_connection()
+            try:
+                changes_before = conn.total_changes
+                conn.executemany(
+                    """
+                    DELETE FROM local_graph_edges
+                    WHERE source_id = ? AND target_id = ? AND edge_type = ?
+                    """,
+                    rows,
+                )
+                if conn.total_changes > changes_before:
+                    self._bump_epoch(conn, graph=True)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -1608,6 +1649,12 @@ class LocalGraphStore:
 
     def graph_epoch(self) -> int:
         return self._backend.graph_epoch()
+
+    def delete_edges(
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+    ) -> None:
+        self._backend.delete_edges(edges)
 
     def epochs(self) -> dict[str, int]:
         return self._backend.epochs()
