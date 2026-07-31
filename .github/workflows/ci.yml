@@ -34,3 +34,6 @@ jobs:
 
       - name: Run unit tests
         run: uv run pytest tests/unit -m "not slow and not real_embeddings" -v
+
+      - name: Run integration tests
+        run: uv run pytest tests/integration -m "not slow and not real_embeddings" -v

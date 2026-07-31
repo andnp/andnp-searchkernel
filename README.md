@@ -6,6 +6,20 @@ A domain-agnostic search/indexing kernel for building hybrid vector + keyword + 
 
 **Pre-alpha, extraction in progress.** This library is being extracted from [`mcp-markdown-ragdocs`](https://github.com/andnp/mcp-markdown-ragdocs) to enable reuse across arbitrary content sources and search backends.
 
+## Optional backends
+
+The core package provides the domain models, ports, search pipeline, and
+evaluation primitives. Install only the integrations required by an
+application:
+
+```bash
+pip install andnp-searchkernel[pgvector,huggingface,markdown]
+```
+
+Available extras are `faiss`, `pgvector`, `huggingface`, and `markdown`.
+FAISS and pgvector implement the same record-oriented backend contracts; they
+can be selected independently or used together during migrations.
+
 ## Integration tests
 
 The pgvector integration tests automatically start a temporary
