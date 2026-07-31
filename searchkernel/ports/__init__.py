@@ -7,7 +7,11 @@ Dependency rule: ports import only from domain/ and stdlib/typing.
 """
 
 from searchkernel.ports.chunking_config import ChunkTuningConfig
-from searchkernel.ports.content_source import ContentSource, SearchableSource
+from searchkernel.ports.content_source import (
+    ContentSource,
+    RecordIngestor,
+    SearchableSource,
+)
 from searchkernel.ports.embedding import (
     EmbeddingBatchProvider,
     EmbeddingProvider,
@@ -39,6 +43,7 @@ __all__ = [
     "KeywordStore",
     "LLMProvider",
     "OrchestratorConfig",
+    "RecordIngestor",
     "Reranker",
     "SearchAPI",
     "SearchableSource",

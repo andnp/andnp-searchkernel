@@ -10,6 +10,7 @@ from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
     ContentSource,
     EmbeddingProvider,
+    RecordIngestor,
     SearchableSource,
     SearchAPI,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "ContentSource",
     "EmbeddingProvider",
     "Record",
+    "RecordIngestor",
     "ScoredRef",
     "SearchAPI",
     "SearchKernel",

@@ -53,6 +53,15 @@ class ContentSource(Protocol):
 
 
 @runtime_checkable
+class RecordIngestor(Protocol):
+    """Minimal indexing surface required to ingest source records."""
+
+    def index_record(self, record: Record) -> bool:
+        """Index one source-agnostic record."""
+        ...
+
+
+@runtime_checkable
 class SearchableSource(Protocol):
     """Federated source: source runs its own retrieval; kernel fuses results.
 
