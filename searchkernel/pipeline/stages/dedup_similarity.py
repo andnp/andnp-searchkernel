@@ -19,7 +19,7 @@ _GET_EMBEDDING_KEY = "get_embedding"
 class SimilarityDedupStage:
     """Drop candidates whose embedding cosine-matches an already-kept one.
 
-    Expects `context.metadata["get_embedding"]`
+    Expects `context.state["get_embedding"]`
     (`Callable[[str], list[float] | None]`). A no-op below two
     candidates, matching SearchPipeline.process.
     """
@@ -33,7 +33,7 @@ class SimilarityDedupStage:
         if len(context.candidates) <= 1:
             return context
 
-        get_embedding = context.metadata[_GET_EMBEDDING_KEY]
+        get_embedding = context.state.get_embedding
         deduped, _clusters_merged = deduplicate_by_similarity(
             context.candidates, get_embedding, self._threshold
         )

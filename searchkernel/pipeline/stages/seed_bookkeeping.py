@@ -12,10 +12,9 @@ computed at the same point in the pipeline.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 from searchkernel.search.classifier import QueryType
 
 _VECTOR_RESULTS_KEY = "vector_results"
@@ -93,7 +92,7 @@ def should_skip_expensive_factual_enrichments(
 class SeedBookkeepingStage:
     """Build graph seed scores and chunk/doc-id bookkeeping from retrieval results.
 
-    Expects `context.metadata["vector_results"]`/`["keyword_results"]`
+    Expects `context.state["vector_results"]`/`["keyword_results"]`
     (`list[dict]`) and `["query_type"]` (`QueryType`, from `RoutingStage`).
     Writes `["seed_scores"]` (`dict[str, float]`, pre-tag-expansion best
     score per doc id), `["chunk_id_to_doc_id"]` (`dict[str, str]`),
@@ -103,9 +102,9 @@ class SeedBookkeepingStage:
     name = "seed_bookkeeping"
 
     def run(self, context: SearchContext) -> SearchContext:
-        vector_results = context.metadata[_VECTOR_RESULTS_KEY]
-        keyword_results = context.metadata[_KEYWORD_RESULTS_KEY]
-        query_type = context.metadata[_QUERY_TYPE_KEY]
+        vector_results = context.state.vector_results
+        keyword_results = context.state.keyword_results
+        query_type = context.state.query_type
 
         all_doc_ids: set[str] = set()
         chunk_id_to_doc_id: dict[str, str] = {}
@@ -115,7 +114,7 @@ class SeedBookkeepingStage:
             all_doc_ids.add(doc_id)
             chunk_id_to_doc_id[chunk_id] = doc_id
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_SEED_SCORES_KEY] = build_graph_seed_scores(
             vector_results, keyword_results
         )
@@ -124,4 +123,4 @@ class SeedBookkeepingStage:
         metadata[_SKIP_TAG_EXPANSION_KEY] = should_skip_expensive_factual_enrichments(
             query_type, vector_results, keyword_results
         )
-        return replace(context, metadata=metadata)
+        return replace_state(context, metadata)

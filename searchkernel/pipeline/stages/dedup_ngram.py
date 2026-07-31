@@ -18,7 +18,7 @@ _GET_CONTENT_KEY = "get_content"
 class NgramDedupStage:
     """Drop candidates whose content n-gram-overlaps an already-kept one.
 
-    Expects `context.metadata["get_content"]` (`Callable[[str], str | None]`).
+    Expects `context.state["get_content"]` (`Callable[[str], str | None]`).
     A no-op below two candidates, matching SearchPipeline.process.
     """
 
@@ -31,7 +31,7 @@ class NgramDedupStage:
         if len(context.candidates) <= 1:
             return context
 
-        get_content = context.metadata[_GET_CONTENT_KEY]
+        get_content = context.state.get_content
         deduped, _removed = deduplicate_by_ngram(
             context.candidates, get_content, self._threshold
         )

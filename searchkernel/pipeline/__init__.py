@@ -6,6 +6,6 @@ Concrete stages live under `searchkernel.pipeline.stages`.
 """
 
 from searchkernel.pipeline.spec import PipelineSpec, StageSpec
-from searchkernel.pipeline.stage import SearchContext, SearchStage
+from searchkernel.pipeline.stage import SearchContext, SearchStage, SearchState
 
-__all__ = ["PipelineSpec", "SearchContext", "SearchStage", "StageSpec"]
+__all__ = ["PipelineSpec", "SearchContext", "SearchStage", "SearchState", "StageSpec"]

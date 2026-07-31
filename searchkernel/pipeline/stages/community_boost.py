@@ -29,7 +29,7 @@ class CommunityBoostStage:
     """Boost candidate scores by graph-community membership.
 
     Expects `context.candidates` (`list[tuple[chunk_id, score]]`),
-    `context.metadata["seed_doc_ids"]` (`set[str]`) and
+    `context.state["seed_doc_ids"]` (`set[str]`) and
     `["chunk_id_to_doc_id"]` (`dict[str, str]`). Optionally mutates
     `["result_provenance"]` (`dict[str, SearchResultProvenance]`) in
     place, recording the applied boost. Writes `context.candidates`
@@ -43,9 +43,9 @@ class CommunityBoostStage:
 
     def run(self, context: SearchContext) -> SearchContext:
         fused = context.candidates
-        seed_doc_ids = context.metadata[_SEED_DOC_IDS_KEY]
-        chunk_id_to_doc_id = context.metadata[_CHUNK_ID_TO_DOC_ID_KEY]
-        result_provenance = context.metadata.get(_RESULT_PROVENANCE_KEY)
+        seed_doc_ids = context.state.seed_doc_ids
+        chunk_id_to_doc_id = context.state.chunk_id_to_doc_id
+        result_provenance = context.state.result_provenance
 
         chunk_doc_ids = []
         for chunk_id, _score in fused:

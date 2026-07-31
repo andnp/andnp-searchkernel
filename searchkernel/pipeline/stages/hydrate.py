@@ -9,7 +9,7 @@ as the orchestrator method did before extraction.
 Chunks that fail to hydrate get a placeholder `ChunkResult` (empty
 content/paths) so callers still see one result per candidate -- same as
 before. This stage stays pure with respect to `context`: it reports
-failed-hydration chunk ids via `context.metadata["missing_chunk_ids"]`
+failed-hydration chunk ids via `context.state["missing_chunk_ids"]`
 rather than queuing a reindex itself; the caller (currently the
 orchestrator) still owns deciding what to do about missing chunks.
 """
@@ -17,10 +17,9 @@ orchestrator) still owns deciding what to do about missing chunks.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 from searchkernel.search.path_utils import extract_doc_id_from_chunk_id
 
 if TYPE_CHECKING:
@@ -37,9 +36,9 @@ class HydrateStage:
     """Turn `context.candidates` into `ChunkResult`s.
 
     Expects `context.candidates` (`list[tuple[chunk_id, score]]`) and
-    optionally `context.metadata["result_provenance"]`
+    optionally `context.state["result_provenance"]`
     (`dict[str, SearchResultProvenance]`). Writes
-    `context.metadata["chunk_results"]` (`list[ChunkResult]`, one per
+    `context.state["chunk_results"]` (`list[ChunkResult]`, one per
     candidate, same order) and `["missing_chunk_ids"]` (`list[str]`, the
     chunk ids that failed to hydrate).
     """
@@ -52,7 +51,7 @@ class HydrateStage:
     def run(self, context: SearchContext) -> SearchContext:
         from searchkernel.domain import ChunkResult
 
-        result_provenance = context.metadata.get(_RESULT_PROVENANCE_KEY)
+        result_provenance = context.state.result_provenance
         chunk_results: list[ChunkResult] = []
         missing_chunk_ids: list[str] = []
 
@@ -80,7 +79,7 @@ class HydrateStage:
                 )
             )
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_CHUNK_RESULTS_KEY] = chunk_results
         metadata[_MISSING_CHUNK_IDS_KEY] = missing_chunk_ids
-        return replace(context, metadata=metadata)
+        return replace_state(context, metadata)

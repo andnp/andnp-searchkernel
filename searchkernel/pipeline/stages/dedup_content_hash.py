@@ -19,12 +19,12 @@ _GET_CONTENT_KEY = "get_content"
 class ContentHashDedupStage:
     """Drop candidates whose content hashes to an already-seen value.
 
-    Expects `context.metadata["get_content"]` (`Callable[[str], str | None]`).
+    Expects `context.state["get_content"]` (`Callable[[str], str | None]`).
     """
 
     name = "dedup_content_hash"
 
     def run(self, context: SearchContext) -> SearchContext:
-        get_content = context.metadata[_GET_CONTENT_KEY]
+        get_content = context.state.get_content
         deduped, _removed = deduplicate_by_content_hash(context.candidates, get_content)
         return replace(context, candidates=deduped)

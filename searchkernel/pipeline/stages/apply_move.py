@@ -14,11 +14,10 @@ of leaving those manager-level concerns outside the stage.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Protocol
 
 from searchkernel.domain import Chunk
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 
 _OLD_DOC_ID_KEY = "old_doc_id"
 _NEW_DOC_ID_KEY = "new_doc_id"
@@ -51,9 +50,9 @@ class _HashMover(Protocol):
 class ApplyMoveStage:
     """Rename a moved document's chunks across indices without re-embedding.
 
-    Expects `context.metadata["old_doc_id"]`, `["new_doc_id"]`, and
+    Expects `context.state["old_doc_id"]`, `["new_doc_id"]`, and
     `["new_chunks"]` (`list[Chunk]`). Writes
-    `context.metadata["move_applied"]` (bool -- `False` means the
+    `context.state["move_applied"]` (bool -- `False` means the
     caller should fall back to full re-index), `["moved_chunk_count"]`
     (int), and `["hash_store_updated"]` (bool -- `False` only when no
     stored hashes existed for `old_doc_id`, meaning the hash store was
@@ -77,19 +76,19 @@ class ApplyMoveStage:
         self._threshold = move_detection_threshold
 
     def run(self, context: SearchContext) -> SearchContext:
-        old_doc_id: str = context.metadata[_OLD_DOC_ID_KEY]
-        new_doc_id: str = context.metadata[_NEW_DOC_ID_KEY]
-        new_chunks: list[Chunk] = context.metadata[_NEW_CHUNKS_KEY]
+        old_doc_id: str = context.state.old_doc_id
+        new_doc_id: str = context.state.new_doc_id
+        new_chunks: list[Chunk] = context.state.new_chunks
 
         applied, moved_count, hash_store_updated = self._apply(
             old_doc_id, new_doc_id, new_chunks
         )
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_MOVE_APPLIED_KEY] = applied
         metadata[_MOVED_CHUNK_COUNT_KEY] = moved_count
         metadata[_HASH_STORE_UPDATED_KEY] = hash_store_updated
-        return replace(context, metadata=metadata)
+        return replace_state(context, metadata)
 
     def _apply(
         self, old_doc_id: str, new_doc_id: str, new_chunks: list[Chunk]

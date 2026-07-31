@@ -18,10 +18,9 @@ set) from the exact same merged `chunk_id_to_doc_id`/`all_doc_ids`.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 from typing import Any
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 
 ExpandQueryWithTags = Callable[[list[dict[str, Any]], int], list[dict[str, Any]]]
 
@@ -40,7 +39,7 @@ _EXCLUDED_CHUNK_IDS_KEY = "excluded_chunk_ids"
 class TagExpansionStage:
     """Expand results via tag-graph traversal, merging new chunks into bookkeeping.
 
-    Expects `context.metadata["vector_results"]`/`["keyword_results"]`
+    Expects `context.state["vector_results"]`/`["keyword_results"]`
     (`list[dict]`), `["chunk_id_to_doc_id"]` (`dict[str, str]`),
     `["all_doc_ids"]` (`set[str]`), `["top_k"]` (`int`) and optionally
     `["skip_tag_expansion"]` (`bool`, default `False`). Writes updated
@@ -58,12 +57,12 @@ class TagExpansionStage:
         self._expand_query_with_tags = expand_query_with_tags
 
     def run(self, context: SearchContext) -> SearchContext:
-        vector_results = list(context.metadata[_VECTOR_RESULTS_KEY])
-        keyword_results = context.metadata[_KEYWORD_RESULTS_KEY]
-        chunk_id_to_doc_id = dict(context.metadata[_CHUNK_ID_TO_DOC_ID_KEY])
-        all_doc_ids = set(context.metadata[_ALL_DOC_IDS_KEY])
-        top_k = context.metadata[_TOP_K_KEY]
-        skip = context.metadata.get(_SKIP_KEY, False)
+        vector_results = list(context.state.vector_results)
+        keyword_results = context.state.keyword_results
+        chunk_id_to_doc_id = dict(context.state.chunk_id_to_doc_id)
+        all_doc_ids = set(context.state.all_doc_ids)
+        top_k = context.state.top_k
+        skip = context.state.skip_tag_expansion
 
         if skip:
             tag_expanded_results: list[dict[str, Any]] = []
@@ -84,7 +83,7 @@ class TagExpansionStage:
                 applied.append(result)
                 tag_expansion_count += 1
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_VECTOR_RESULTS_KEY] = vector_results
         metadata[_CHUNK_ID_TO_DOC_ID_KEY] = chunk_id_to_doc_id
         metadata[_ALL_DOC_IDS_KEY] = all_doc_ids
@@ -92,4 +91,4 @@ class TagExpansionStage:
         metadata[_APPLIED_TAG_EXPANSION_RESULTS_KEY] = applied
         metadata[_SEED_DOC_IDS_KEY] = all_doc_ids
         metadata[_EXCLUDED_CHUNK_IDS_KEY] = set(chunk_id_to_doc_id)
-        return replace(context, metadata=metadata)
+        return replace_state(context, metadata)

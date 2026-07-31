@@ -18,11 +18,10 @@ data transform, same as `RetrieveStage`'s reads.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Protocol
 
 from searchkernel.domain import Chunk
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 
 _CHUNKS_KEY = "chunks"
 _INDEXED_CHUNK_IDS_KEY = "indexed_chunk_ids"
@@ -41,10 +40,10 @@ class _GraphSink(Protocol):
 
 
 class IndexStage:
-    """Write `context.metadata["chunks"]` into vector, keyword, and graph.
+    """Write `context.state["chunks"]` into vector, keyword, and graph.
 
-    Expects `context.metadata["chunks"]` (`list[Chunk]`). Writes
-    `context.metadata["indexed_chunk_ids"]` (`list[str]`, the chunk ids
+    Expects `context.state["chunks"]` (`list[Chunk]`). Writes
+    `context.state["indexed_chunk_ids"]` (`list[str]`, the chunk ids
     written, same order) for observability.
     """
 
@@ -56,13 +55,13 @@ class IndexStage:
         self._graph = graph
 
     def run(self, context: SearchContext) -> SearchContext:
-        chunks: list[Chunk] = context.metadata[_CHUNKS_KEY]
+        chunks: list[Chunk] = context.state.chunks
 
         self._vector.add_chunks(chunks)
         self._keyword.add_chunks(chunks)
         for chunk in chunks:
             self._graph.add_node(chunk.chunk_id, chunk.metadata)
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_INDEXED_CHUNK_IDS_KEY] = [chunk.chunk_id for chunk in chunks]
-        return replace(context, metadata=metadata)
+        return replace_state(context, metadata)

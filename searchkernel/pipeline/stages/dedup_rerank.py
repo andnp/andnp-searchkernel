@@ -10,7 +10,7 @@ behavior change. Each finer stage's before/after candidate-count delta
 reproduces the CompressionStats SearchPipeline.process computed inline.
 
 Per-query callables (embedding/content lookups) and top_n don't fit a pure
-SearchContext value, so they travel in context.metadata rather than as
+SearchContext value, so they travel in context.state rather than as
 extra run() parameters, keeping the SearchStage.run(context) -> context
 contract strict.
 """
@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from searchkernel.domain import CompressionStats
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 from searchkernel.pipeline.stages.dedup_content_hash import ContentHashDedupStage
 from searchkernel.pipeline.stages.dedup_ngram import NgramDedupStage
 from searchkernel.pipeline.stages.dedup_similarity import SimilarityDedupStage
@@ -40,9 +40,9 @@ _NGRAM_DEDUP_THRESHOLD = 0.7
 class DedupRerankStage:
     """Filter/dedup/doc-limit/rerank a fused candidate list (context.candidates).
 
-    Expects `context.metadata` to carry `get_embedding`, `get_content`
+    Expects `context.state` to carry `get_embedding`, `get_content`
     (both `Callable[[str], ...]`) and `top_n` (int); writes the resulting
-    `CompressionStats` back to `context.metadata["compression_stats"]`.
+    `CompressionStats` back to `context.state["compression_stats"]`.
     """
 
     name = "dedup_rerank"
@@ -74,9 +74,9 @@ class DedupRerankStage:
         return cached_get_content
 
     def run(self, context: SearchContext) -> SearchContext:
-        get_embedding = context.metadata[_GET_EMBEDDING_KEY]
-        get_content = context.metadata[_GET_CONTENT_KEY]
-        top_n = context.metadata[_TOP_N_KEY]
+        get_embedding = context.state.get_embedding
+        get_content = context.state.get_content
+        top_n = context.state.top_n
 
         cached_get_content = self._build_cached_content_provider(get_content)
         original_count = len(context.candidates)
@@ -124,6 +124,6 @@ class DedupRerankStage:
             clusters_merged=clusters_merged,
         )
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_COMPRESSION_STATS_KEY] = stats
-        return replace(context, candidates=final, metadata=metadata)
+        return replace(replace_state(context, metadata), candidates=final)

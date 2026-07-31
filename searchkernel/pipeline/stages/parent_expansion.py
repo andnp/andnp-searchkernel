@@ -8,7 +8,7 @@ tracks under separate stats counters) so it composes over either
 orchestrator method did before extraction.
 
 Stays pure with respect to `context`: chunks/parents that fail to
-resolve are reported via `context.metadata["missing_chunk_ids"]`/
+resolve are reported via `context.state["missing_chunk_ids"]`/
 `["missing_parent_chunk_ids"]` rather than queuing a reindex directly --
 same pattern as `HydrateStage`. The caller (currently the orchestrator)
 still owns deciding what to do about missing chunks.
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 from searchkernel.pipeline.stages.project_uplift import GetChunk
 
 _RESULT_PROVENANCE_KEY = "result_provenance"
@@ -30,7 +30,7 @@ class ParentExpansionStage:
     """Expand child chunks in `context.candidates` to their parent chunk.
 
     Expects `context.candidates` (`list[tuple[chunk_id, score]]`) and
-    optionally `context.metadata["result_provenance"]`
+    optionally `context.state["result_provenance"]`
     (`dict[str, SearchResultProvenance]`, mutated in place for expanded
     parents). Writes `context.candidates` (child ids replaced by parent
     ids where a parent exists, deduped), `["missing_chunk_ids"]` and
@@ -44,7 +44,7 @@ class ParentExpansionStage:
         self._get_parent_chunk = get_parent_chunk
 
     def run(self, context: SearchContext) -> SearchContext:
-        result_provenance = context.metadata.get(_RESULT_PROVENANCE_KEY)
+        result_provenance = context.state.result_provenance
 
         seen_parents: set[str] = set()
         expanded: list[tuple[str, float]] = []
@@ -83,7 +83,7 @@ class ParentExpansionStage:
                         result_provenance[parent_chunk_id_str] = parent_provenance
                 expanded.append((parent_chunk_id_str, score))
 
-        metadata_out = dict(context.metadata)
+        metadata_out = dict(context.state)
         metadata_out[_MISSING_CHUNK_IDS_KEY] = missing_chunk_ids
         metadata_out[_MISSING_PARENT_CHUNK_IDS_KEY] = missing_parent_chunk_ids
-        return replace(context, candidates=expanded, metadata=metadata_out)
+        return replace(replace_state(context, metadata_out), candidates=expanded)

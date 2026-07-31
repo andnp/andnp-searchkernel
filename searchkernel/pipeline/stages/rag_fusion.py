@@ -50,7 +50,7 @@ class RAGFusionConfig:
 class RAGFusionStage:
     """Retrieve over LLM-generated query variants, then RRF-fuse them.
 
-    Expects `context.metadata` to carry `top_k` (int), `excluded_files`
+    Expects `context.state` to carry `top_k` (int), `excluded_files`
     (set[str] | None) and `docs_root` (Path) -- the same shape
     `RetrieveStage` expects. When `config.enabled` is `False` (the
     default), `run` returns `context` unchanged. When enabled, writes
@@ -73,9 +73,9 @@ class RAGFusionStage:
         if not self._config.enabled:
             return context
 
-        top_k = context.metadata[_TOP_K_KEY]
-        excluded_files = context.metadata.get(_EXCLUDED_FILES_KEY)
-        docs_root = context.metadata[_DOCS_ROOT_KEY]
+        top_k = context.state.top_k
+        excluded_files = context.state.excluded_files
+        docs_root = context.state.docs_root
 
         variants = await self._generate_query_variants(
             context.query, self._config.num_variants

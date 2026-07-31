@@ -13,10 +13,9 @@ should prune instead of reindex).
 
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 from searchkernel.search.path_utils import resolve_doc_path, resolve_doc_path_multi_root
 
 _DOC_ID_KEY = "doc_id"
@@ -29,24 +28,24 @@ _RESOLVED_PATH_KEY = "resolved_path"
 class RepairStage:
     """Resolve a stale doc_id back to its on-disk file path for reindexing.
 
-    Expects `context.metadata["doc_id"]` (str), `["docs_path"]`
+    Expects `context.state["doc_id"]` (str), `["docs_path"]`
     (`Path`), `["documents_roots"]` (`list[Path]`) and `["suffixes"]`
-    (`list[str]`). Writes `context.metadata["resolved_path"]`
+    (`list[str]`). Writes `context.state["resolved_path"]`
     (`Path | None`).
     """
 
     name = "repair"
 
     def run(self, context: SearchContext) -> SearchContext:
-        doc_id: str = context.metadata[_DOC_ID_KEY]
-        docs_path: Path = context.metadata[_DOCS_PATH_KEY]
-        documents_roots: list[Path] = context.metadata[_DOCUMENTS_ROOTS_KEY]
-        suffixes: list[str] = context.metadata[_SUFFIXES_KEY]
+        doc_id: str = context.state.doc_id
+        docs_path: Path = context.state.docs_path
+        documents_roots: list[Path] = context.state.documents_roots
+        suffixes: list[str] = context.state.suffixes
 
         resolved_path = resolve_doc_path_multi_root(doc_id, documents_roots, suffixes)
         if resolved_path is None:
             resolved_path = resolve_doc_path(doc_id, docs_path, suffixes)
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_RESOLVED_PATH_KEY] = resolved_path
-        return replace(context, metadata=metadata)
+        return replace_state(context, metadata)

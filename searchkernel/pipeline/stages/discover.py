@@ -11,11 +11,10 @@ made before extraction.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 
 from searchkernel.indexing.discovery import discover_files, discover_files_multi_root
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 
 _DOCUMENTS_PATH_KEY = "documents_path"
 _DOCUMENTS_ROOTS_KEY = "documents_roots"
@@ -28,24 +27,28 @@ _DISCOVERED_FILES_KEY = "discovered_files"
 class DiscoverStage:
     """Discover indexable files under one or more documents roots.
 
-    Expects `context.metadata` to carry `documents_path` (str | Path,
+    Expects `context.state` to carry `documents_path` (str | Path,
     the single configured root -- used only when `documents_roots` has
     at most one entry, matching `ApplicationContext.discover_files`'s
     own branch exactly rather than deriving one from the other),
     `documents_roots` (list[str | Path]), `include_patterns`
     (list[str] | None), `exclude_patterns` (list[str] | None) and
     `exclude_hidden_dirs` (bool). Writes
-    `context.metadata["discovered_files"]` (list[str]).
+    `context.state["discovered_files"]` (list[str]).
     """
 
     name = "discover"
 
     def run(self, context: SearchContext) -> SearchContext:
-        documents_path: str | Path = context.metadata[_DOCUMENTS_PATH_KEY]
-        documents_roots: list[str | Path] = context.metadata[_DOCUMENTS_ROOTS_KEY]
-        include_patterns = context.metadata.get(_INCLUDE_PATTERNS_KEY)
-        exclude_patterns = context.metadata.get(_EXCLUDE_PATTERNS_KEY)
-        exclude_hidden_dirs = context.metadata.get(_EXCLUDE_HIDDEN_DIRS_KEY, True)
+        documents_path: str | Path = context.state.documents_path
+        documents_roots: list[str | Path] = context.state.documents_roots
+        include_patterns = context.state.include_patterns
+        exclude_patterns = context.state.exclude_patterns
+        exclude_hidden_dirs = (
+            context.state.exclude_hidden_dirs
+            if context.state.exclude_hidden_dirs is not None
+            else True
+        )
 
         if len(documents_roots) <= 1:
             discovered = discover_files(
@@ -62,6 +65,6 @@ class DiscoverStage:
                 exclude_hidden_dirs=exclude_hidden_dirs,
             )
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_DISCOVERED_FILES_KEY] = discovered
-        return replace(context, metadata=metadata)
+        return replace_state(context, metadata)

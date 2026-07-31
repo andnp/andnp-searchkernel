@@ -10,9 +10,7 @@ what lets `RetrieveStage`/`SeedBookkeepingStage`/`TagExpansionStage`/
 
 from __future__ import annotations
 
-from dataclasses import replace
-
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 from searchkernel.search.classifier import QueryType
 
 _REQUESTED_TOP_K_KEY = "requested_top_k"
@@ -29,7 +27,7 @@ _FACTUAL_QUERY_TOP_N_CONTRACTION_LIMIT = 5
 class EffectiveTopKStage:
     """Contract `top_k` for narrow, high-confidence factual queries.
 
-    Expects `context.metadata["requested_top_k"]` (`int`), `["top_n"]`
+    Expects `context.state["requested_top_k"]` (`int`), `["top_n"]`
     (`int`), `["project_filter"]` (`list[str] | None`) and `["query_type"]`
     (`QueryType`, from `RoutingStage`). Writes `["top_k"]` (`int`), the
     value downstream retrieval/expansion stages consume.
@@ -38,16 +36,16 @@ class EffectiveTopKStage:
     name = "effective_top_k"
 
     def run(self, context: SearchContext) -> SearchContext:
-        requested_top_k = context.metadata[_REQUESTED_TOP_K_KEY]
-        top_n = context.metadata[_TOP_N_KEY]
-        project_filter = context.metadata.get(_PROJECT_FILTER_KEY)
-        query_type = context.metadata[_QUERY_TYPE_KEY]
+        requested_top_k = context.state.requested_top_k
+        top_n = context.state.top_n
+        project_filter = context.state.project_filter
+        query_type = context.state.query_type
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_TOP_K_KEY] = self._resolve(
             requested_top_k, top_n, project_filter, query_type
         )
-        return replace(context, metadata=metadata)
+        return replace_state(context, metadata)
 
     @staticmethod
     def _resolve(

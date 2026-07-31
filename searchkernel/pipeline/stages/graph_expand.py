@@ -11,9 +11,8 @@ tests -- once wired in.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 
 RankNeighbors = Callable[[dict[str, float]], list[tuple[str, float]]]
 BuildChunkCandidates = Callable[[list[str], int, "set[str] | None"], list[str]]
@@ -28,9 +27,9 @@ _GRAPH_DOC_SCORES_KEY = "graph_doc_scores"
 class GraphExpandStage:
     """One-hop graph expansion from vector/keyword seed scores.
 
-    Expects `context.metadata` to carry `seed_scores` (dict[str, float]),
+    Expects `context.state` to carry `seed_scores` (dict[str, float]),
     `top_k` (int) and `excluded_chunk_ids` (set[str] | None). Writes
-    `context.metadata["graph_chunk_ids"]` (list[str]) and
+    `context.state["graph_chunk_ids"]` (list[str]) and
     `["graph_doc_scores"]` (dict[str, float]).
     """
 
@@ -45,9 +44,9 @@ class GraphExpandStage:
         self._build_chunk_candidates = build_chunk_candidates
 
     def run(self, context: SearchContext) -> SearchContext:
-        seed_scores = context.metadata[_SEED_SCORES_KEY]
-        top_k = context.metadata[_TOP_K_KEY]
-        excluded_chunk_ids = context.metadata.get(_EXCLUDED_CHUNK_IDS_KEY)
+        seed_scores = context.state.seed_scores
+        top_k = context.state.top_k
+        excluded_chunk_ids = context.state.excluded_chunk_ids
 
         ranked_neighbors = self._rank_neighbors(seed_scores)
         neighbor_doc_ids = [doc_id for doc_id, _score in ranked_neighbors]
@@ -56,7 +55,7 @@ class GraphExpandStage:
             neighbor_doc_ids, top_k, excluded_chunk_ids
         )
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_GRAPH_CHUNK_IDS_KEY] = chunk_ids
         metadata[_GRAPH_DOC_SCORES_KEY] = doc_scores
-        return replace(context, metadata=metadata)
+        return replace_state(context, metadata)

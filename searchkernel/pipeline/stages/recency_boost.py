@@ -10,7 +10,7 @@ Note: the plan pairs this with "type scoring"; no type-based scoring
 exists in the current codebase, so this stage covers recency only.
 Per-query timestamps don't fit a pure SearchContext value, so `run`
 takes them as an explicit parameter (mirroring FusionStage) rather than
-threading them through context.metadata.
+threading them through context.state.
 """
 
 from __future__ import annotations

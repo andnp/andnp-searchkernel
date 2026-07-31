@@ -21,7 +21,7 @@ def test_contracts_top_k_for_small_factual_queries():
 
     result = EffectiveTopKStage().run(context)
 
-    assert result.metadata["top_k"] == 8
+    assert result.state.top_k == 8
 
 
 def test_does_not_contract_for_exploratory_queries():
@@ -34,7 +34,7 @@ def test_does_not_contract_for_exploratory_queries():
 
     result = EffectiveTopKStage().run(context)
 
-    assert result.metadata["top_k"] == 20
+    assert result.state.top_k == 20
 
 
 def test_does_not_contract_when_top_n_is_large():
@@ -47,7 +47,7 @@ def test_does_not_contract_when_top_n_is_large():
 
     result = EffectiveTopKStage().run(context)
 
-    assert result.metadata["top_k"] == 20
+    assert result.state.top_k == 20
 
 
 def test_does_not_contract_with_a_project_filter():
@@ -60,7 +60,7 @@ def test_does_not_contract_with_a_project_filter():
 
     result = EffectiveTopKStage().run(context)
 
-    assert result.metadata["top_k"] == 20
+    assert result.state.top_k == 20
 
 
 def test_does_not_contract_a_non_positive_top_k():
@@ -73,7 +73,7 @@ def test_does_not_contract_a_non_positive_top_k():
 
     result = EffectiveTopKStage().run(context)
 
-    assert result.metadata["top_k"] == 0
+    assert result.state.top_k == 0
 
 
 def test_does_not_mutate_input_context():

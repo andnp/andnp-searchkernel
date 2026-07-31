@@ -9,11 +9,11 @@ hydrate -- as data, for `PipelineExecutor` to walk against
 this spec possible at all: without them, `tag_expansion` (needs
 `chunk_id_to_doc_id`/`all_doc_ids`/`top_k`), `graph_expand` (needs
 `seed_scores`) and `provenance`/`fusion` (need `context.strategy_results`)
-would each be missing required `context.metadata` keys on the first
+would each be missing required `context.state` keys on the first
 generic run.
 
 Per-query config (weights, top_k, min_confidence, ...) is resolved by the
-orchestrator at call time and threaded through `context.metadata`/
+orchestrator at call time and threaded through `context.state`/
 per-stage `run_stage` config rather than baked into this spec's (static)
 `StageSpec.config`, since some of it (e.g. `fusion`'s `strategy_weights`)
 is itself the output of an earlier stage (`routing`) in the same walk.

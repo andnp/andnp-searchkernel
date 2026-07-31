@@ -9,11 +9,10 @@ used inline during `reconcile_indices` -- same inputs, same outputs.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Protocol
 
 from searchkernel.domain import Chunk
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 
 _REMOVED_DOC_IDS_KEY = "removed_doc_ids"
 _ADDED_DOCS_KEY = "added_docs"
@@ -28,10 +27,10 @@ class _HashLookup(Protocol):
 class DetectMovesStage:
     """Detect file moves by comparing chunk content-hash overlap.
 
-    Expects `context.metadata["removed_doc_ids"]` (set[str]),
-    `context.metadata["added_docs"]` (dict[str, list[Chunk]]) and
-    `context.metadata["move_detection_threshold"]` (float). Writes
-    `context.metadata["moved_files"]` (dict[str, str], old_doc_id ->
+    Expects `context.state["removed_doc_ids"]` (set[str]),
+    `context.state["added_docs"]` (dict[str, list[Chunk]]) and
+    `context.state["move_detection_threshold"]` (float). Writes
+    `context.state["moved_files"]` (dict[str, str], old_doc_id ->
     new_doc_id) for the detected moves.
     """
 
@@ -41,9 +40,9 @@ class DetectMovesStage:
         self._hash_store = hash_store
 
     def run(self, context: SearchContext) -> SearchContext:
-        removed_docs: set[str] = context.metadata[_REMOVED_DOC_IDS_KEY]
-        added_docs: dict[str, list[Chunk]] = context.metadata[_ADDED_DOCS_KEY]
-        threshold: float = context.metadata[_MOVE_THRESHOLD_KEY]
+        removed_docs: set[str] = context.state.removed_doc_ids
+        added_docs: dict[str, list[Chunk]] = context.state.added_docs
+        threshold: float = context.state.move_detection_threshold
 
         moves: dict[str, str] = {}
 
@@ -75,6 +74,6 @@ class DetectMovesStage:
             if best_match_doc and best_match_ratio >= threshold:
                 moves[best_match_doc] = new_doc_id
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_MOVED_FILES_KEY] = moves
-        return replace(context, metadata=metadata)
+        return replace_state(context, metadata)

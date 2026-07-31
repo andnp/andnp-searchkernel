@@ -20,7 +20,7 @@ class ProjectFilterStage:
     """Filter candidates to those whose project matches `project_filter`.
 
     Expects `context.candidates` (`list[tuple[chunk_id, score]]`) and
-    `context.metadata["project_filter"]`
+    `context.state["project_filter"]`
     (`list[str] | tuple[str, ...] | set[str] | None`). A `None`/empty
     filter leaves `context` unchanged; otherwise writes `context.candidates`
     filtered to matching chunks (order preserved).
@@ -33,7 +33,7 @@ class ProjectFilterStage:
 
     def run(self, context: SearchContext) -> SearchContext:
         normalized_filter = normalize_project_filter(
-            context.metadata.get(_PROJECT_FILTER_KEY)
+            context.state.project_filter
         )
         if normalized_filter is None:
             return context

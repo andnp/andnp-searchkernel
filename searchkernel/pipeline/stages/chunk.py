@@ -11,10 +11,8 @@ concrete chunker varies with `Config.chunking`.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from searchkernel.chunking.base import ChunkingStrategy
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 
 _RECORD_KEY = "record"
 _CHUNKS_KEY = "chunks"
@@ -23,8 +21,8 @@ _CHUNKS_KEY = "chunks"
 class ChunkStage:
     """Chunk a record with a configured `ChunkingStrategy`.
 
-    Expects `context.metadata["record"]`. Writes the resulting
-    `list[Chunk]` to `context.metadata["chunks"]`.
+    Expects `context.state["record"]`. Writes the resulting
+    `list[Chunk]` to `context.state["chunks"]`.
     """
 
     name = "chunk"
@@ -33,9 +31,9 @@ class ChunkStage:
         self._chunker = chunker
 
     def run(self, context: SearchContext) -> SearchContext:
-        record = context.metadata[_RECORD_KEY]
+        record = context.state.record
         chunks = self._chunker.chunk_record(record)
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_CHUNKS_KEY] = chunks
-        return replace(context, metadata=metadata)
+        return replace_state(context, metadata)

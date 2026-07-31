@@ -26,7 +26,7 @@ class ProjectUpliftStage:
     """Boost candidates whose chunk metadata matches the active project.
 
     Expects `context.candidates` (`list[tuple[chunk_id, score]]`) and
-    `context.metadata["active_project"]` (`str | None`). Optionally
+    `context.state["active_project"]` (`str | None`). Optionally
     mutates `["result_provenance"]` (`dict[str, SearchResultProvenance]`)
     in place, recording the applied uplift. Writes `context.candidates`
     re-sorted descending by boosted score. A falsy `active_project`
@@ -40,12 +40,12 @@ class ProjectUpliftStage:
         self._uplift = uplift
 
     def run(self, context: SearchContext) -> SearchContext:
-        active_project = context.metadata.get(_ACTIVE_PROJECT_KEY)
+        active_project = context.state.active_project
         if not active_project:
             return context
 
         fused = context.candidates
-        result_provenance = context.metadata.get(_RESULT_PROVENANCE_KEY)
+        result_provenance = context.state.result_provenance
 
         boosted: list[tuple[str, float]] = []
         for chunk_id, score in fused:

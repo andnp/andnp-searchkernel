@@ -5,7 +5,7 @@ construction in `SearchOrchestrator.query`. Writes the *narrow*
 semantic/keyword/graph dict `FusionStage` fuses (as
 `context.strategy_results`) and, separately, the *richer* dict that also
 carries a `tag_expansion` strategy when tag expansion actually contributed
-results (as `context.metadata["provenance_strategy_results"]`) --
+results (as `context.state["provenance_strategy_results"]`) --
 `ProvenanceStage` prefers this metadata key over `context.strategy_results`
 when present.
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 from searchkernel.search.path_utils import extract_doc_id_from_chunk_id
 
 _VECTOR_RESULTS_KEY = "vector_results"
@@ -33,25 +33,25 @@ _PROVENANCE_STRATEGY_RESULTS_KEY = "provenance_strategy_results"
 class StrategyResultsStage:
     """Build the per-strategy `(chunk_id, score)` lists fusion/provenance consume.
 
-    Expects `context.metadata["vector_results"]`/`["keyword_results"]`
+    Expects `context.state["vector_results"]`/`["keyword_results"]`
     (`list[dict]`), `["graph_chunk_ids"]` (`list[str]`),
     `["graph_doc_scores"]` (`dict[str, float]`) and optionally
     `["applied_tag_expansion_results"]` (`list[dict]`). Writes
     `context.strategy_results` (`dict[str, list[tuple[str, float]]]`,
     keys `semantic`/`keyword`/`graph`) and
-    `context.metadata["provenance_strategy_results"]` (same, plus a
+    `context.state["provenance_strategy_results"]` (same, plus a
     `tag_expansion` key when the applied list is non-empty).
     """
 
     name = "strategy_results"
 
     def run(self, context: SearchContext) -> SearchContext:
-        vector_results: list[dict[str, Any]] = context.metadata[_VECTOR_RESULTS_KEY]
-        keyword_results: list[dict[str, Any]] = context.metadata[_KEYWORD_RESULTS_KEY]
-        graph_chunk_ids: list[str] = context.metadata[_GRAPH_CHUNK_IDS_KEY]
-        graph_doc_scores: dict[str, float] = context.metadata[_GRAPH_DOC_SCORES_KEY]
-        applied_tag_expansion_results: list[dict[str, Any]] = context.metadata.get(
-            _APPLIED_TAG_EXPANSION_RESULTS_KEY, []
+        vector_results: list[dict[str, Any]] = context.state.vector_results
+        keyword_results: list[dict[str, Any]] = context.state.keyword_results
+        graph_chunk_ids: list[str] = context.state.graph_chunk_ids
+        graph_doc_scores: dict[str, float] = context.state.graph_doc_scores
+        applied_tag_expansion_results: list[dict[str, Any]] = (
+            context.state.applied_tag_expansion_results
         )
 
         strategy_results: dict[str, list[tuple[str, float]]] = {
@@ -73,6 +73,9 @@ class StrategyResultsStage:
                 for r in applied_tag_expansion_results
             ]
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_PROVENANCE_STRATEGY_RESULTS_KEY] = provenance_strategy_results
-        return replace(context, strategy_results=strategy_results, metadata=metadata)
+        return replace(
+            replace_state(context, metadata),
+            strategy_results=strategy_results,
+        )

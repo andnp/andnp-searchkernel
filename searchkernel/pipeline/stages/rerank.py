@@ -20,7 +20,7 @@ _GET_CONTENT_KEY = "get_content"
 class RerankStage:
     """Rerank candidates against the query with a cross-encoder.
 
-    Expects `context.metadata["get_content"]` (`Callable[[str], str | None]`).
+    Expects `context.state["get_content"]` (`Callable[[str], str | None]`).
     """
 
     name = "rerank"
@@ -45,7 +45,7 @@ class RerankStage:
         if not context.candidates or not self._enabled:
             return context
 
-        get_content = context.metadata[_GET_CONTENT_KEY]
+        get_content = context.state.get_content
         reranked = self._get_reranker().rerank(
             context.query, context.candidates, get_content, self._top_n
         )

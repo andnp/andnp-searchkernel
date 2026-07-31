@@ -2,7 +2,12 @@ from dataclasses import replace
 
 import pytest
 
-from searchkernel.pipeline.stage import AsyncSearchStage, SearchContext, SearchStage
+from searchkernel.pipeline.stage import (
+    AsyncSearchStage,
+    SearchContext,
+    SearchStage,
+    SearchState,
+)
 
 
 class _UppercaseStage:
@@ -24,7 +29,17 @@ def test_search_context_defaults():
 
     assert context.candidates == []
     assert context.strategy_results == {}
+    assert context.state == SearchState()
     assert context.metadata == {}
+
+
+def test_search_context_stores_typed_state_without_duplication():
+    state = SearchState(top_k=8)
+    context = SearchContext(query="hello", state=state)
+
+    assert context.state is state
+    assert context.metadata is state
+    assert context.state.top_k == 8
 
 
 def test_stage_is_structurally_a_search_stage():

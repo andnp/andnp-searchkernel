@@ -19,7 +19,7 @@ class SourceFilterStage:
     """Filter candidates to those whose `source_kind` is in `source_filter`.
 
     Expects `context.candidates` (`list[tuple[chunk_id, score]]`) and
-    `context.metadata["source_filter"]` (`list[str] | None`). A falsy
+    `context.state["source_filter"]` (`list[str] | None`). A falsy
     filter leaves `context` unchanged; otherwise writes `context.candidates`
     filtered to matching chunks (order preserved).
     """
@@ -30,7 +30,7 @@ class SourceFilterStage:
         self._get_chunk = get_chunk
 
     def run(self, context: SearchContext) -> SearchContext:
-        source_filter = context.metadata.get(_SOURCE_FILTER_KEY)
+        source_filter = context.state.source_filter
         if not source_filter:
             return context
 

@@ -17,10 +17,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
 from pathlib import Path
 
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 from searchkernel.search.types import SearchResultDict
 
 Searcher = Callable[
@@ -37,9 +36,9 @@ _KEYWORD_RESULTS_KEY = "keyword_results"
 class RetrieveStage:
     """Run vector + keyword retrieval concurrently.
 
-    Expects `context.metadata` to carry `top_k` (int), `excluded_files`
+    Expects `context.state` to carry `top_k` (int), `excluded_files`
     (set[str] | None) and `docs_root` (Path). Writes the raw per-strategy
-    result lists to `context.metadata["vector_results"]` /
+    result lists to `context.state["vector_results"]` /
     `["keyword_results"]` -- the same dict shape
     (`chunk_id`/`doc_id`/`score`) callers consumed directly before.
     """
@@ -51,16 +50,16 @@ class RetrieveStage:
         self._search_keyword = search_keyword
 
     async def run(self, context: SearchContext) -> SearchContext:
-        top_k = context.metadata[_TOP_K_KEY]
-        excluded_files = context.metadata.get(_EXCLUDED_FILES_KEY)
-        docs_root = context.metadata[_DOCS_ROOT_KEY]
+        top_k = context.state.top_k
+        excluded_files = context.state.excluded_files
+        docs_root = context.state.docs_root
 
         vector_results, keyword_results = await asyncio.gather(
             self._search_vector(context.query, top_k, excluded_files, docs_root),
             self._search_keyword(context.query, top_k, excluded_files, docs_root),
         )
 
-        metadata = dict(context.metadata)
+        metadata = dict(context.state)
         metadata[_VECTOR_RESULTS_KEY] = vector_results
         metadata[_KEYWORD_RESULTS_KEY] = keyword_results
-        return replace(context, metadata=metadata)
+        return replace_state(context, metadata)

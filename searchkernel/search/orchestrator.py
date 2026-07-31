@@ -16,7 +16,7 @@ from searchkernel.indices.vector import VectorIndex
 from searchkernel.pipeline.default_query_spec import DEFAULT_QUERY_SPEC
 from searchkernel.pipeline.executor import PipelineExecutor
 from searchkernel.pipeline.registry import DEFAULT_QUERY_STAGE_REGISTRY, StageDeps
-from searchkernel.pipeline.stage import SearchContext
+from searchkernel.pipeline.stage import SearchContext, replace_state
 from searchkernel.pipeline.stages.dedup_rerank import DedupRerankStage
 from searchkernel.pipeline.stages.seed_bookkeeping import (
     should_skip_expensive_factual_enrichments,
@@ -263,20 +263,20 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
                 pipeline_start = time.perf_counter()
                 pipeline = self._resolve_pipeline(
                     pipeline_config,
-                    disable_reranking=context.metadata["skip_tag_expansion"],
+                    disable_reranking=context.state.skip_tag_expansion,
                 )
                 dedup_metadata = dict(context.metadata)
                 dedup_metadata["get_embedding"] = query_context.get_chunk_embedding
                 dedup_metadata["get_content"] = query_context.get_chunk_content
                 dedup_metadata["top_n"] = top_n
-                context = pipeline.run(replace(context, metadata=dedup_metadata))
+                context = pipeline.run(replace_state(context, dedup_metadata))
                 query_context.stats.pipeline_ms = _elapsed_ms(pipeline_start)
                 continue
 
             stage_start = time.perf_counter()
             config = dict(stage_spec.config)
             if name == "fusion":
-                config["strategy_weights"] = context.metadata["strategy_weights"]
+                config["strategy_weights"] = context.state.strategy_weights
             elif name == "project_uplift":
                 config["uplift"] = self._config.search.project_uplift_multiplier
             context = await self._executor.run_stage(name, config, context, deps)
@@ -297,31 +297,31 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
                 query_context.stats.fusion_ms = _elapsed_ms(stage_start)
             elif name == "parent_expansion":
                 query_context.stats.parent_expansion_ms = _elapsed_ms(stage_start)
-                for chunk_id in context.metadata["missing_chunk_ids"]:
+                for chunk_id in context.state.missing_chunk_ids:
                     self._queue_reindex_for_chunks(
                         [chunk_id], "docstore lookup failed during parent expansion"
                     )
-                for parent_chunk_id in context.metadata["missing_parent_chunk_ids"]:
+                for parent_chunk_id in context.state.missing_parent_chunk_ids:
                     self._queue_reindex_for_chunks(
                         [parent_chunk_id],
                         "parent chunk lookup failed during parent expansion",
                     )
             elif name == "hydrate":
                 query_context.stats.materialization_ms = _elapsed_ms(stage_start)
-                missing_chunk_ids = context.metadata["missing_chunk_ids"]
+                missing_chunk_ids = context.state.missing_chunk_ids
                 if missing_chunk_ids:
                     self._queue_reindex_for_chunks(
                         missing_chunk_ids,
                         "chunk hydration failed during result assembly",
                     )
 
-        compression_stats = context.metadata["compression_stats"]
-        chunk_results = context.metadata["chunk_results"]
+        compression_stats = context.state.compression_stats
+        chunk_results = context.state.chunk_results
         strategy_stats = SearchStrategyStats(
-            vector_count=len(context.metadata["vector_results"]),
-            keyword_count=len(context.metadata["keyword_results"]),
-            graph_count=len(context.metadata["graph_chunk_ids"]),
-            tag_expansion_count=context.metadata["tag_expansion_count"],
+            vector_count=len(context.state.vector_results),
+            keyword_count=len(context.state.keyword_results),
+            graph_count=len(context.state.graph_chunk_ids),
+            tag_expansion_count=context.state.tag_expansion_count,
         )
 
         query_context.stats.total_query_ms = _elapsed_ms(total_query_start)
@@ -370,11 +370,11 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
             SearchContext(query="", candidates=results, metadata=metadata)
         )
 
-        for chunk_id in context.metadata["missing_chunk_ids"]:
+        for chunk_id in context.state.missing_chunk_ids:
             self._queue_reindex_for_chunks(
                 [chunk_id], "docstore lookup failed during parent expansion"
             )
-        for parent_chunk_id in context.metadata["missing_parent_chunk_ids"]:
+        for parent_chunk_id in context.state.missing_parent_chunk_ids:
             self._queue_reindex_for_chunks(
                 [parent_chunk_id],
                 "parent chunk lookup failed during parent expansion",
@@ -390,7 +390,7 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
         context = stage.run(
             SearchContext(query="", strategy_results=strategy_results)
         )
-        return context.metadata["result_provenance"]
+        return context.state.result_provenance
 
     def _build_score_pipeline_config(
         self, weights: dict[str, float]
@@ -707,7 +707,7 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
             )
         )
         final = dedup_context.candidates
-        compression_stats = dedup_context.metadata["compression_stats"]
+        compression_stats = dedup_context.state.compression_stats
 
         # Build strategy stats (HyDE only uses semantic search)
         strategy_stats = SearchStrategyStats(
@@ -746,11 +746,11 @@ class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
             SearchContext(query="", candidates=final, metadata=metadata)
         )
 
-        missing_chunk_ids = context.metadata["missing_chunk_ids"]
+        missing_chunk_ids = context.state.missing_chunk_ids
         if missing_chunk_ids:
             self._queue_reindex_for_chunks(
                 missing_chunk_ids,
                 "chunk hydration failed during result assembly",
             )
 
-        return context.metadata["chunk_results"]
+        return context.state.chunk_results
