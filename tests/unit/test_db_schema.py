@@ -206,6 +206,22 @@ class TestConcurrentWAL:
         count = conn.execute("SELECT COUNT(*) FROM kv_store").fetchone()[0]
         assert count == 1000
 
+    def test_close_closes_connections_created_by_worker_threads(
+        self, db: DatabaseManager
+    ) -> None:
+        def open_connection() -> None:
+            db.get_connection()
+
+        threads = [threading.Thread(target=open_connection) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        db.close()
+
+        assert db._connections == {}
+
     def test_readers_dont_block_writers(self, db: DatabaseManager) -> None:
         read_errors: list[Exception] = []
         write_errors: list[Exception] = []

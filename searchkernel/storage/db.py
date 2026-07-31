@@ -4,8 +4,17 @@ import logging
 import sqlite3
 import threading
 from pathlib import Path
+from typing import Self
 
 logger = logging.getLogger(__name__)
+
+
+class _ManagedConnection(sqlite3.Connection):
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except (AttributeError, sqlite3.Error):
+            return
 
 
 class DatabaseManager:
@@ -14,6 +23,8 @@ class DatabaseManager:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._local = threading.local()
+        self._connections: dict[int, sqlite3.Connection] = {}
+        self._connections_lock = threading.Lock()
         db_path.parent.mkdir(parents=True, exist_ok=True)
         # Initialize schema via a temporary connection
         conn = self._open_connection()
@@ -21,7 +32,11 @@ class DatabaseManager:
         conn.close()
 
     def _open_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        conn = sqlite3.connect(
+            str(self._db_path),
+            check_same_thread=False,
+            factory=_ManagedConnection,
+        )
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
@@ -32,8 +47,13 @@ class DatabaseManager:
         """Return a per-thread SQLite connection."""
         conn = getattr(self._local, "connection", None)
         if conn is None:
-            conn = self._open_connection()
-            self._local.connection = conn
+            thread_id = threading.get_ident()
+            with self._connections_lock:
+                conn = self._connections.get(thread_id)
+                if conn is None:
+                    conn = self._open_connection()
+                    self._connections[thread_id] = conn
+                self._local.connection = conn
         return conn
 
     def _initialize_schema_on(self, conn: sqlite3.Connection) -> None:
@@ -94,7 +114,21 @@ class DatabaseManager:
         self._initialize_schema_on(self.get_connection())
 
     def close(self) -> None:
-        conn = getattr(self._local, "connection", None)
-        if conn is not None:
-            conn.close()
+        with self._connections_lock:
+            connections = tuple(self._connections.values())
+            self._connections.clear()
             self._local.connection = None
+        for conn in connections:
+            conn.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except (AttributeError, sqlite3.Error):
+            return

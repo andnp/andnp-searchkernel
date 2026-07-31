@@ -3,6 +3,7 @@
 import json
 import logging
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ class SQLiteCacheStore:
 
     def _init_schema(self) -> None:
         """Create the cache table if it doesn't exist."""
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS cache_store (
                     key TEXT PRIMARY KEY,
@@ -53,7 +54,7 @@ class SQLiteCacheStore:
             Cached value, or None if not found.
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with closing(sqlite3.connect(self.db_path)) as conn:
                 cursor = conn.execute(
                     "SELECT value FROM cache_store WHERE key = ?;",
                     (key,),
@@ -77,7 +78,7 @@ class SQLiteCacheStore:
         """
         try:
             value_json = json.dumps(value)
-            with sqlite3.connect(self.db_path) as conn:
+            with closing(sqlite3.connect(self.db_path)) as conn:
                 conn.execute(
                     """
                     INSERT INTO cache_store (key, value, epoch)
@@ -99,7 +100,7 @@ class SQLiteCacheStore:
             epoch: Entries with epoch <= this are discarded.
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with closing(sqlite3.connect(self.db_path)) as conn:
                 cursor = conn.execute(
                     "DELETE FROM cache_store WHERE epoch <= ?;",
                     (epoch,),

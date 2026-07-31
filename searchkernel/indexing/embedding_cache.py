@@ -10,6 +10,7 @@ import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +122,18 @@ class SQLiteEmbeddingCache:
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except (AttributeError, sqlite3.Error):
+            return
 
     def _open_or_recover(self) -> sqlite3.Connection:
         connection: sqlite3.Connection | None = None
