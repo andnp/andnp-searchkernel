@@ -26,6 +26,9 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha }}
 
+      - name: Check out release branch
+        run: git switch -C main
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
 
