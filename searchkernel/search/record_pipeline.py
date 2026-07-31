@@ -48,6 +48,13 @@ class RecordSearchPolicy:
     """Optional application-owned filtering, ranking, and post-processing."""
 
     candidate_filter: Callable[[RecordSearchCandidate], bool] | None = None
+    vector_candidate_ids: (
+        Callable[
+            [Sequence[tuple[str, float]], dict[str, object]],
+            Sequence[str] | None,
+        ]
+        | None
+    ) = None
     score_adjuster: Callable[[RecordSearchCandidate], float] | None = None
     result_filter: Callable[[RecordSearchResult], bool] | None = None
     post_process: (
@@ -206,13 +213,22 @@ class RecordSearchPipeline:
         if self._vector_store is not None:
             try:
                 vector, model_name, dim = self._query_embedding(query)
+                vector_filters = filters
+                if self._policy.vector_candidate_ids is not None:
+                    candidate_ids = self._policy.vector_candidate_ids(
+                        rankings.get("keyword", ()),
+                        filters,
+                    )
+                    if candidate_ids is not None:
+                        vector_filters = dict(filters)
+                        vector_filters["candidate_ids"] = list(candidate_ids)
                 rankings["vector"] = _sorted_unique(
                     self._vector_store.search(
                         vector,
                         acquisition_limit,
                         model_name=model_name,
                         dim=dim,
-                        filters=filters,
+                        filters=vector_filters,
                     )
                 )
             except Exception as error:  # noqa: BLE001 - degraded mode captures backend failures

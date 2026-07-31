@@ -44,6 +44,7 @@ class FakeKeywordStore:
 class FakeVectorStore:
     def __init__(self, results: list[tuple[str, float]]) -> None:
         self.results = results
+        self.filters: list[dict[str, object] | None] = []
 
     def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
         pass
@@ -59,6 +60,7 @@ class FakeVectorStore:
     ) -> list[tuple[str, float]]:
         assert query_vector == [1.0, 0.0]
         assert (model_name, dim) == ("fake-model", 2)
+        self.filters.append(filters)
         return self.results
 
     def delete(self, record_ids: list[str]) -> None:
@@ -140,6 +142,26 @@ def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
 
     assert [result.record_id for result in outcome.results] == ["a", "b", "c"]
     assert outcome.results[0].provenance.strategies == ("keyword", "vector")
+
+
+def test_policy_can_bound_vector_acquisition_to_keyword_candidates() -> None:
+    records = {record_id: _record(record_id) for record_id in ("a", "b")}
+    vector_store = FakeVectorStore([("a", 0.9)])
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("b", 1.0), ("a", 0.5)]),
+        vector_store=vector_store,
+        embedding_provider=FakeEmbedder(),
+        hydrator=_hydrator(records),
+        policy=RecordSearchPolicy(
+            vector_candidate_ids=lambda ranking, filters: [record_id for record_id, _ in ranking]
+        ),
+    )
+
+    pipeline.search("query", limit=2, filters={"workspace_id": "workspace-1"})
+
+    assert vector_store.filters == [
+        {"workspace_id": "workspace-1", "candidate_ids": ["b", "a"]}
+    ]
 
 
 def test_candidate_filter_runs_before_graph_expansion() -> None:
