@@ -55,6 +55,7 @@ class _EphemeralDatabase:
     def __init__(self) -> None:
         self._connection = sqlite3.connect(":memory:", check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA foreign_keys=ON")
 
     def get_connection(self) -> sqlite3.Connection:
         return self._connection
@@ -161,10 +162,12 @@ class LocalRecordBackend:
                 target_id TEXT NOT NULL,
                 edge_type TEXT NOT NULL,
                 weight REAL NOT NULL,
-                PRIMARY KEY (source_id, target_id, edge_type)
+                PRIMARY KEY (source_id, target_id, edge_type),
+                FOREIGN KEY (source_id) REFERENCES local_records(storage_key)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (target_id) REFERENCES local_records(storage_key)
+                    ON DELETE CASCADE
             );
-            CREATE INDEX IF NOT EXISTS idx_local_graph_source
-                ON local_graph_edges (source_id);
             CREATE TABLE IF NOT EXISTS system_state (
                 key TEXT PRIMARY KEY,
                 value TEXT
@@ -174,7 +177,94 @@ class LocalRecordBackend:
         self._ensure_local_record_column(conn, "keywords", "TEXT NOT NULL DEFAULT ''")
         self._initialize_keyword_schema(conn)
         self._migrate_legacy_vectors(conn)
+        self._initialize_graph_schema(conn)
         conn.commit()
+
+    @staticmethod
+    def _canonical_graph_storage_key(storage_key: str) -> str:
+        if not isinstance(storage_key, str):
+            raise TypeError("graph endpoints must be canonical storage keys")
+        try:
+            identity = RecordIdentity.from_storage_key(storage_key)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid graph storage key: {storage_key!r}"
+            ) from exc
+        if not identity.source_kind or not identity.source_id:
+            raise ValueError(f"invalid graph storage key: {storage_key!r}")
+        if identity.storage_key != storage_key:
+            raise ValueError(f"non-canonical graph storage key: {storage_key!r}")
+        return storage_key
+
+    @classmethod
+    def _initialize_graph_schema(cls, conn: sqlite3.Connection) -> None:
+        foreign_keys = {
+            row[3]
+            for row in conn.execute("PRAGMA foreign_key_list(local_graph_edges)")
+        }
+        if foreign_keys != {"source_id", "target_id"}:
+            conn.execute("DROP INDEX IF EXISTS idx_local_graph_source")
+            conn.execute("DROP INDEX IF EXISTS idx_local_graph_target")
+            conn.execute("DROP INDEX IF EXISTS idx_local_graph_source_type")
+            conn.execute(
+                "ALTER TABLE local_graph_edges RENAME TO local_graph_edges_legacy"
+            )
+            conn.execute(
+                """
+                CREATE TABLE local_graph_edges (
+                    source_id TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    weight REAL NOT NULL,
+                    PRIMARY KEY (source_id, target_id, edge_type),
+                    FOREIGN KEY (source_id) REFERENCES local_records(storage_key)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (target_id) REFERENCES local_records(storage_key)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+            record_keys = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT storage_key FROM local_records"
+                ).fetchall()
+            }
+            legacy_rows = conn.execute(
+                """
+                SELECT e.source_id, e.target_id, e.edge_type, e.weight
+                FROM local_graph_edges_legacy
+                """
+            ).fetchall()
+            for row in legacy_rows:
+                try:
+                    source_id = cls._canonical_graph_storage_key(row[0])
+                    target_id = cls._canonical_graph_storage_key(row[1])
+                except ValueError:
+                    continue
+                if source_id not in record_keys or target_id not in record_keys:
+                    continue
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO local_graph_edges
+                        (source_id, target_id, edge_type, weight)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (source_id, target_id, row[2], row[3]),
+                )
+            conn.execute("DROP TABLE local_graph_edges_legacy")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_local_graph_source "
+            "ON local_graph_edges (source_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_local_graph_target "
+            "ON local_graph_edges (target_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_local_graph_source_type "
+            "ON local_graph_edges (source_id, edge_type)"
+        )
 
     @staticmethod
     def _migrate_legacy_vectors(conn: sqlite3.Connection) -> None:
@@ -1275,32 +1365,64 @@ class LocalRecordBackend:
         self,
         edges: Sequence[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
-        rows = [
-            (
-                edge.source.storage_key,
-                edge.target.storage_key,
-                edge.edge_type,
-                edge.weight,
-            )
-            if isinstance(edge, GraphEdge)
-            else edge
-            for edge in edges
-        ]
+        rows: list[tuple[str, str, str, float]] = []
+        for edge in edges:
+            if isinstance(edge, GraphEdge):
+                row = (
+                    edge.source.storage_key,
+                    edge.target.storage_key,
+                    edge.edge_type,
+                    edge.weight,
+                )
+            else:
+                if len(edge) != 4:
+                    raise ValueError("graph edges require four values")
+                row = (edge[0], edge[1], edge[2], float(edge[3]))
+            source_id = self._canonical_graph_storage_key(row[0])
+            target_id = self._canonical_graph_storage_key(row[1])
+            if not row[2] or not math.isfinite(row[3]):
+                raise ValueError("graph edges require a finite weight and edge type")
+            rows.append((source_id, target_id, row[2], row[3]))
         if not rows:
             return
         with self._lock:
             conn = self._db.get_connection()
             try:
+                endpoint_keys = sorted(
+                    {source_id for source_id, _, _, _ in rows}
+                    | {target_id for _, target_id, _, _ in rows}
+                )
+                placeholders = ",".join("?" for _ in endpoint_keys)
+                existing_keys = {
+                    row[0]
+                    for row in conn.execute(
+                        f"""
+                        SELECT storage_key
+                        FROM local_records
+                        WHERE storage_key IN ({placeholders})
+                        """,
+                        endpoint_keys,
+                    ).fetchall()
+                }
+                missing_keys = set(endpoint_keys) - existing_keys
+                if missing_keys:
+                    raise ValueError(
+                        "graph edge endpoints are not indexed: "
+                        + ", ".join(sorted(missing_keys))
+                    )
+                changes_before = conn.total_changes
                 conn.executemany(
                     """
                     INSERT INTO local_graph_edges (source_id, target_id, edge_type, weight)
                     VALUES (?, ?, ?, ?)
                     ON CONFLICT(source_id, target_id, edge_type) DO UPDATE SET
                         weight = excluded.weight
+                    WHERE local_graph_edges.weight IS NOT excluded.weight
                     """,
                     rows,
                 )
-                self._bump_epoch(conn, graph=True)
+                if conn.total_changes > changes_before:
+                    self._bump_epoch(conn, graph=True)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -1310,16 +1432,25 @@ class LocalRecordBackend:
         self,
         edges: Sequence[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
-        rows = [
-            (
-                edge.source.storage_key,
-                edge.target.storage_key,
-                edge.edge_type,
+        rows: list[tuple[str, str, str]] = []
+        for edge in edges:
+            if isinstance(edge, GraphEdge):
+                row = (
+                    edge.source.storage_key,
+                    edge.target.storage_key,
+                    edge.edge_type,
+                )
+            else:
+                if len(edge) < 3:
+                    raise ValueError("graph edges require at least three values")
+                row = (edge[0], edge[1], edge[2])
+            rows.append(
+                (
+                    self._canonical_graph_storage_key(row[0]),
+                    self._canonical_graph_storage_key(row[1]),
+                    row[2],
+                )
             )
-            if isinstance(edge, GraphEdge)
-            else edge[:3]
-            for edge in edges
-        ]
         if not rows:
             return
         with self._lock:
@@ -1340,6 +1471,40 @@ class LocalRecordBackend:
                 conn.rollback()
                 raise
 
+    def graph_integrity_errors(self) -> list[str]:
+        with self._lock:
+            conn = self._db.get_connection()
+            rows = conn.execute(
+                """
+                SELECT e.source_id, e.target_id
+                FROM local_graph_edges e
+                LEFT JOIN local_records source_record
+                    ON source_record.storage_key = e.source_id
+                LEFT JOIN local_records target_record
+                    ON target_record.storage_key = e.target_id
+                WHERE source_record.storage_key IS NULL
+                   OR target_record.storage_key IS NULL
+                ORDER BY e.source_id, e.target_id
+                """
+            ).fetchall()
+            errors = [
+                f"dangling graph edge: {row['source_id']} -> {row['target_id']}"
+                for row in rows
+            ]
+            for row in conn.execute(
+                "SELECT source_id, target_id FROM local_graph_edges "
+                "ORDER BY source_id, target_id"
+            ):
+                for column in ("source_id", "target_id"):
+                    try:
+                        self._canonical_graph_storage_key(row[column])
+                    except ValueError as exc:
+                        errors.append(str(exc))
+            return sorted(set(errors))
+
+    def check_graph_integrity(self) -> bool:
+        return not self.graph_integrity_errors()
+
     def neighbors(
         self,
         record_id: RecordIdentity | str,
@@ -1352,6 +1517,7 @@ class LocalRecordBackend:
         identity_key = (
             record_id.storage_key if isinstance(record_id, RecordIdentity) else record_id
         )
+        identity_key = self._canonical_graph_storage_key(identity_key)
         frontier = {identity_key}
         best: dict[str, tuple[str, float]] = {}
         with self._lock:
@@ -1362,9 +1528,11 @@ class LocalRecordBackend:
                 placeholders = ",".join("?" for _ in frontier)
                 rows = conn.execute(
                     f"""
-                    SELECT source_id, target_id, edge_type, weight
-                    FROM local_graph_edges
-                    WHERE source_id IN ({placeholders})
+                    SELECT e.source_id, e.target_id, e.edge_type, e.weight
+                    FROM local_graph_edges e
+                    JOIN local_records target_record
+                        ON target_record.storage_key = e.target_id
+                    WHERE e.source_id IN ({placeholders})
                     """,
                     tuple(frontier),
                 ).fetchall()
@@ -1372,16 +1540,20 @@ class LocalRecordBackend:
                 for row in rows:
                     if allowed is not None and row["edge_type"] not in allowed:
                         continue
+                    try:
+                        target_id = self._canonical_graph_storage_key(row["target_id"])
+                    except ValueError:
+                        continue
                     if row["target_id"] == identity_key:
                         continue
                     weight = float(row["weight"])
                     if hop:
                         parent_weight = best.get(row["source_id"], ("", 1.0))[1]
                         weight *= parent_weight
-                    current = best.get(row["target_id"])
+                    current = best.get(target_id)
                     if current is None or weight > current[1]:
-                        best[row["target_id"]] = (row["edge_type"], weight)
-                    next_frontier.add(row["target_id"])
+                        best[target_id] = (row["edge_type"], weight)
+                    next_frontier.add(target_id)
                 frontier = next_frontier
         return sorted(
             (
@@ -1421,16 +1593,22 @@ class LocalRecordBackend:
                 placeholders = ",".join("?" for _ in owners)
                 rows = conn.execute(
                     f"""
-                    SELECT source_id, target_id, edge_type, weight
-                    FROM local_graph_edges
-                    WHERE source_id IN ({placeholders})
+                    SELECT e.source_id, e.target_id, e.edge_type, e.weight
+                    FROM local_graph_edges e
+                    JOIN local_records target_record
+                        ON target_record.storage_key = e.target_id
+                    WHERE e.source_id IN ({placeholders})
                     """,
                     tuple(owners),
                 ).fetchall()
                 next_frontiers = {seed_key: set() for seed_key in seed_keys}
                 for row in rows:
+                    try:
+                        target_id = self._canonical_graph_storage_key(row["target_id"])
+                    except ValueError:
+                        continue
                     for seed_key in owners.get(row["source_id"], ()):
-                        if row["target_id"] == seed_key:
+                        if target_id == seed_key:
                             continue
                         if hop:
                             parent_weight = best_by_seed[seed_key].get(
@@ -1439,13 +1617,13 @@ class LocalRecordBackend:
                             weight = float(row["weight"]) * parent_weight
                         else:
                             weight = float(row["weight"])
-                        current = best_by_seed[seed_key].get(row["target_id"])
+                        current = best_by_seed[seed_key].get(target_id)
                         if current is None or weight > current[1]:
-                            best_by_seed[seed_key][row["target_id"]] = (
+                            best_by_seed[seed_key][target_id] = (
                                 row["edge_type"],
                                 weight,
                             )
-                        next_frontiers[seed_key].add(row["target_id"])
+                        next_frontiers[seed_key].add(target_id)
                 frontiers = next_frontiers
         return {
             seed_key: sorted(
@@ -1468,19 +1646,8 @@ class LocalRecordBackend:
 
     @staticmethod
     def _identity_from_storage_key(storage_key: str) -> RecordIdentity:
-        if storage_key.startswith("record:"):
-            try:
-                workspace_id, source_kind, source_id = json.loads(storage_key[7:])
-            except (TypeError, ValueError):
-                pass
-            else:
-                if (
-                    (workspace_id is None or isinstance(workspace_id, str))
-                    and isinstance(source_kind, str)
-                    and isinstance(source_id, str)
-                ):
-                    return RecordIdentity(workspace_id, source_kind, source_id)
-        return RecordIdentity(None, "legacy", storage_key)
+        LocalRecordBackend._canonical_graph_storage_key(storage_key)
+        return RecordIdentity.from_storage_key(storage_key)
 
 class LocalVectorStore:
     """VectorStore implementation backed by the local record database."""
@@ -1641,6 +1808,12 @@ class LocalGraphStore:
 
     def graph_epoch(self) -> int:
         return self._backend.graph_epoch()
+
+    def graph_integrity_errors(self) -> list[str]:
+        return self._backend.graph_integrity_errors()
+
+    def check_graph_integrity(self) -> bool:
+        return self._backend.check_graph_integrity()
 
     def delete_edges(
         self,
