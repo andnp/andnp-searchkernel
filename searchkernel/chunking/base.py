@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
 
-from searchkernel.domain import Chunk
+from searchkernel.domain import Chunk, Record
 
 
 class ChunkingStrategy(ABC):
     @abstractmethod
-    def chunk_document(self, document) -> list[Chunk]:
+    def chunk_record(self, record: Record) -> list[Chunk]:
         pass

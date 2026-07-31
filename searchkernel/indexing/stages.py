@@ -26,7 +26,7 @@ class LinkExtractingParser(Protocol):
 
 
 @dataclass
-class PreparedIndexDocument:
+class PreparedIndexRecord:
     file_path: str
     parser: object
     record: Record
@@ -36,25 +36,25 @@ class PreparedIndexDocument:
 
 @dataclass
 class PreparedIndexBatch:
-    """Prepared documents and the bounded payloads consumed by each stage."""
+    """Prepared records and the bounded payloads consumed by each stage."""
 
-    documents: list[PreparedIndexDocument]
+    records: list[PreparedIndexRecord]
     chunks: list[Chunk] = field(default_factory=list)
     graph_nodes: list[tuple[str, dict]] = field(default_factory=list)
     graph_edges: list[tuple[str, str, str, str]] = field(default_factory=list)
     semantic_inputs: list[SemanticInput] = field(default_factory=list)
 
     @classmethod
-    def from_documents(
+    def from_records(
         cls,
-        documents: list[PreparedIndexDocument],
+        records: list[PreparedIndexRecord],
         *,
         encoder_namespace: str = "",
     ) -> "PreparedIndexBatch":
-        chunks = [chunk for document in documents for chunk in document.chunks]
-        graph_nodes, graph_edges = build_graph_payload(documents)
+        chunks = [chunk for record in records for chunk in record.chunks]
+        graph_nodes, graph_edges = build_graph_payload(records)
         return cls(
-            documents=documents,
+            records=records,
             chunks=chunks,
             graph_nodes=graph_nodes,
             graph_edges=graph_edges,
@@ -69,12 +69,12 @@ class PreparedIndexBatch:
 
 
 def build_graph_payload(
-    documents: list[PreparedIndexDocument],
+    records: list[PreparedIndexRecord],
 ) -> tuple[list[tuple[str, dict]], list[tuple[str, str, str, str]]]:
-    """Shape document, chunk, and link data for the bulk graph APIs."""
+    """Shape record, chunk, and link data for the bulk graph APIs."""
     nodes: list[tuple[str, dict]] = []
     edges: list[tuple[str, str, str, str]] = []
-    for prepared in documents:
+    for prepared in records:
         nodes.append((prepared.record.source_id, prepared.graph_metadata))
         nodes.extend((chunk.chunk_id, chunk.metadata) for chunk in prepared.chunks)
         if isinstance(prepared.parser, LinkExtractingParser):
@@ -97,34 +97,34 @@ def build_graph_payload(
 
 
 def iter_prepared_index_batches(
-    documents: list[PreparedIndexDocument],
+    records: list[PreparedIndexRecord],
     *,
-    max_documents: int,
+    max_records: int,
     max_chunks: int,
 ) -> Iterator[PreparedIndexBatch]:
-    """Yield non-empty batches bounded by document and chunk counts."""
-    if max_documents <= 0 or max_chunks <= 0:
+    """Yield non-empty batches bounded by record and chunk counts."""
+    if max_records <= 0 or max_chunks <= 0:
         raise ValueError("batch bounds must be positive")
 
-    current: list[PreparedIndexDocument] = []
+    current: list[PreparedIndexRecord] = []
     chunk_count = 0
-    for document in documents:
-        document_chunks = len(document.chunks)
+    for record in records:
+        record_chunks = len(record.chunks)
         if current and (
-            len(current) >= max_documents or chunk_count + document_chunks > max_chunks
+            len(current) >= max_records or chunk_count + record_chunks > max_chunks
         ):
-            yield PreparedIndexBatch.from_documents(current)
+            yield PreparedIndexBatch.from_records(current)
             current = []
             chunk_count = 0
-        current.append(document)
-        chunk_count += document_chunks
+        current.append(record)
+        chunk_count += record_chunks
     if current:
-        yield PreparedIndexBatch.from_documents(current)
+        yield PreparedIndexBatch.from_records(current)
 
 
 @dataclass(frozen=True)
 class StageCounters:
-    documents: int = 0
+    records: int = 0
     chunks: int = 0
     nodes: int = 0
     edges: int = 0
@@ -163,7 +163,7 @@ class KeywordStage:
             self._keyword.add_chunks(batch.chunks)
         return StageResult(
             self.name,
-            StageCounters(documents=len(batch.documents), chunks=len(batch.chunks)),
+            StageCounters(records=len(batch.records), chunks=len(batch.chunks)),
         )
 
 
@@ -181,7 +181,7 @@ class GraphStage:
         return StageResult(
             self.name,
             StageCounters(
-                documents=len(batch.documents),
+                records=len(batch.records),
                 chunks=len(batch.chunks),
                 nodes=len(batch.graph_nodes),
                 edges=len(batch.graph_edges),
@@ -200,5 +200,5 @@ class SemanticStage:
             self._vector.add_chunks(batch.chunks)
         return StageResult(
             self.name,
-            StageCounters(documents=len(batch.documents), chunks=len(batch.chunks)),
+            StageCounters(records=len(batch.records), chunks=len(batch.chunks)),
         )

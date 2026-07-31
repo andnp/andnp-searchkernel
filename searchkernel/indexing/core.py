@@ -1,7 +1,7 @@
 """Pure chunking/embedding/indexing transforms over Record/Chunk/vectors.
 
-`IndexCore` owns the source-agnostic per-document indexing sequence: chunk a
-document, decide delta vs. full re-index, and mutate the vector/keyword/graph
+`IndexCore` owns the source-agnostic per-record indexing sequence: chunk a
+record, decide delta vs. full re-index, and mutate the vector/keyword/graph
 indices accordingly. It has no filesystem-watching, daemon, or bootstrap
 coupling — `IndexManager` (in `manager.py`) wraps it with file discovery,
 manifest tracking, and task-submission concerns.
@@ -38,9 +38,9 @@ class IndexCore:
         self.graph = graph
         self._hash_store = hash_store
 
-    def chunk_document(self, record: Record) -> list[Chunk]:
+    def chunk_record(self, record: Record) -> list[Chunk]:
         context = ChunkStage(self._chunker).run(
-            SearchContext(query="", metadata={"document": record})
+            SearchContext(query="", metadata={"record": record})
         )
         return context.metadata["chunks"]
 
@@ -139,7 +139,7 @@ class IndexCore:
     ) -> bool:
         """Ingest a source-agnostic Record (e.g. a git commit) into the live indices.
 
-        Unlike chunk_document/index_chunks over a file-backed Document, this
+        Unlike chunk_record/index_chunks over a file-backed Record, this
         chunks in-memory content (record.body) rather than reading a file from
         disk. Every chunk is tagged with source_kind/source_id metadata so
         SearchOrchestrator.query's source_filter can scope a query to this
@@ -158,7 +158,7 @@ class IndexCore:
         }
         chunking_record = replace(record, metadata=chunking_metadata)
 
-        chunks = self.chunk_document(chunking_record)
+        chunks = self.chunk_record(chunking_record)
         for chunk in chunks:
             chunk.metadata = {
                 **chunk.metadata,

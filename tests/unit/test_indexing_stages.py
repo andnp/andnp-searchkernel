@@ -7,7 +7,7 @@ from searchkernel.indexing.stages import (
     GraphStage,
     KeywordStage,
     PreparedIndexBatch,
-    PreparedIndexDocument,
+    PreparedIndexRecord,
     SemanticStage,
     iter_prepared_index_batches,
 )
@@ -78,11 +78,11 @@ class FakeGraphWriter:
 class TestPreparedIndexBatch:
     """Test batch preparation."""
 
-    def test_prepared_batch_from_documents(self) -> None:
+    def test_prepared_batch_from_records(self) -> None:
         record = make_test_record(doc_id="doc-1")
         chunk = make_test_chunk(chunk_id="chunk-1", doc_id="doc-1")
 
-        prepared = PreparedIndexDocument(
+        prepared = PreparedIndexRecord(
             file_path="/test.md",
             parser=object(),
             record=record,
@@ -90,15 +90,15 @@ class TestPreparedIndexBatch:
             graph_metadata={"tags": []},
         )
 
-        batch = PreparedIndexBatch.from_documents([prepared], encoder_namespace="ns-1")
+        batch = PreparedIndexBatch.from_records([prepared], encoder_namespace="ns-1")
 
-        assert len(batch.documents) == 1
+        assert len(batch.records) == 1
         assert len(batch.chunks) == 1
         assert len(batch.semantic_inputs) == 1
         assert batch.semantic_inputs[0].source_id == "chunk-1"
 
-    def test_prepared_batch_from_multiple_documents(self) -> None:
-        prepared_docs = []
+    def test_prepared_batch_from_multiple_records(self) -> None:
+        prepared_records = []
         for i in range(3):
             record = make_test_record(doc_id=f"doc-{i}", file_path=f"/test-{i}.md")
             chunks = [
@@ -109,8 +109,8 @@ class TestPreparedIndexBatch:
                 for j in range(2)
             ]
 
-            prepared_docs.append(
-                PreparedIndexDocument(
+            prepared_records.append(
+                PreparedIndexRecord(
                     file_path=f"/test-{i}.md",
                     parser=object(),
                     record=record,
@@ -119,9 +119,9 @@ class TestPreparedIndexBatch:
                 )
             )
 
-        batch = PreparedIndexBatch.from_documents(prepared_docs)
+        batch = PreparedIndexBatch.from_records(prepared_records)
 
-        assert len(batch.documents) == 3
+        assert len(batch.records) == 3
         assert len(batch.chunks) == 6
         assert len(batch.semantic_inputs) == 6
 
@@ -129,14 +129,14 @@ class TestPreparedIndexBatch:
 class TestIterPreparedIndexBatches:
     """Test batch iteration with bounds."""
 
-    def test_batch_iterator_respects_document_limit(self) -> None:
-        prepared_docs = []
+    def test_batch_iterator_respects_record_limit(self) -> None:
+        prepared_records = []
         for i in range(5):
             record = make_test_record(doc_id=f"doc-{i}", file_path=f"/test-{i}.md")
             chunk = make_test_chunk(chunk_id=f"chunk-{i}", doc_id=f"doc-{i}")
 
-            prepared_docs.append(
-                PreparedIndexDocument(
+            prepared_records.append(
+                PreparedIndexRecord(
                     file_path=f"/test-{i}.md",
                     parser=object(),
                     record=record,
@@ -145,18 +145,18 @@ class TestIterPreparedIndexBatches:
                 )
             )
 
-        batches = list(iter_prepared_index_batches(prepared_docs, max_documents=2, max_chunks=100))
+        batches = list(iter_prepared_index_batches(prepared_records, max_records=2, max_chunks=100))
 
         assert len(batches) == 3  # 2 + 2 + 1
-        assert len(batches[0].documents) == 2
-        assert len(batches[1].documents) == 2
-        assert len(batches[2].documents) == 1
+        assert len(batches[0].records) == 2
+        assert len(batches[1].records) == 2
+        assert len(batches[2].records) == 1
 
     def test_batch_iterator_respects_chunk_limit(self) -> None:
-        prepared_docs = []
+        prepared_records = []
         for i in range(3):
             record = make_test_record(doc_id=f"doc-{i}", file_path=f"/test-{i}.md")
-            # Each document has 3 chunks
+            # Each record has 3 chunks
             chunks = [
                 make_test_chunk(
                     chunk_id=f"chunk-{i}-{j}",
@@ -165,8 +165,8 @@ class TestIterPreparedIndexBatches:
                 for j in range(3)
             ]
 
-            prepared_docs.append(
-                PreparedIndexDocument(
+            prepared_records.append(
+                PreparedIndexRecord(
                     file_path=f"/test-{i}.md",
                     parser=object(),
                     record=record,
@@ -175,11 +175,11 @@ class TestIterPreparedIndexBatches:
                 )
             )
 
-        # Max 5 chunks per batch: 3 docs * 3 chunks each = 9 total
+        # Max 5 chunks per batch: 3 records * 3 chunks each = 9 total
         # Batch 1: doc-0 (3 chunks)
         # Batch 2: doc-1 (3 chunks)  (doc-2 would exceed limit)
         # Batch 3: doc-2 (3 chunks)
-        batches = list(iter_prepared_index_batches(prepared_docs, max_documents=10, max_chunks=5))
+        batches = list(iter_prepared_index_batches(prepared_records, max_records=10, max_chunks=5))
 
         assert len(batches) == 3
         assert len(batches[0].chunks) == 3  # 1 doc * 3 chunks
@@ -197,14 +197,14 @@ class TestIterPreparedIndexBatches:
         if import_pytest_error:
             with_pytest_raises = False
 
-        prepared_docs = []
+        prepared_records = []
 
         if with_pytest_raises:
             with pytest.raises(ValueError):
-                list(iter_prepared_index_batches(prepared_docs, max_documents=0, max_chunks=10))
+                list(iter_prepared_index_batches(prepared_records, max_records=0, max_chunks=10))
         else:
             try:
-                list(iter_prepared_index_batches(prepared_docs, max_documents=0, max_chunks=10))
+                list(iter_prepared_index_batches(prepared_records, max_records=0, max_chunks=10))
                 assert False, "Should have raised ValueError"
             except ValueError:
                 pass
@@ -219,7 +219,7 @@ class TestKeywordStage:
 
         chunk = make_test_chunk()
         batch = PreparedIndexBatch(
-            documents=[],
+            records=[],
             chunks=[chunk],
         )
 
@@ -234,7 +234,7 @@ class TestKeywordStage:
         stage = KeywordStage(writer)
 
         batch = PreparedIndexBatch(
-            documents=[],
+            records=[],
             chunks=[],
         )
 
@@ -260,7 +260,7 @@ class TestGraphStage:
             ("doc-1", "doc-2", "links_to", ""),
         ]
         batch = PreparedIndexBatch(
-            documents=[],
+            records=[],
             chunks=[],
             graph_nodes=nodes,
             graph_edges=edges,
@@ -279,7 +279,7 @@ class TestGraphStage:
         stage = GraphStage(writer)
 
         batch = PreparedIndexBatch(
-            documents=[],
+            records=[],
             chunks=[],
             graph_nodes=[],
             graph_edges=[],
@@ -303,7 +303,7 @@ class TestSemanticStage:
 
         chunk = make_test_chunk()
         batch = PreparedIndexBatch(
-            documents=[],
+            records=[],
             chunks=[chunk],
         )
 
@@ -318,7 +318,7 @@ class TestSemanticStage:
         stage = SemanticStage(writer)
 
         batch = PreparedIndexBatch(
-            documents=[],
+            records=[],
             chunks=[],
         )
 

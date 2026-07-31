@@ -22,7 +22,7 @@ class HeaderBasedChunker(ChunkingStrategy):
         self.config = config
         self.parser = Parser(Language(language()))
 
-    def chunk_document(self, record: Record) -> list[Chunk]:
+    def chunk_record(self, record: Record) -> list[Chunk]:
         content_bytes = bytes(record.body, "utf8")
         tree = self.parser.parse(content_bytes)
         root_node = tree.root_node
