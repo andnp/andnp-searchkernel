@@ -1,11 +1,13 @@
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from searchkernel import SearchAPI, SearchKernel
-from searchkernel.domain import ChunkResult, ScoredRef, SearchResult
+from searchkernel.domain import Record, ScoredRef, SearchResult, SearchResultProvenance
 from searchkernel.runtime.local import LocalSearchSource
+from searchkernel.search.record_pipeline import RecordSearchOutcome, RecordSearchResult
 
 
 class _Source:
@@ -84,32 +86,38 @@ async def test_search_kernel_builds_without_reranker():
 
 
 @pytest.mark.asyncio
-async def test_local_search_source_preserves_chunk_identity_and_metadata():
+async def test_local_search_source_exposes_canonical_record_identity_and_metadata():
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    record = Record(
+        source_kind="note",
+        source_id="record-1",
+        title="Local result",
+        body="local result",
+        created_at=timestamp,
+        updated_at=timestamp,
+        metadata={"file_path": "notes.md"},
+    )
+
     class _Orchestrator:
         def __init__(self):
             self.calls = []
 
-        async def query(
+        async def search(
             self,
             query: str,
             *,
-            top_k: int,
-            top_n: int,
-            source_filter: list[str] | None,
+            limit: int,
+            filters: dict[str, Any] | None,
         ):
-            self.calls.append((query, top_k, top_n, source_filter))
-            return (
-                [
-                    ChunkResult(
-                        chunk_id="chunk-1",
-                        record_id="record-1",
+            self.calls.append((query, limit, filters))
+            return RecordSearchOutcome(
+                results=(
+                    RecordSearchResult(
+                        record=record,
                         score=0.9,
-                        content="local result",
-                        metadata={"file_path": "notes.md"},
-                    )
-                ],
-                object(),
-                object(),
+                        provenance=SearchResultProvenance(),
+                    ),
+                )
             )
 
     orchestrator = _Orchestrator()
@@ -123,14 +131,19 @@ async def test_local_search_source_preserves_chunk_identity_and_metadata():
 
     assert list(results) == [
         ScoredRef(
-            source_id="chunk-1",
+            source_id="record-1",
             score=0.9,
-            source_kind="local",
+            source_kind="note",
             metadata={
                 "file_path": "notes.md",
                 "text": "local result",
-                "doc_id": "record-1",
+                "title": "Local result",
+                "uri": None,
+                "storage_key": record.storage_key,
+                "provenance": {"strategies": []},
             },
         )
     ]
-    assert orchestrator.calls == [("query", 3, 3, ["note"])]
+    assert orchestrator.calls == [
+        ("query", 3, {"source_kinds": ["note"]})
+    ]
