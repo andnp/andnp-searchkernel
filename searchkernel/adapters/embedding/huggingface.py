@@ -50,6 +50,7 @@ class HuggingFaceEmbeddingProvider:
             model_name, truncate_dim=truncate_dim, device=device
         )
         native_dim = self._model.get_embedding_dimension()
+        assert native_dim is not None
         self.dim: int = truncate_dim if truncate_dim is not None else int(native_dim)
         # Whether the model ships a named "query" prompt we can reference.
         self._has_query_prompt = "query" in getattr(self._model, "prompts", {})

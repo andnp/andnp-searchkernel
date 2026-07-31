@@ -33,4 +33,4 @@ jobs:
         run: uv run lint-imports
 
       - name: Run unit tests
-        run: uv run pytest -m unit -v
+        run: uv run pytest tests/unit -m "not slow" -v
