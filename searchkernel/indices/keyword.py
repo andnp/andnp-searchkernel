@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import logging
-import re
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
 
 from searchkernel.domain import Chunk, Record
+from searchkernel.indices import keyword_scoring as _keyword_scoring
 from searchkernel.search.types import SearchResultDict
 from searchkernel.storage.db import DatabaseManager
 
@@ -21,7 +21,6 @@ _CORRUPTION_PATTERNS = (
     "unable to open database file",
 )
 
-_ARTIFACT_QUERY_RE = re.compile(r"[./\\_-]")
 _SEARCH_INDEX_COLUMNS = frozenset(
     {"chunk_id", "doc_id", "content", "title", "headers", "tags", "source_file"}
 )
@@ -30,92 +29,6 @@ _SEARCH_INDEX_COLUMNS = frozenset(
 def _is_corruption_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     return any(pat in msg for pat in _CORRUPTION_PATTERNS)
-
-
-def _sanitize_fts_query(query: str) -> str:
-    """Sanitize a query string for safe use in FTS5 MATCH."""
-    # Remove FTS5 special characters (including hyphen which acts as NOT)
-    sanitized = re.sub(r"[\"\'*\^(){}[\]<>|~!:\-]", " ", query)
-    sanitized = sanitized.strip()
-    if not sanitized:
-        return '""'
-    # Split into tokens and join
-    tokens = sanitized.split()
-    return " ".join(tokens)
-
-
-def _normalize_artifact_value(value: str) -> str:
-    return value.strip().lower().replace("\\", "/")
-
-
-def _normalize_field_text(value: str) -> str:
-    return " ".join(value.strip().lower().split())
-
-
-def _has_phrase_boundary_match(text: str, phrase: str) -> bool:
-    if not text or not phrase:
-        return False
-    return (
-        text == phrase
-        or text.startswith(f"{phrase} ")
-        or text.endswith(f" {phrase}")
-        or f" {phrase} " in text
-    )
-
-
-def _split_header_segments(headers: str) -> list[str]:
-    return [
-        normalized
-        for segment in headers.split(">")
-        if (normalized := _normalize_field_text(segment))
-    ]
-
-
-def _score_title_locality(normalized_query: str, normalized_title: str) -> float:
-    if not normalized_title:
-        return 0.0
-    if normalized_title == normalized_query:
-        return 80.0
-    if _has_phrase_boundary_match(normalized_title, normalized_query):
-        return 24.0
-    if normalized_query in normalized_title:
-        return 14.0
-    return 0.0
-
-
-def _score_header_locality(
-    normalized_query: str,
-    normalized_headers: str,
-    header_segments: list[str],
-) -> float:
-    score = 0.0
-
-    if normalized_headers == normalized_query:
-        score = max(score, 34.0)
-    elif _has_phrase_boundary_match(normalized_headers, normalized_query):
-        score = max(score, 14.0)
-    elif normalized_query in normalized_headers:
-        score = max(score, 10.0)
-
-    for depth, segment in enumerate(header_segments):
-        depth_decay = max(0.45, 1.0 - (depth * 0.25))
-        if segment == normalized_query:
-            score = max(score, 44.0 * depth_decay)
-            continue
-        if _has_phrase_boundary_match(segment, normalized_query):
-            score = max(score, 20.0 * depth_decay)
-            continue
-        if normalized_query in segment:
-            score = max(score, 10.0 * depth_decay)
-
-    return score
-
-
-def _looks_like_artifact_query(query: str) -> bool:
-    normalized = query.strip()
-    if not normalized:
-        return False
-    return _ARTIFACT_QUERY_RE.search(normalized) is not None
 
 
 class KeywordIndex:
@@ -458,7 +371,7 @@ class KeywordIndex:
 
         with self._lock:
             artifact_results: list[SearchResultDict] = []
-            if _looks_like_artifact_query(query):
+            if _keyword_scoring.looks_like_artifact_query(query):
                 try:
                     artifact_results = self._search_artifact_matches(
                         query,
@@ -475,7 +388,7 @@ class KeywordIndex:
                         exc_info=True,
                     )
 
-            sanitized = _sanitize_fts_query(query)
+            sanitized = _keyword_scoring.sanitize_fts_query(query)
             candidate_limit = max(top_k * 5, 25)
 
             try:
@@ -612,54 +525,20 @@ class KeywordIndex:
         headers: str,
         source_file: str,
     ) -> float:
-        normalized_query = _normalize_field_text(query)
-        if not normalized_query:
-            return 0.0
-
-        normalized_title = _normalize_field_text(title)
-        normalized_headers = _normalize_field_text(headers)
-        normalized_content = _normalize_field_text(content)
-        normalized_source = _normalize_artifact_value(source_file)
-        normalized_query_artifact = _normalize_artifact_value(query)
-        basename_query = Path(normalized_query_artifact).name
-        source_basename = Path(normalized_source).name if normalized_source else ""
-        header_segments = _split_header_segments(headers)
-
-        score = 0.0
-
-        score += _score_title_locality(normalized_query, normalized_title)
-        score += _score_header_locality(
-            normalized_query,
-            normalized_headers,
-            header_segments,
+        return _keyword_scoring.score_field_aware_match(
+            query,
+            content=content,
+            title=title,
+            headers=headers,
+            source_file=source_file,
         )
-
-        if normalized_source == normalized_query_artifact:
-            score += 60.0
-        elif source_basename == normalized_query_artifact:
-            score += 56.0
-        elif basename_query and source_basename == basename_query:
-            score += 52.0
-        elif normalized_source.endswith(f"/{normalized_query_artifact}"):
-            score += 48.0
-        elif basename_query and normalized_source.endswith(f"/{basename_query}"):
-            score += 44.0
-        elif normalized_query_artifact in normalized_source:
-            score += 16.0
-        elif basename_query and basename_query in normalized_source:
-            score += 12.0
-
-        if normalized_query in normalized_content:
-            score += 4.0
-
-        return score
 
     def _search_artifact_matches(
         self,
         query: str,
         limit: int,
     ) -> list[SearchResultDict]:
-        normalized_query = _normalize_artifact_value(query)
+        normalized_query = _keyword_scoring.normalize_artifact_value(query)
         basename_query = Path(normalized_query).name
         like_query = f"%{query.strip()}%"
         rows = self._conn().execute(
@@ -705,46 +584,14 @@ class KeywordIndex:
         headers: str,
         source_file: str,
     ) -> float:
-        normalized_content = _normalize_artifact_value(content)
-        normalized_headers = _normalize_artifact_value(headers)
-        normalized_title = _normalize_artifact_value(title)
-        normalized_source = _normalize_artifact_value(source_file)
-        source_basename = Path(normalized_source).name if normalized_source else ""
-
-        score = 0.0
-
-        if normalized_source == normalized_query:
-            score = max(score, 120.0)
-        if source_basename == normalized_query:
-            score = max(score, 115.0)
-        if basename_query and source_basename == basename_query:
-            score = max(score, 112.0)
-        if normalized_source.endswith(f"/{normalized_query}"):
-            score = max(score, 108.0)
-        if basename_query and normalized_source.endswith(f"/{basename_query}"):
-            score = max(score, 104.0)
-        if normalized_title == normalized_query:
-            score = max(score, 102.0)
-        if basename_query and normalized_title == basename_query:
-            score = max(score, 100.0)
-        if normalized_query in normalized_source:
-            score = max(score, 96.0)
-        if basename_query and basename_query in normalized_source:
-            score = max(score, 92.0)
-        if normalized_query in normalized_title:
-            score = max(score, 88.0)
-        if basename_query and basename_query in normalized_title:
-            score = max(score, 84.0)
-        if normalized_query in normalized_headers:
-            score = max(score, 82.0)
-        if basename_query and basename_query in normalized_headers:
-            score = max(score, 78.0)
-        if normalized_query in normalized_content:
-            score = max(score, 74.0)
-        if basename_query and basename_query in normalized_content:
-            score = max(score, 70.0)
-
-        return score
+        return _keyword_scoring.score_artifact_match(
+            normalized_query,
+            basename_query,
+            content,
+            title,
+            headers,
+            source_file,
+        )
 
     # ------------------------------------------------------------------
     # Persistence no-ops (data lives in SQLite)
