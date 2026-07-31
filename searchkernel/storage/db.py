@@ -99,11 +99,28 @@ class SQLiteTuning:
         conn.execute(f"PRAGMA temp_store = {self.temp_store_value}")
         conn.execute(f"PRAGMA wal_autocheckpoint = {self.auto_checkpoint}")
 
-    def checkpoint(self, conn: sqlite3.Connection) -> tuple[int, int, int]:
-        if self.checkpoint_policy in {"none", "manual"}:
+    def checkpoint(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        policy: str | None = None,
+    ) -> tuple[int, int, int]:
+        selected_policy = policy or self.checkpoint_policy
+        if selected_policy not in {
+            "none",
+            "manual",
+            "passive",
+            "full",
+            "restart",
+            "truncate",
+        }:
+            raise ValueError("unsupported checkpoint policy")
+        if selected_policy == "manual":
+            selected_policy = "passive"
+        if selected_policy == "none":
             return (0, 0, 0)
         row = conn.execute(
-            f"PRAGMA wal_checkpoint({self.checkpoint_policy})"
+            f"PRAGMA wal_checkpoint({selected_policy})"
         ).fetchone()
         if row is None:
             return (0, 0, 0)
@@ -232,8 +249,8 @@ class DatabaseManager:
     def tuning(self) -> SQLiteTuning:
         return self._tuning
 
-    def checkpoint(self) -> tuple[int, int, int]:
-        return self._tuning.checkpoint(self.get_connection())
+    def checkpoint(self, *, policy: str | None = None) -> tuple[int, int, int]:
+        return self._tuning.checkpoint(self.get_connection(), policy=policy)
 
     def close(self) -> None:
         with self._connections_lock:

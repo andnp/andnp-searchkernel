@@ -70,6 +70,21 @@ def test_sqlite_tuning_checkpoint_policy_is_configurable(tmp_path):
     assert all(isinstance(value, int) for value in result)
 
 
+def test_sqlite_tuning_manual_checkpoint_can_run_explicitly(tmp_path):
+    manager = DatabaseManager(
+        tmp_path / "records.db",
+        tuning=SQLiteTuning(checkpoint_policy="manual"),
+    )
+
+    assert manager.get_connection().execute(
+        "PRAGMA wal_autocheckpoint"
+    ).fetchone()[0] == 0
+    result = manager.checkpoint()
+    assert len(result) == 3
+    with pytest.raises(ValueError):
+        manager.checkpoint(policy="invalid")
+
+
 def test_sqlite_tuning_preserves_sqlite_connection_usage(tmp_path):
     manager = DatabaseManager(tmp_path / "records.db")
     conn = manager.get_connection()
