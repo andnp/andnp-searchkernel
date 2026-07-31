@@ -28,13 +28,14 @@ from searchkernel.ports.live_indices import (
 )
 from searchkernel.ports.llm import LLMProvider
 from searchkernel.ports.orchestrator_config import OrchestratorConfig
-from searchkernel.ports.record_search import AsyncRecordHydrator
+from searchkernel.ports.record_search import AsyncRecordHydrator, BatchRecordHydrator
 from searchkernel.ports.rerank import Reranker
 from searchkernel.ports.search import SearchAPI
 from searchkernel.ports.stores import (
     AsyncGraphStore,
     AsyncKeywordStore,
     AsyncVectorStore,
+    BatchGraphStore,
     CacheStore,
     GraphStore,
     KeywordStore,
@@ -48,6 +49,8 @@ __all__ = [
     "AsyncRecordHydrator",
     "AsyncRecordIngestor",
     "AsyncVectorStore",
+    "BatchGraphStore",
+    "BatchRecordHydrator",
     "CacheStore",
     "CandidateFilterSupport",
     "ChunkTuningConfig",

@@ -4,7 +4,7 @@ These ports unify the various storage needs of the kernel. Default implementatio
 uses Postgres + pgvector; legacy FAISS/SQLite adapters are kept as fallbacks.
 """
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from searchkernel.domain import (
@@ -205,4 +205,24 @@ class AsyncGraphStore(Protocol):
         edge_types: list[str] | None = None,
         depth: int = 1,
     ) -> Sequence[GraphNeighbor | tuple[str, str, float]]:
+        ...
+
+
+class BatchGraphStore(Protocol):
+    """Retrieve graph neighbors for multiple canonical seeds."""
+
+    def neighbors_many(
+        self,
+        identities: Sequence[RecordIdentity],
+        *,
+        depth: int,
+    ) -> Mapping[
+        str,
+        Sequence[GraphNeighbor | tuple[str, str, float]],
+    ] | Awaitable[
+        Mapping[
+            str,
+            Sequence[GraphNeighbor | tuple[str, str, float]],
+        ]
+    ]:
         ...
