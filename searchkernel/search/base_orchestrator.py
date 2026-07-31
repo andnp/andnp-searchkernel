@@ -5,9 +5,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeVar
 
-from searchkernel.indices.graph import GraphStore
-from searchkernel.indices.keyword import KeywordIndex
-from searchkernel.indices.vector import VectorIndex
+from searchkernel.ports.live_indices import (
+    GraphIndexPort,
+    KeywordIndexPort,
+    VectorIndexPort,
+)
 from searchkernel.ports.orchestrator_config import OrchestratorConfig
 from searchkernel.search.score_pipeline import ScorePipeline, ScorePipelineConfig
 from searchkernel.search.tag_expansion import expand_query_with_tags
@@ -36,9 +38,9 @@ class HybridSearchContext:
 class BaseSearchOrchestrator[ResultT](ABC):
     def __init__(
         self,
-        vector: VectorIndex,
-        keyword: KeywordIndex,
-        graph: GraphStore,
+        vector: VectorIndexPort,
+        keyword: KeywordIndexPort,
+        graph: GraphIndexPort,
         config: OrchestratorConfig,
         documents_path: Path | None = None,
     ):

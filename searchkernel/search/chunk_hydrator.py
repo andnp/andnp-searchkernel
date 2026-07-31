@@ -6,8 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from searchkernel.domain import ChunkResult
-from searchkernel.indices.keyword import KeywordIndex
-from searchkernel.indices.vector import VectorIndex
+from searchkernel.ports.live_indices import KeywordIndexPort, VectorIndexPort
 from searchkernel.search.path_utils import (
     extract_doc_id_from_chunk_id,
     resolve_doc_path,
@@ -31,8 +30,8 @@ class HydratedChunk:
 class ChunkHydrator:
     def __init__(
         self,
-        vector: VectorIndex,
-        keyword: KeywordIndex,
+        vector: VectorIndexPort,
+        keyword: KeywordIndexPort,
         documents_path: Path,
         queue_reindex: Callable[[list[str], str], None] | None = None,
     ) -> None:

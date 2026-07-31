@@ -11,8 +11,7 @@ Works transparently for both document and memory search.
 
 import logging
 
-from searchkernel.indices.graph import GraphStore
-from searchkernel.indices.vector import VectorIndex
+from searchkernel.ports.live_indices import GraphIndexPort, VectorIndexPort
 from searchkernel.search.types import SearchResultDict
 
 logger = logging.getLogger(__name__)
@@ -20,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 def expand_query_with_tags(
     initial_results: list[SearchResultDict],
-    graph: GraphStore,
-    vector: VectorIndex,
+    graph: GraphIndexPort,
+    vector: VectorIndexPort,
     top_k: int = 20,
     max_related_tags: int = 3,
     max_depth: int = 2,
@@ -123,7 +122,7 @@ def expand_query_with_tags(
 
 def _find_related_tags(
     seed_tags: list[str],
-    graph: GraphStore,
+    graph: GraphIndexPort,
     max_tags: int,
     max_depth: int,
 ) -> list[str]:

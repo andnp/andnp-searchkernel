@@ -5,8 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from searchkernel.domain import ChunkResult
-    from searchkernel.indices.keyword import KeywordIndex
-    from searchkernel.indices.vector import VectorIndex
+    from searchkernel.ports.live_indices import KeywordIndexPort, VectorIndexPort
     from searchkernel.search.chunk_hydrator import ChunkHydrator
 
 
@@ -37,8 +36,8 @@ class QueryExecutionStats:
 class QueryExecutionContext:
     def __init__(
         self,
-        vector: VectorIndex,
-        keyword: KeywordIndex,
+        vector: VectorIndexPort,
+        keyword: KeywordIndexPort,
         chunk_hydrator: ChunkHydrator,
     ) -> None:
         self._vector = vector

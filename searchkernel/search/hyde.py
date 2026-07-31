@@ -1,26 +1,16 @@
 import logging
 from pathlib import Path
-from typing import Protocol
+from typing import TypeAlias
 
-from searchkernel.search.types import SearchResultDict
+from searchkernel.ports.live_indices import VectorIndexPort
 
 logger = logging.getLogger(__name__)
 
-
-class VectorSearchable(Protocol):
-    def search(
-        self,
-        query: str,
-        top_k: int,
-        excluded_files: set[str] | None = None,
-        docs_root: Path | None = None,
-    ) -> list[SearchResultDict]: ...
-
-    def get_text_embedding(self, text: str) -> list[float]: ...
+VectorSearchable: TypeAlias = VectorIndexPort
 
 
 def search_with_hypothesis(
-    vector_index: VectorSearchable,
+    vector_index: VectorIndexPort,
     hypothesis: str,
     top_k: int = 10,
     excluded_files: set[str] | None = None,

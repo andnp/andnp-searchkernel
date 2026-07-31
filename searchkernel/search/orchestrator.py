@@ -10,9 +10,6 @@ from searchkernel.domain import (
     SearchResultProvenance,
     SearchStrategyStats,
 )
-from searchkernel.indices.graph import GraphStore
-from searchkernel.indices.keyword import KeywordIndex
-from searchkernel.indices.vector import VectorIndex
 from searchkernel.pipeline.default_query_spec import DEFAULT_QUERY_SPEC
 from searchkernel.pipeline.executor import PipelineExecutor
 from searchkernel.pipeline.registry import DEFAULT_QUERY_STAGE_REGISTRY, StageDeps
@@ -22,6 +19,11 @@ from searchkernel.pipeline.stages.seed_bookkeeping import (
     should_skip_expensive_factual_enrichments,
 )
 from searchkernel.ports.index_manager import IndexManagerPort
+from searchkernel.ports.live_indices import (
+    GraphIndexPort,
+    KeywordIndexPort,
+    VectorIndexPort,
+)
 from searchkernel.ports.orchestrator_config import OrchestratorConfig
 from searchkernel.search.base_orchestrator import BaseSearchOrchestrator
 from searchkernel.search.chunk_hydrator import ChunkHydrator
@@ -55,9 +57,9 @@ class CachedQueryResult:
 class SearchOrchestrator(BaseSearchOrchestrator[ChunkResult]):
     def __init__(
         self,
-        vector_index: VectorIndex,
-        keyword_index: KeywordIndex,
-        graph_store: GraphStore,
+        vector_index: VectorIndexPort,
+        keyword_index: KeywordIndexPort,
+        graph_store: GraphIndexPort,
         config: OrchestratorConfig,
         index_manager: IndexManagerPort | None = None,
         documents_path: Path | None = None,

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from searchkernel.indices.vector import VectorIndex
+from searchkernel.ports.live_indices import VectorIndexPort
 
 _DEFAULT_MAX_CHUNKS_PER_DOC = 1
 
@@ -25,7 +25,7 @@ def build_graph_candidate_expansion_policy(
 
 def build_graph_chunk_candidates(
     neighbor_doc_ids: list[str],
-    vector_index: VectorIndex,
+    vector_index: VectorIndexPort,
     top_k: int,
     excluded_chunk_ids: set[str] | None = None,
     policy: GraphCandidateExpansionPolicy | None = None,
@@ -63,7 +63,7 @@ def build_graph_chunk_candidates(
 
 def _select_representative_chunk_ids(
     doc_id: str,
-    vector_index: VectorIndex,
+    vector_index: VectorIndexPort,
     excluded_chunk_ids: set[str],
     max_chunks_per_document: int,
 ) -> list[str]:
