@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
@@ -237,11 +238,6 @@ def test_keyword_index_load_nonexistent_path(tmp_path):
     assert "test-doc" in _extract_chunk_ids(results)
 
 
-@pytest.mark.skip(
-    reason="Whoosh tokenization normalizes 'C++' to 'c', making exact match impossible. "
-    "This is inherent to Whoosh's StandardAnalyzer which strips punctuation. "
-    "Would require custom analyzer configuration to preserve such tokens."
-)
 def test_keyword_index_special_characters(keyword_index):
     doc = _make_record(
         "special-doc",
@@ -782,20 +778,22 @@ def test_keyword_index_schema_mismatch_triggers_rebuild(tmp_path):
     missing new fields), the index should be rebuilt from scratch to
     avoid field errors.
     """
-    pytest.importorskip("whoosh")
-    from whoosh import index as whoosh_index  # type: ignore[import-untyped]
-    from whoosh.fields import ID, TEXT, Schema  # type: ignore[import-untyped]
-
-    old_schema = Schema(
-        id=ID(stored=True, unique=True),
-        doc_id=ID(stored=True),
-        content=TEXT(stored=False),
-        aliases=TEXT(stored=False),
-        tags=TEXT(stored=False),
-    )
     index_path = tmp_path / "old_keyword_index"
     index_path.mkdir()
-    whoosh_index.create_in(str(index_path), old_schema)
+    connection = sqlite3.connect(index_path / "index.db")
+    connection.execute(
+        """
+        CREATE TABLE search_index (
+            id TEXT PRIMARY KEY,
+            doc_id TEXT,
+            content TEXT,
+            aliases TEXT,
+            tags TEXT
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
 
     keyword_index = KeywordIndex()
     keyword_index.load(index_path)
@@ -877,10 +875,6 @@ def test_keyword_index_recovery_allows_reindexing(tmp_path):
     corruption during operation, reinitialize, then add new documents
     successfully.
     """
-    pytest.importorskip("whoosh")
-    import glob
-    from pathlib import Path
-
     from searchkernel.domain import Chunk
 
     keyword_index = KeywordIndex()
@@ -892,9 +886,7 @@ def test_keyword_index_recovery_allows_reindexing(tmp_path):
     keyword_index.persist(index_path)
     keyword_index.load(index_path)
 
-    seg_files = glob.glob(str(index_path / "*.seg"))
-    for seg in seg_files:
-        Path(seg).unlink()
+    (index_path / "index.db").write_bytes(b"corrupted data here")
 
     keyword_index.search("trigger corruption detection", top_k=5)
 
@@ -952,10 +944,6 @@ def test_remove_chunk_handles_missing_chunk():
 
 def test_remove_chunk_handles_corruption(tmp_path):
     """Test that remove_chunk() handles index corruption gracefully."""
-    pytest.importorskip("whoosh")
-    import glob
-    from pathlib import Path
-
     from searchkernel.domain import Chunk
 
     keyword_index = KeywordIndex()
@@ -968,10 +956,7 @@ def test_remove_chunk_handles_corruption(tmp_path):
     keyword_index.persist(persist_path)
     keyword_index.load(persist_path)
 
-    # Delete segment files to simulate corruption
-    seg_files = glob.glob(str(persist_path / "*.seg"))
-    for seg in seg_files:
-        Path(seg).unlink()
+    (persist_path / "index.db").write_bytes(b"corrupted data here")
 
     # Should handle corruption gracefully
     keyword_index.remove_chunk("corrupt_test#chunk#0")

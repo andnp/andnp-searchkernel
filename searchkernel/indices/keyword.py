@@ -22,6 +22,9 @@ _CORRUPTION_PATTERNS = (
 )
 
 _ARTIFACT_QUERY_RE = re.compile(r"[./\\_-]")
+_SEARCH_INDEX_COLUMNS = frozenset(
+    {"chunk_id", "doc_id", "content", "title", "headers", "tags", "source_file"}
+)
 
 
 def _is_corruption_error(exc: Exception) -> bool:
@@ -787,9 +790,15 @@ class KeywordIndex:
         candidate: DatabaseManager | None = None
         try:
             candidate = DatabaseManager(db_file)
-            result = candidate.get_connection().execute("PRAGMA quick_check").fetchone()
+            conn = candidate.get_connection()
+            result = conn.execute("PRAGMA quick_check").fetchone()
             if result is None or result[0] != "ok":
                 raise sqlite3.DatabaseError(f"quick_check returned: {result}")
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(search_index)")
+            }
+            if not _SEARCH_INDEX_COLUMNS <= columns:
+                raise sqlite3.DatabaseError("search_index schema mismatch")
         except (sqlite3.DatabaseError, sqlite3.OperationalError) as e:
             logger.warning(
                 "Keyword index %s is corrupted (%s); reinitializing clean.",
@@ -802,7 +811,8 @@ class KeywordIndex:
                     candidate.close()
                 except Exception:
                     logger.debug("Failed to close stale db candidate", exc_info=True)
-            db_file.unlink(missing_ok=True)
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{db_file}{suffix}").unlink(missing_ok=True)
             return  # self._db remains the existing clean temp DB
         self._db.close()
         self._db = candidate
