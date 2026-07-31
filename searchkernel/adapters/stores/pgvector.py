@@ -381,7 +381,12 @@ def _migrate_records_schema(cursor) -> None:
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_records_path_filter "
-        "ON records ((COALESCE(NULLIF(metadata->>'file_path', ''), uri)));"
+        "ON records ((COALESCE("
+        "NULLIF(metadata->>'file_path', ''), "
+        "NULLIF(metadata->>'path', ''), "
+        "NULLIF(metadata->>'source_file', ''), "
+        "NULLIF(uri, '')"
+        ")));"
     )
 
 
