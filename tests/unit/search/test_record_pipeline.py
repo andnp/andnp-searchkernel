@@ -1,12 +1,21 @@
 import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 
-from searchkernel.domain import GraphNeighbor, Record, RecordHit, RecordIdentity
+from searchkernel.domain import (
+    GraphEdge,
+    GraphNeighbor,
+    Record,
+    RecordHit,
+    RecordIdentity,
+)
 from searchkernel.search.record_pipeline import (
     RecordSearchConfig,
     RecordSearchError,
+    RecordSearchOutcome,
     RecordSearchPipeline,
     RecordSearchPolicy,
 )
@@ -27,7 +36,7 @@ def _record(record_id: str) -> Record:
 
 
 class FakeKeywordStore:
-    def __init__(self, results: list[tuple[str, float]]) -> None:
+    def __init__(self, results: list[RecordHit | tuple[str, float]]) -> None:
         self.results = results
         self.queries: list[tuple[str, int, dict[str, object] | None]] = []
 
@@ -39,13 +48,13 @@ class FakeKeywordStore:
         query: str,
         k: int,
         filters: dict[str, object] | None = None,
-    ) -> list[tuple[str, float]]:
+    ) -> list[RecordHit | tuple[str, float]]:
         self.queries.append((query, k, filters))
         return self.results
 
 
 class FakeVectorStore:
-    def __init__(self, results: list[tuple[str, float]]) -> None:
+    def __init__(self, results: list[RecordHit | tuple[str, float]]) -> None:
         self.results = results
         self.filters: list[dict[str, object] | None] = []
 
@@ -60,7 +69,7 @@ class FakeVectorStore:
         model_name: str,
         dim: int,
         filters: dict[str, object] | None = None,
-    ) -> list[tuple[str, float]]:
+    ) -> list[RecordHit | tuple[str, float]]:
         assert query_vector == [1.0, 0.0]
         assert (model_name, dim) == ("fake-model", 2)
         self.filters.append(filters)
@@ -74,21 +83,26 @@ class FakeVectorStore:
 
 
 class FakeGraphStore:
-    def __init__(self, neighbors: dict[str, list[tuple[str, str, float]]]) -> None:
+    def __init__(
+        self,
+        neighbors: dict[str, list[GraphNeighbor | tuple[str, str, float]]],
+    ) -> None:
         self._neighbors = neighbors
 
     def upsert_edges(
-        self, edges: list[tuple[str, str, str, float]]
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
         pass
 
     def neighbors(
         self,
-        record_id: str,
+        record_id: RecordIdentity | str,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> list[tuple[str, str, float]]:
-        return self._neighbors.get(record_id, [])
+    ) -> list[GraphNeighbor | tuple[str, str, float]]:
+        key = record_id.source_id if isinstance(record_id, RecordIdentity) else record_id
+        return self._neighbors.get(key, [])
 
 
 class FakeEmbedder:
@@ -101,7 +115,11 @@ class FakeEmbedder:
 
 
 def _hydrator(records: dict[str, Record]):
-    return lambda record_id: records.get(record_id)
+    def hydrate(record_id: RecordIdentity | str) -> Record | None:
+        key = record_id.source_id if isinstance(record_id, RecordIdentity) else record_id
+        return records.get(key)
+
+    return hydrate
 
 
 async def test_keyword_only_hydrates_records_with_deterministic_ties() -> None:
@@ -111,7 +129,7 @@ async def test_keyword_only_hydrates_records_with_deterministic_ties() -> None:
         hydrator=_hydrator(records),
     )
 
-    outcome = await pipeline.search("query", limit=2)
+    outcome = await pipeline.async_search("query", limit=2)
 
     assert [result.record_id for result in outcome.results] == ["a", "b"]
     assert all(result.record.source_kind == "fake" for result in outcome.results)
@@ -127,7 +145,7 @@ async def test_minimum_candidate_limit_applies_to_store_acquisition() -> None:
         config=RecordSearchConfig(minimum_candidate_limit=50),
     )
 
-    await pipeline.search("query", limit=1)
+    await pipeline.async_search("query", limit=1)
 
     assert keyword_store.queries[0][1] == 50
 
@@ -141,7 +159,7 @@ async def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
         hydrator=_hydrator(records),
     )
 
-    outcome = await pipeline.search("query", limit=3)
+    outcome = await pipeline.async_search("query", limit=3)
 
     assert [result.record_id for result in outcome.results] == ["a", "b", "c"]
     assert outcome.results[0].provenance.strategies == ("keyword", "vector")
@@ -160,7 +178,7 @@ async def test_policy_can_bound_vector_acquisition_to_keyword_candidates() -> No
         ),
     )
 
-    await pipeline.search("query", limit=2, filters={"workspace_id": "workspace-1"})
+    await pipeline.async_search("query", limit=2, filters={"workspace_id": "workspace-1"})
 
     assert vector_store.filters == [
         {
@@ -183,7 +201,7 @@ async def test_policy_can_order_vector_candidates_before_fusion() -> None:
         ),
     )
 
-    outcome = await pipeline.search("query", limit=2)
+    outcome = await pipeline.async_search("query", limit=2)
 
     assert [result.record_id for result in outcome.results] == ["b", "a"]
 
@@ -201,7 +219,7 @@ async def test_candidate_filter_runs_before_graph_expansion() -> None:
         ),
     )
 
-    outcome = await pipeline.search("query", limit=3)
+    outcome = await pipeline.async_search("query", limit=3)
 
     assert [result.record_id for result in outcome.results] == ["seed", "allowed"]
     assert "blocked" not in {result.record_id for result in outcome.results}
@@ -221,7 +239,7 @@ async def test_policy_can_adjust_scores_reject_results_and_post_process() -> Non
         ),
     )
 
-    outcome = await pipeline.search("query", limit=2)
+    outcome = await pipeline.async_search("query", limit=2)
 
     assert [result.record_id for result in outcome.results] == ["b"]
     assert outcome.results[0].score > 0
@@ -244,7 +262,7 @@ async def test_graph_expansion_is_bounded_and_missing_records_are_reported() -> 
         continue_on_error=True,
     )
 
-    outcome = await pipeline.search("query", limit=3)
+    outcome = await pipeline.async_search("query", limit=3)
 
     assert [result.record_id for result in outcome.results] == ["seed"]
     assert outcome.missing_record_ids == ("missing",)
@@ -256,8 +274,20 @@ async def test_graph_expansion_reads_only_bounded_seed_neighbors() -> None:
     calls: list[RecordIdentity] = []
 
     class Graph:
-        def neighbors(self, identity, edge_types=None, depth=1):
-            calls.append(identity)
+        def upsert_edges(
+            self,
+            edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        ) -> None:
+            pass
+
+        def neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+        ) -> list[GraphNeighbor | tuple[str, str, float]]:
+            assert isinstance(record_id, RecordIdentity)
+            calls.append(record_id)
             return [("missing", "related", 1.0)]
 
     pipeline = RecordSearchPipeline(
@@ -268,7 +298,7 @@ async def test_graph_expansion_reads_only_bounded_seed_neighbors() -> None:
         continue_on_error=True,
     )
 
-    await pipeline.search("query", limit=3)
+    await pipeline.async_search("query", limit=3)
 
     assert [identity.source_id for identity in calls] == ["a", "b"]
 
@@ -283,7 +313,7 @@ async def test_callable_embedding_provider_accepts_explicit_vector_metadata() ->
         hydrator=_hydrator(records),
     )
 
-    outcome = await pipeline.search("query")
+    outcome = await pipeline.async_search("query")
     assert [result.record_id for result in outcome.results] == ["a"]
 
 
@@ -294,7 +324,7 @@ async def test_store_errors_raise_by_default() -> None:
             query: str,
             k: int,
             filters: dict[str, object] | None = None,
-        ) -> list[tuple[str, float]]:
+        ) -> list[RecordHit | tuple[str, float]]:
             raise RuntimeError("backend unavailable")
 
     pipeline = RecordSearchPipeline(
@@ -304,7 +334,7 @@ async def test_store_errors_raise_by_default() -> None:
 
     with pytest.raises(RecordSearchError, match="keyword retrieval failed"):
 
-        await pipeline.search("query")
+        await pipeline.async_search("query")
 
 
 async def test_store_errors_can_be_explicitly_returned_as_degraded() -> None:
@@ -314,7 +344,7 @@ async def test_store_errors_can_be_explicitly_returned_as_degraded() -> None:
             query: str,
             k: int,
             filters: dict[str, object] | None = None,
-        ) -> list[tuple[str, float]]:
+        ) -> list[RecordHit | tuple[str, float]]:
             raise RuntimeError("backend unavailable")
 
     pipeline = RecordSearchPipeline(
@@ -323,7 +353,7 @@ async def test_store_errors_can_be_explicitly_returned_as_degraded() -> None:
         continue_on_error=True,
     )
 
-    outcome = await pipeline.search("query")
+    outcome = await pipeline.async_search("query")
 
     assert not outcome.results
     assert outcome.degraded
@@ -337,7 +367,9 @@ async def test_search_keeps_sync_compatibility_outside_event_loop() -> None:
         hydrator=_hydrator(records),
     )
 
-    outcome = await asyncio.to_thread(lambda: pipeline.search("query"))
+    outcome = await asyncio.to_thread(
+        lambda: cast(RecordSearchOutcome, pipeline.search("query"))
+    )
 
     assert outcome.results[0].record_id == "a"
 
@@ -345,6 +377,7 @@ async def test_search_keeps_sync_compatibility_outside_event_loop() -> None:
 @pytest.mark.asyncio
 async def test_composite_identity_reaches_async_hydrator() -> None:
     identity = RecordIdentity("workspace-a", "note", "note-1")
+    expected_identity = identity
     record = Record(
         workspace_id="workspace-a",
         source_kind="note",
@@ -356,12 +389,20 @@ async def test_composite_identity_reaches_async_hydrator() -> None:
     )
 
     class Hydrator:
-        async def hydrate_record(self, received: RecordIdentity) -> Record:
-            assert received == identity
+        def hydrate_record(self, record_id: RecordIdentity) -> Record:
+            assert record_id == expected_identity
             return record
 
     class Store:
-        def search(self, query, k, filters=None):
+        def index(self, records: list[Record]) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit | tuple[str, float]]:
             return [RecordHit(identity, 1.0)]
 
     pipeline = RecordSearchPipeline(
@@ -369,7 +410,7 @@ async def test_composite_identity_reaches_async_hydrator() -> None:
         hydrator=Hydrator(),
     )
 
-    outcome = await pipeline.search("query")
+    outcome = await pipeline.async_search("query")
 
     assert outcome.results[0].storage_key == identity.storage_key
     assert outcome.results[0].provenance.record_identity == identity
@@ -401,20 +442,39 @@ async def test_graph_neighbors_preserve_canonical_identity() -> None:
     }
 
     class Store:
-        def search(self, query, k, filters=None):
+        def index(self, records: list[Record]) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit | tuple[str, float]]:
             return [RecordHit(seed, 1.0)]
 
     class Graph:
-        def neighbors(self, identity, edge_types=None, depth=1):
+        def upsert_edges(
+            self,
+            edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        ) -> None:
+            pass
+
+        def neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+        ) -> list[GraphNeighbor | tuple[str, str, float]]:
             return [GraphNeighbor(target, "related", 1.0)]
 
     pipeline = RecordSearchPipeline(
         keyword_store=Store(),
         graph_store=Graph(),
-        hydrator=lambda record_id: records.get(record_id),
+        hydrator=_hydrator(records),
     )
 
-    outcome = await pipeline.search("query", limit=2)
+    outcome = await pipeline.async_search("query", limit=2)
 
     assert [result.storage_key for result in outcome.results] == [
         seed.storage_key,

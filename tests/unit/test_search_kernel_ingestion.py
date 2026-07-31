@@ -1,5 +1,7 @@
 import asyncio
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 
@@ -7,6 +9,8 @@ from searchkernel.domain import Record, RecordStatus
 from searchkernel.indexing.checkpoints import MemoryCheckpointStore
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports.content_source import (
+    ChangeSignal,
+    ContentSource,
     IngestionError,
     IngestionReceipt,
     RecordIngestionResult,
@@ -20,16 +24,16 @@ class _ContentSource:
         self.records = records
         self.since_values: list[str | None] = []
 
-    def iter_records(self, since: str | None = None):
+    def iter_records(self, since: str | None = None) -> AsyncIterator[Record]:
         self.since_values.append(since)
 
-        async def stream():
+        async def stream() -> AsyncIterator[Record]:
             for record in self.records:
                 yield record
 
         return stream()
 
-    def change_signal(self):
+    def change_signal(self) -> ChangeSignal:
         return {"poll_interval": 60}
 
     def cursor_for(self, record: Record) -> str:
@@ -179,12 +183,19 @@ async def test_retry_resumes_from_durable_checkpoint_and_is_idempotent() -> None
 
 @pytest.mark.asyncio
 async def test_ingest_source_rejects_sync_sources() -> None:
-    class SyncSource(_ContentSource):
-        def iter_records(self, since=None):
+    class SyncSource:
+        source_kind = "notes"
+
+        def __init__(self, records: list[Record]) -> None:
+            self.records = records
+
+        def iter_records(self, since: str | None = None) -> Iterator[Record]:
             return iter(self.records)
 
     kernel = SearchKernel.build(
-        content_sources=[SyncSource([_record("one")])],
+        content_sources=[
+            cast(ContentSource, SyncSource([_record("one")]))
+        ],
         ingestor=_RecordIngestor(),
     )
 

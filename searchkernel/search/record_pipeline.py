@@ -45,22 +45,19 @@ FailureStage = Literal["keyword", "vector", "graph", "hydration"]
 class RecordHydrator(Protocol):
     """Hydrate a record without mutating source state."""
 
-    async def hydrate_record(
+    def hydrate_record(
         self,
-        identity: RecordIdentity,
-    ) -> Record | None: ...
+        record_id: RecordIdentity,
+    ) -> Record | None | Awaitable[Record | None]: ...
 
 
 class QueryEmbeddingProvider(Protocol):
     """Generate one query embedding for a vector search."""
 
-    @property
-    def model_name(self) -> str: ...
+    model_name: str
+    dim: int
 
-    @property
-    def dim(self) -> int: ...
-
-    async def embed_query(self, query: str) -> Vector: ...
+    def embed_query(self, query: str) -> Vector: ...
 
 
 @dataclass(frozen=True, slots=True)

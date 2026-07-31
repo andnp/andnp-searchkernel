@@ -11,7 +11,7 @@ import json
 import re
 import sqlite3
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -19,6 +19,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from searchkernel.domain import (
+    GraphEdge,
     GraphNeighbor,
     Record,
     RecordHit,
@@ -399,7 +400,21 @@ class LocalRecordBackend:
             ).fetchone()
             return int(row[0]) if row else 0
 
-    def upsert_edges(self, edges: list[tuple[str, str, str, float]]) -> None:
+    def upsert_edges(
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+    ) -> None:
+        rows = [
+            (
+                edge.source.storage_key,
+                edge.target.storage_key,
+                edge.edge_type,
+                edge.weight,
+            )
+            if isinstance(edge, GraphEdge)
+            else edge
+            for edge in edges
+        ]
         with self._lock:
             conn = self._db.get_connection()
             conn.executemany(
@@ -409,7 +424,7 @@ class LocalRecordBackend:
                 ON CONFLICT(source_id, target_id, edge_type) DO UPDATE SET
                     weight = excluded.weight
                 """,
-                edges,
+                rows,
             )
             conn.commit()
 
@@ -534,7 +549,10 @@ class LocalGraphStore:
     def __init__(self, backend: LocalRecordBackend):
         self._backend = backend
 
-    def upsert_edges(self, edges: list[tuple[str, str, str, float]]) -> None:
+    def upsert_edges(
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+    ) -> None:
         self._backend.upsert_edges(edges)
 
     def neighbors(

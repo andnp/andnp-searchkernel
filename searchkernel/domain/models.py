@@ -138,6 +138,12 @@ class GraphNeighbor:
         yield self.edge_type
         yield self.weight
 
+    def __getitem__(self, index: int):
+        return (self.source_id, self.edge_type, self.weight)[index]
+
+    def __len__(self) -> int:
+        return 3
+
 
 @dataclass(frozen=True, slots=True)
 class GraphEdge:
@@ -147,6 +153,23 @@ class GraphEdge:
     target: RecordIdentity
     edge_type: str
     weight: float
+
+    def __iter__(self):
+        yield self.source.source_id
+        yield self.target.source_id
+        yield self.edge_type
+        yield self.weight
+
+    def __getitem__(self, index: int):
+        return (
+            self.source.source_id,
+            self.target.source_id,
+            self.edge_type,
+            self.weight,
+        )[index]
+
+    def __len__(self) -> int:
+        return 4
 
 
 # ===== Core domain types =====

@@ -4,6 +4,7 @@ These ports unify the various storage needs of the kernel. Default implementatio
 uses Postgres + pgvector; legacy FAISS/SQLite adapters are kept as fallbacks.
 """
 
+from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from searchkernel.domain import (
@@ -43,7 +44,7 @@ class VectorStore(Protocol):
         model_name: str,
         dim: int,
         filters: dict[str, Any] | None = None,
-    ) -> list[RecordHit | tuple[str, float]]:
+    ) -> Sequence[RecordHit | tuple[str, float]]:
         """
         Search for the k nearest neighbors to a query vector.
 
@@ -94,7 +95,7 @@ class KeywordStore(Protocol):
 
     def search(
         self, query: str, k: int, filters: dict[str, Any] | None = None
-    ) -> list[RecordHit | tuple[str, float]]:
+    ) -> Sequence[RecordHit | tuple[str, float]]:
         """
         Search for top-k records matching the query.
 
@@ -115,7 +116,7 @@ class GraphStore(Protocol):
 
     def upsert_edges(
         self,
-        edges: list[GraphEdge | tuple[str, str, str, float]],
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
         """
         Upsert edges in the graph.
@@ -131,7 +132,7 @@ class GraphStore(Protocol):
         record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> list[GraphNeighbor | tuple[str, str, float]]:
+    ) -> Sequence[GraphNeighbor | tuple[str, str, float]]:
         """
         Retrieve neighbors of a record in the graph.
 
@@ -162,6 +163,14 @@ class CacheStore(Protocol):
         """
         ...
 
+    def set(self, key: str, value: Any, epoch: int) -> None:
+        """Store a value with its index epoch."""
+        ...
+
+    def invalidate_epoch(self, epoch: int) -> None:
+        """Discard entries from the supplied epoch or earlier."""
+        ...
+
 
 class AsyncVectorStore(Protocol):
     """Async boundary for record-oriented vector retrieval."""
@@ -174,7 +183,7 @@ class AsyncVectorStore(Protocol):
         model_name: str,
         dim: int,
         filters: dict[str, Any] | None = None,
-    ) -> list[RecordHit | tuple[str, float]]:
+    ) -> Sequence[RecordHit | tuple[str, float]]:
         ...
 
 
@@ -183,7 +192,7 @@ class AsyncKeywordStore(Protocol):
 
     async def search(
         self, query: str, k: int, filters: dict[str, Any] | None = None
-    ) -> list[RecordHit | tuple[str, float]]:
+    ) -> Sequence[RecordHit | tuple[str, float]]:
         ...
 
 
@@ -195,26 +204,5 @@ class AsyncGraphStore(Protocol):
         record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> list[GraphNeighbor | tuple[str, str, float]]:
-        ...
-
-    def set(self, key: str, value: Any, epoch: int) -> None:
-        """
-        Store a value with an associated epoch.
-
-        Args:
-            key: Cache key.
-            value: Value to cache.
-            epoch: Index epoch at cache time. Entries from older epochs
-                   are considered stale.
-        """
-        ...
-
-    def invalidate_epoch(self, epoch: int) -> None:
-        """
-        Invalidate all entries from an epoch or earlier.
-
-        Args:
-            epoch: Entries with epoch <= this are discarded.
-        """
+    ) -> Sequence[GraphNeighbor | tuple[str, str, float]]:
         ...

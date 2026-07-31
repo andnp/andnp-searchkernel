@@ -11,7 +11,6 @@ from searchkernel.domain import (
     ScoredRef,
     SearchResultProvenance,
 )
-from searchkernel.search.orchestrator import SearchOrchestrator
 from searchkernel.search.record_pipeline import RecordSearchOutcome, RecordSearchResult
 
 
@@ -88,12 +87,24 @@ class LegacyLocalOrchestratorAdapter:
         )
 
 
+class RecordSearchSource(Protocol):
+    """Canonical record search boundary consumed by the local source."""
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        filters: dict[str, Any] | None = None,
+    ) -> RecordSearchOutcome: ...
+
+
 class LocalSearchSource:
     """Expose canonical local record results to federation."""
 
     source_kind = "local"
 
-    def __init__(self, orchestrator: SearchOrchestrator):
+    def __init__(self, orchestrator: RecordSearchSource):
         self._orchestrator = orchestrator
 
     async def search(
@@ -137,4 +148,5 @@ __all__ = [
     "LegacyLocalOrchestratorAdapter",
     "LegacyQueryOrchestrator",
     "LocalSearchSource",
+    "RecordSearchSource",
 ]

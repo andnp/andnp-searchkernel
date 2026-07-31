@@ -17,6 +17,7 @@ from searchkernel.ports import (
 )
 from searchkernel.search.base_orchestrator import BaseSearchOrchestrator
 from searchkernel.search.record_pipeline import (
+    QueryEmbeddingProvider,
     RecordHydrator,
     RecordSearchConfig,
     RecordSearchOutcome,
@@ -47,6 +48,7 @@ class SearchOrchestrator(BaseSearchOrchestrator):
         embedding_provider: (
             EmbeddingProvider
             | AsyncEmbeddingProvider
+            | QueryEmbeddingProvider
             | Callable[[str], Vector | Awaitable[Vector]]
             | None
         ) = None,

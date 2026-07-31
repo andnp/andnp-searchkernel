@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -590,7 +591,7 @@ class PGVectorStore:
         model_name: str,
         dim: int,
         filters: dict[str, Any] | None = None,
-    ) -> list[RecordHit | tuple[str, float]]:
+    ) -> list[RecordHit]:
         """Search for nearest neighbors using cosine similarity (ANN via HNSW).
 
         Args:
@@ -845,7 +846,7 @@ class PGKeywordStore:
 
     def search(
         self, query: str, k: int, filters: dict[str, Any] | None = None
-    ) -> list[RecordHit | tuple[str, float]]:
+    ) -> list[RecordHit]:
         """Search for records matching the query.
 
         Args:
@@ -922,7 +923,7 @@ class PGGraphStore:
 
     def upsert_edges(
         self,
-        edges: list[GraphEdge | tuple[str, str, str, float]],
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
         """Upsert edges in the graph.
 
@@ -989,7 +990,7 @@ class PGGraphStore:
         record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> list[GraphNeighbor | tuple[str, str, float]]:
+    ) -> Sequence[GraphNeighbor | tuple[str, str, float]]:
         """Retrieve neighbors of a record.
 
         Args:

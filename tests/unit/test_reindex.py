@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from searchkernel.domain import Record
+from searchkernel.domain import Record, RecordHit
 from searchkernel.runtime.reindex import ReindexError, ReindexRoutine
 
 
@@ -36,7 +36,7 @@ class FakeStore:
         model_name: str,
         dim: int,
         filters: dict[str, object] | None = None,
-    ) -> list[tuple[str, float]]:
+    ) -> list[RecordHit | tuple[str, float]]:
         return []
 
     def delete(self, record_ids: list[str]) -> None:

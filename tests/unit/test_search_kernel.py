@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -14,6 +14,7 @@ from searchkernel.domain import (
 )
 from searchkernel.runtime.local import (
     LegacyLocalOrchestratorAdapter,
+    LegacyQueryOrchestrator,
     LocalSearchSource,
 )
 from searchkernel.search.record_pipeline import RecordSearchOutcome, RecordSearchResult
@@ -188,7 +189,11 @@ async def test_legacy_local_adapter_is_explicit_and_preserves_chunk_metadata():
             )
 
     legacy = _LegacyOrchestrator()
-    source = LocalSearchSource(LegacyLocalOrchestratorAdapter(legacy))
+    source = LocalSearchSource(
+        LegacyLocalOrchestratorAdapter(cast(LegacyQueryOrchestrator, legacy))
+    )
+    kernel = SearchKernel.build(sources=[source])
+    assert isinstance(kernel, SearchKernel)
 
     results = list(
         await source.search("query", 3, filters={"source_filter": ["note"]})
