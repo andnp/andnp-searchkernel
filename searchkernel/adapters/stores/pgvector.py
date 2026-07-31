@@ -141,7 +141,8 @@ def _path_variants(value: Any) -> set[str]:
     leaf = normalized.rsplit("/", 1)[-1]
     if "." in leaf:
         stem = leaf.rsplit(".", 1)[0]
-        variants.add(normalized[: -len(leaf) - 1] + stem)
+        parent = normalized.rsplit("/", 1)[0]
+        variants.add(f"{parent}/{stem}" if "/" in normalized else stem)
         variants.add(stem)
     variants.add(leaf)
     return variants
