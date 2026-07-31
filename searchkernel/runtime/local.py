@@ -1,14 +1,14 @@
-"""Adapt the kernel's existing orchestrator to the federation source port."""
+"""Federation source for the canonical local record backend."""
 
 from collections.abc import Iterable
 from typing import Any
 
-from searchkernel.domain import ChunkResult, ScoredRef
+from searchkernel.domain import ScoredRef
 from searchkernel.search.orchestrator import SearchOrchestrator
 
 
 class LocalSearchSource:
-    """Expose ``SearchOrchestrator`` results as federated ``ScoredRef`` values."""
+    """Expose canonical local record results to federation."""
 
     source_kind = "local"
 
@@ -18,29 +18,38 @@ class LocalSearchSource:
     async def search(
         self, query: str, k: int, filters: dict[str, Any] | None = None
     ) -> Iterable[ScoredRef]:
-        source_filter = (filters or {}).get("source_filter")
-        chunk_results, _compression_stats, _strategy_stats = (
-            await self._orchestrator.query(
-                query,
-                top_k=k,
-                top_n=k,
-                source_filter=source_filter,
-            )
-        )
-        return [self._to_scored_ref(result) for result in chunk_results]
+        filters = dict(filters or {})
+        source_filter = filters.pop("source_filter", None)
+        if source_filter is not None:
+            filters["source_kinds"] = list(source_filter)
+        if "workspace" in filters and "workspace_id" not in filters:
+            filters["workspace_id"] = filters.pop("workspace")
+
+        outcome = await self._orchestrator.search(query, limit=k, filters=filters)
+        return [
+            self._to_scored_ref(result.record, result.score, result.provenance)
+            for result in outcome.results
+        ]
 
     @staticmethod
-    def _to_scored_ref(result: ChunkResult) -> ScoredRef:
-        metadata = dict(result.metadata)
+    def _to_scored_ref(record, score: float, provenance) -> ScoredRef:
+        metadata = dict(record.metadata)
         metadata.update(
             {
-                "text": result.content,
-                "doc_id": result.record_id,
+                "text": record.body,
+                "title": record.title,
+                "uri": record.uri,
+                "storage_key": record.storage_key,
+                "provenance": provenance.to_dict(),
             }
         )
         return ScoredRef(
-            source_id=result.chunk_id,
-            score=result.score,
-            source_kind="local",
+            source_id=record.source_id,
+            score=score,
+            source_kind=record.source_kind,
+            workspace_id=record.workspace_id,
             metadata=metadata,
         )
+
+
+__all__ = ["LocalSearchSource"]
