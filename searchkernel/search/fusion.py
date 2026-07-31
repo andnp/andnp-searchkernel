@@ -1,3 +1,4 @@
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 
 from searchkernel.search.time_scoring import (
@@ -9,6 +10,19 @@ from searchkernel.search.time_scoring import (
 
 def rrf_score(rank: int, k: int):
     return 1 / (k + rank)
+
+
+def fuse_reciprocal_rank(
+    rankings: Iterable[Sequence[str]], k: float = 60.0
+) -> dict[str, float]:
+    if k <= 0:
+        raise ValueError("k must be positive")
+
+    scores: dict[str, float] = {}
+    for ranking in rankings:
+        for rank, item_id in enumerate(ranking, start=1):
+            scores[item_id] = scores.get(item_id, 0.0) + 1 / (k + rank)
+    return scores
 
 
 def apply_recency_boost(

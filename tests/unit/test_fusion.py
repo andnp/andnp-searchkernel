@@ -10,7 +10,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from searchkernel.search.fusion import apply_recency_boost, rrf_score
+from searchkernel.search.fusion import (
+    apply_recency_boost,
+    fuse_reciprocal_rank,
+    rrf_score,
+)
 
 
 class TestRRFScore:
@@ -43,6 +47,27 @@ class TestRRFScore:
         score_10 = rrf_score(10, k)
 
         assert score_0 > score_1 > score_5 > score_10
+
+
+class TestReciprocalRankFusion:
+    def test_first_rank_uses_one_based_formula(self):
+        assert fuse_reciprocal_rank([["doc1"]], k=60.0) == {"doc1": 1 / 61}
+
+    def test_duplicate_ids_accumulate_across_rankings(self):
+        scores = fuse_reciprocal_rank([["doc1", "doc2"], ["doc2", "doc1"]], k=10.0)
+
+        assert scores == {
+            "doc1": 1 / 11 + 1 / 12,
+            "doc2": 1 / 12 + 1 / 11,
+        }
+
+    def test_empty_rankings_return_empty_scores(self):
+        assert fuse_reciprocal_rank([[], []]) == {}
+
+    @pytest.mark.parametrize("invalid_k", [0, -1.0])
+    def test_non_positive_k_is_rejected(self, invalid_k):
+        with pytest.raises(ValueError, match="k must be positive"):
+            fuse_reciprocal_rank([["doc1"]], k=invalid_k)
 
 
 class TestRecencyBoost:
