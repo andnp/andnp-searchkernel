@@ -1165,6 +1165,7 @@ class LocalRecordBackend:
     def delete(self, record_ids: list[str]) -> None:
         if not record_ids:
             return
+        record_ids = list(dict.fromkeys(record_ids))
         with self._lock:
             conn = self._db.get_connection()
             try:
@@ -1178,10 +1179,16 @@ class LocalRecordBackend:
                     existing_records += 1
                     existing_vectors += int(
                         conn.execute(
-                            "SELECT EXISTS("
-                            "SELECT 1 FROM local_vectors_v2 WHERE storage_key = ?"
-                            ")",
-                            (record.storage_key,),
+                            """
+                            SELECT EXISTS(
+                                SELECT 1 FROM local_vectors_v2
+                                WHERE storage_key = ?
+                            ) OR EXISTS(
+                                SELECT 1 FROM local_vectors
+                                WHERE storage_key = ?
+                            )
+                            """,
+                            (record.storage_key, record.storage_key),
                         ).fetchone()[0]
                     )
                     old_row = conn.execute(
