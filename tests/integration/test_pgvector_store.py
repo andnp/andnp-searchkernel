@@ -20,6 +20,7 @@ from searchkernel.adapters.stores.pgvector import (
     _vector_table_name,
 )
 from searchkernel.domain import Record, RecordStatus, Vector
+from searchkernel.indices import LocalRecordBackend
 from tests.integration.conftest import pg_dsn_for_schema, pg_worker_schema
 
 
@@ -295,6 +296,102 @@ class TestVectorStore:
             dim=4,
             filters={"source_kinds": ["missing"]},
         ) == []
+
+    def test_filtered_eligible_identities_match_local_backend(
+        self,
+        pg_conn,
+        tmp_path,
+    ):
+        now = datetime.now(UTC)
+        records = [
+            Record(
+                workspace_id="workspace",
+                source_kind="note",
+                source_id="keep",
+                title="Keep",
+                body="Keep",
+                created_at=now,
+                updated_at=now,
+                metadata={
+                    "project_id": "project-a",
+                    "doc_id": "docs/keep",
+                    "file_path": "docs/keep.md",
+                },
+                uri="docs/keep.md",
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            ),
+            Record(
+                workspace_id="workspace",
+                source_kind="note",
+                source_id="excluded-project",
+                title="Excluded project",
+                body="Excluded project",
+                created_at=now,
+                updated_at=now,
+                metadata={
+                    "project_id": "project-b",
+                    "doc_id": "docs/project-b",
+                    "file_path": "docs/project-b.md",
+                },
+                uri="docs/project-b.md",
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            ),
+            Record(
+                workspace_id="other-workspace",
+                source_kind="note",
+                source_id="other-workspace",
+                title="Other workspace",
+                body="Other workspace",
+                created_at=now,
+                updated_at=now,
+                metadata={"project_id": "project-a", "doc_id": "docs/other"},
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            ),
+            Record(
+                workspace_id="workspace",
+                source_kind="note",
+                source_id="archived",
+                title="Archived",
+                body="Archived",
+                created_at=now,
+                updated_at=now,
+                status=RecordStatus.ARCHIVED,
+                metadata={"project_id": "project-a", "doc_id": "docs/archived"},
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            ),
+        ]
+        local = LocalRecordBackend(tmp_path / "local.db")
+        local.upsert(records, "contract-model", 4)
+        pg = PGVectorStore(pg_conn)
+        pg.upsert(records, "contract-model", 4)
+        filters = {
+            "workspace_id": "workspace",
+            "source_kinds": ["note"],
+            "statuses": ["active"],
+            "project_id": "project-a",
+            "candidate_ids": [records[0].storage_key],
+            "excluded_files": {"docs/archived"},
+            "excluded_documents": {"docs/blocked"},
+        }
+
+        local_hits = local.search_vector(
+            [1.0, 0.0, 0.0, 0.0],
+            10,
+            model_name="contract-model",
+            dim=4,
+            filters=filters,
+        )
+        pg_hits = pg.search(
+            [1.0, 0.0, 0.0, 0.0],
+            10,
+            model_name="contract-model",
+            dim=4,
+            filters=filters,
+        )
+
+        assert [hit.storage_key for hit in pg_hits] == [
+            hit.storage_key for hit in local_hits
+        ] == [records[0].storage_key]
 
     def test_dimension_and_model_tables_are_isolated(self, pg_conn, fixture_records):
         """Test that model/dimension pairs select only their own table."""
