@@ -27,7 +27,7 @@ def _container_logs(container) -> str:
 
 
 def _wait_for_postgres_ready(container, timeout: float = 60.0) -> None:
-    import docker
+    from docker.errors import APIError
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -42,7 +42,7 @@ def _wait_for_postgres_ready(container, timeout: float = 60.0) -> None:
             result = container.exec_run(
                 ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres"]
             )
-        except docker.errors.APIError:
+        except APIError:
             result = None
 
         if result is not None and result.exit_code == 0:
@@ -66,9 +66,11 @@ def pgvector_test_database(request):
     docker = pytest.importorskip(
         "docker", reason="Docker SDK is required for pgvector integration tests"
     )
+    from docker.errors import DockerException, ImageNotFound, NotFound
+
     try:
         client = docker.from_env()
-    except docker.errors.DockerException as exc:
+    except DockerException as exc:
         pytest.skip(f"Docker is unavailable for pgvector integration tests: {exc}")
 
     worker_id = getattr(request.config, "workerinput", {}).get("workerid", "master")
@@ -77,7 +79,7 @@ def pgvector_test_database(request):
         image_name = "pgvector/pgvector:pg17"
         try:
             image = client.images.get(image_name)
-        except docker.errors.ImageNotFound:
+        except ImageNotFound:
             image = client.images.pull("pgvector/pgvector", "pg17")
 
         port = _free_localhost_port()
@@ -95,7 +97,7 @@ def pgvector_test_database(request):
                 ports={"5432/tcp": port},
                 tmpfs={"/var/lib/postgresql/data": "rw,size=512m"},
             )
-        except docker.errors.DockerException as exc:
+        except DockerException as exc:
             pytest.skip(f"Could not start pgvector container: {exc}")
 
         _wait_for_postgres_ready(container)
@@ -111,7 +113,7 @@ def pgvector_test_database(request):
         if container is not None:
             try:
                 container.remove(force=True)
-            except docker.errors.NotFound:
+            except NotFound:
                 pass
         client.close()
 
