@@ -17,6 +17,7 @@ from searchkernel.runtime.query_embedding_cache import (
     QueryEmbeddingCacheMetrics,
     clear_query_embedding_cache,
     get_or_compute_query_embedding,
+    get_query_embedding_cache,
     normalize_query,
 )
 
@@ -33,6 +34,7 @@ __all__ = [
     "clear_query_embedding_cache",
     "fingerprint",
     "get_or_compute_query_embedding",
+    "get_query_embedding_cache",
     "normalize_cache_query",
     "normalize_query",
     "stable_json",

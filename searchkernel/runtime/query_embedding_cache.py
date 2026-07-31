@@ -267,3 +267,8 @@ def get_or_compute_query_embedding(
 def clear_query_embedding_cache() -> None:
     """Clear the process-wide query embedding cache."""
     _DEFAULT_QUERY_EMBEDDING_CACHE.clear()
+
+
+def get_query_embedding_cache() -> QueryEmbeddingCache:
+    """Return the process-wide query embedding cache."""
+    return _DEFAULT_QUERY_EMBEDDING_CACHE

@@ -28,6 +28,16 @@ from searchkernel.ports import (
     KeywordStore,
     VectorStore,
 )
+from searchkernel.runtime import (
+    CandidateCacheKey,
+    CandidateResultCache,
+    HydrationCache,
+    HydrationCacheKey,
+    QueryEmbeddingCache,
+    SearchEpochs,
+    UnstableCacheKey,
+    fingerprint,
+)
 from searchkernel.search.adaptive_limit import resolve_adaptive_result_limit
 from searchkernel.search.bounded_graph import (
     TypedGraphEdge,
@@ -157,6 +167,7 @@ class RecordSearchOutcome:
     results: tuple[RecordSearchResult, ...] = ()
     failures: tuple[RecordSearchFailure, ...] = ()
     missing_record_ids: tuple[str, ...] = ()
+    cache_diagnostics: tuple[str, ...] = ()
 
     @property
     def degraded(self) -> bool:
@@ -219,6 +230,19 @@ class RecordSearchPipeline:
         policy: RecordSearchPolicy | None = None,
         config: RecordSearchConfig | None = None,
         continue_on_error: bool | None = None,
+        query_embedding_cache: QueryEmbeddingCache | None = None,
+        candidate_cache: CandidateResultCache[
+            tuple[RecordSearchCandidate, ...]
+        ]
+        | None = None,
+        hydration_cache: HydrationCache[Record | None] | None = None,
+        encoder_namespace: str | None = None,
+        routing_fingerprint: str = "record-search-v1",
+        policy_version: str | None = None,
+        hydration_version: object | None = None,
+        hydration_version_provider: (
+            Callable[[RecordIdentity], object | Awaitable[object]] | None
+        ) = None,
     ) -> None:
         if vector_store is not None and embedding_provider is None:
             raise ValueError("vector_store requires embedding_provider")
@@ -236,6 +260,14 @@ class RecordSearchPipeline:
             if continue_on_error is None
             else continue_on_error
         )
+        self._query_embedding_cache = query_embedding_cache or QueryEmbeddingCache()
+        self._candidate_cache = candidate_cache or CandidateResultCache()
+        self._hydration_cache = hydration_cache
+        self._encoder_namespace = encoder_namespace
+        self._routing_fingerprint = routing_fingerprint
+        self._policy_version = policy_version
+        self._hydration_version = hydration_version
+        self._hydration_version_provider = hydration_version_provider
         self._validate_config()
 
     def search(
@@ -269,137 +301,173 @@ class RecordSearchPipeline:
 
         failures: list[RecordSearchFailure] = []
         missing_record_ids: list[str] = []
+        cache_diagnostics: list[str] = []
         filters = dict(filters or {})
         filters.setdefault("statuses", ["active"])
         acquisition_limit = max(
             max(limit, 1) * self._config.candidate_multiplier,
             self._config.minimum_candidate_limit,
         )
-        rankings: dict[str, list[RecordHit]] = {}
-        if self._policy.vector_candidate_ids is not None:
-            stage_results = await _gather_tasks(
-                [
-                    asyncio.create_task(
-                        _capture_stage(
-                            "keyword",
-                            lambda: self._acquire_keyword(
-                                query, acquisition_limit, filters
-                            ),
-                        )
-                    )
-                    if self._keyword_store is not None
-                    else None,
-                    asyncio.create_task(
-                        _capture_stage(
-                            "vector",
-                            lambda: self._query_embedding(query),
-                        )
-                    )
-                    if self._vector_store is not None
-                    else None,
-                ]
-            )
-            keyword_result = self._consume_stage(
-                _find_stage(stage_results, "keyword"),
-                failures,
-            )
-            if keyword_result is not None:
-                rankings["keyword"] = cast(list[RecordHit], keyword_result)
-            embedding_result = self._consume_stage(
-                _find_stage(stage_results, "vector"),
-                failures,
-            )
-            if embedding_result is not None:
-                vector_result = await _capture_stage(
-                    "vector",
-                    lambda: self._acquire_vector(
-                        cast(tuple[Vector, str, int], embedding_result),
-                        acquisition_limit,
-                        filters,
-                        rankings,
-                    ),
-                )
-                vector_value = self._consume_stage(vector_result, failures)
-                if vector_value is not None:
-                    rankings["vector"] = cast(list[RecordHit], vector_value)
-        else:
-            stage_results = await _gather_tasks(
-                [
-                    asyncio.create_task(
-                        _capture_stage(
-                            "keyword",
-                            lambda: self._acquire_keyword(
-                                query, acquisition_limit, filters
-                            ),
-                        )
-                    )
-                    if self._keyword_store is not None
-                    else None,
-                    asyncio.create_task(
-                        _capture_stage(
-                            "vector",
-                            lambda: self._acquire_vector(
-                                None,
-                                acquisition_limit,
-                                filters,
-                                rankings,
-                                query=query,
-                            ),
-                        )
-                    )
-                    if self._vector_store is not None
-                    else None,
-                ]
-            )
-            for stage, value, error in stage_results:
-                if error is not None:
-                    self._handle_error(stage, error, failures)
-                elif stage == "keyword":
-                    rankings["keyword"] = cast(list[RecordHit], value)
-                else:
-                    rankings["vector"] = cast(list[RecordHit], value)
-
-        fused_scores: dict[str, float] = {}
-        if rankings:
-            fused_scores = fuse_reciprocal_rank(
-                [[hit.storage_key for hit in ranking] for ranking in rankings.values()],
-                k=self._config.rrf_k,
-            )
-        base_candidates = self._build_candidates(fused_scores, rankings)
-        base_candidates = self._apply_candidate_policy(base_candidates)
-
-        if self._graph_store is not None and base_candidates:
+        candidate_key = self._candidate_cache_key(
+            query,
+            filters,
+            limit,
+            acquisition_limit,
+            cache_diagnostics,
+        )
+        candidates: list[RecordSearchCandidate] | None = None
+        if candidate_key is not None and not failures:
             try:
-                graph_ranking = await self._expand_graph(base_candidates)
-                if graph_ranking:
-                    rankings["graph"] = graph_ranking
-                    if self._config.graph_fusion == "max":
-                        fused_scores = dict(fused_scores)
-                        for hit in graph_ranking:
-                            fused_scores[hit.storage_key] = max(
-                                fused_scores.get(hit.storage_key, 0.0),
-                                hit.score,
-                            )
-                    else:
-                        fused_scores = fuse_reciprocal_rank(
-                            [
-                                [hit.storage_key for hit in ranking]
-                                for ranking in rankings.values()
-                            ],
-                            k=self._config.rrf_k,
-                        )
-                    candidates = self._build_candidates(fused_scores, rankings)
-                    candidates = self._apply_candidate_policy(candidates)
-                else:
-                    candidates = base_candidates
-            except Exception as error:  # noqa: BLE001 - degraded mode captures backend failures
-                self._handle_error("graph", error, failures)
-                candidates = base_candidates
-        else:
-            candidates = base_candidates
+                cached_candidates = self._candidate_cache.get(candidate_key)
+            except Exception as error:  # noqa: BLE001 - cache is optional
+                cached_candidates = None
+                cache_diagnostics.append(
+                    f"candidate_cache:error:{type(error).__name__}"
+                )
+            if cached_candidates is not None:
+                candidates = list(cached_candidates)
+                cache_diagnostics.append("candidate_cache:hit")
+            else:
+                cache_diagnostics.append("candidate_cache:miss")
 
-        candidates = self._apply_score_adjustments(candidates)
-        candidates = self._sort_candidates(candidates)
+        if candidates is None:
+            rankings: dict[str, list[RecordHit]] = {}
+            if self._policy.vector_candidate_ids is not None:
+                stage_results = await _gather_tasks(
+                    [
+                        asyncio.create_task(
+                            _capture_stage(
+                                "keyword",
+                                lambda: self._acquire_keyword(
+                                    query, acquisition_limit, filters
+                                ),
+                            )
+                        )
+                        if self._keyword_store is not None
+                        else None,
+                        asyncio.create_task(
+                            _capture_stage(
+                                "vector",
+                                lambda: self._query_embedding(query),
+                            )
+                        )
+                        if self._vector_store is not None
+                        else None,
+                    ]
+                )
+                keyword_result = self._consume_stage(
+                    _find_stage(stage_results, "keyword"),
+                    failures,
+                )
+                if keyword_result is not None:
+                    rankings["keyword"] = cast(list[RecordHit], keyword_result)
+                embedding_result = self._consume_stage(
+                    _find_stage(stage_results, "vector"),
+                    failures,
+                )
+                if embedding_result is not None:
+                    vector_result = await _capture_stage(
+                        "vector",
+                        lambda: self._acquire_vector(
+                            cast(tuple[Vector, str, int], embedding_result),
+                            acquisition_limit,
+                            filters,
+                            rankings,
+                        ),
+                    )
+                    vector_value = self._consume_stage(vector_result, failures)
+                    if vector_value is not None:
+                        rankings["vector"] = cast(list[RecordHit], vector_value)
+            else:
+                stage_results = await _gather_tasks(
+                    [
+                        asyncio.create_task(
+                            _capture_stage(
+                                "keyword",
+                                lambda: self._acquire_keyword(
+                                    query, acquisition_limit, filters
+                                ),
+                            )
+                        )
+                        if self._keyword_store is not None
+                        else None,
+                        asyncio.create_task(
+                            _capture_stage(
+                                "vector",
+                                lambda: self._acquire_vector(
+                                    None,
+                                    acquisition_limit,
+                                    filters,
+                                    rankings,
+                                    query=query,
+                                ),
+                            )
+                        )
+                        if self._vector_store is not None
+                        else None,
+                    ]
+                )
+                for stage, value, error in stage_results:
+                    if error is not None:
+                        self._handle_error(stage, error, failures)
+                    elif stage == "keyword":
+                        rankings["keyword"] = cast(list[RecordHit], value)
+                    else:
+                        rankings["vector"] = cast(list[RecordHit], value)
+
+            fused_scores: dict[str, float] = {}
+            if rankings:
+                fused_scores = fuse_reciprocal_rank(
+                    [
+                        [hit.storage_key for hit in ranking]
+                        for ranking in rankings.values()
+                    ],
+                    k=self._config.rrf_k,
+                )
+            base_candidates = self._build_candidates(fused_scores, rankings)
+            base_candidates = self._apply_candidate_policy(base_candidates)
+
+            if self._graph_store is not None and base_candidates:
+                try:
+                    graph_ranking = await self._expand_graph(base_candidates)
+                    if graph_ranking:
+                        rankings["graph"] = graph_ranking
+                        if self._config.graph_fusion == "max":
+                            fused_scores = dict(fused_scores)
+                            for hit in graph_ranking:
+                                fused_scores[hit.storage_key] = max(
+                                    fused_scores.get(hit.storage_key, 0.0),
+                                    hit.score,
+                                )
+                        else:
+                            fused_scores = fuse_reciprocal_rank(
+                                [
+                                    [hit.storage_key for hit in ranking]
+                                    for ranking in rankings.values()
+                                ],
+                                k=self._config.rrf_k,
+                            )
+                        candidates = self._build_candidates(fused_scores, rankings)
+                        candidates = self._apply_candidate_policy(candidates)
+                    else:
+                        candidates = base_candidates
+                except Exception as error:  # noqa: BLE001 - degraded mode captures backend failures
+                    self._handle_error("graph", error, failures)
+                    candidates = base_candidates
+            else:
+                candidates = base_candidates
+
+            candidates = self._apply_score_adjustments(candidates)
+            candidates = self._sort_candidates(candidates)
+            if candidate_key is not None:
+                try:
+                    self._candidate_cache.set(candidate_key, tuple(candidates))
+                except Exception as error:  # noqa: BLE001 - cache is optional
+                    cache_diagnostics.append(
+                        f"candidate_cache:error:{type(error).__name__}"
+                    )
+
+        assert candidates is not None
         result_limit = resolve_adaptive_result_limit(
             [candidate.score for candidate in candidates],
             requested_limit=limit,
@@ -415,6 +483,7 @@ class RecordSearchPipeline:
         batch_hydration = await self._hydrate_candidates(
             selected_candidates,
             failures,
+            cache_diagnostics,
         )
         for candidate, record in batch_hydration:
             if record is None:
@@ -435,6 +504,7 @@ class RecordSearchPipeline:
             results=tuple(hydrated),
             failures=tuple(failures),
             missing_record_ids=tuple(missing_record_ids),
+            cache_diagnostics=tuple(cache_diagnostics),
         )
 
     async def _acquire_keyword(
@@ -450,6 +520,99 @@ class RecordSearchPipeline:
             await _call_async(store.search, query, acquisition_limit, filters),
             filters,
         )
+
+    def _candidate_cache_key(
+        self,
+        query: str,
+        filters: dict[str, object],
+        requested_limit: int,
+        acquisition_limit: int,
+        diagnostics: list[str],
+    ) -> CandidateCacheKey | None:
+        if not self._policy_cacheable():
+            diagnostics.append("candidate_cache:bypass:unstable_policy")
+            return None
+        try:
+            return CandidateCacheKey.build(
+                query=query,
+                filters=filters,
+                requested_limit=requested_limit,
+                acquisition_limit=acquisition_limit,
+                adaptive_limit=(
+                    self._config.maximum_limit
+                    if self._config.adaptive_enabled
+                    else None
+                ),
+                routing_fingerprint=fingerprint(
+                    {
+                        "name": self._routing_fingerprint,
+                        "candidate_multiplier": self._config.candidate_multiplier,
+                        "minimum_candidate_limit": (
+                            self._config.minimum_candidate_limit
+                        ),
+                        "rrf_k": self._config.rrf_k,
+                        "graph_fusion": self._config.graph_fusion,
+                        "graph_depth": self._config.graph_depth,
+                        "max_graph_seeds": self._config.max_graph_seeds,
+                        "max_neighbors_per_seed": (
+                            self._config.max_neighbors_per_seed
+                        ),
+                        "adaptive_enabled": self._config.adaptive_enabled,
+                        "score_ratio_floor": self._config.score_ratio_floor,
+                        "minimum_score": self._config.minimum_score,
+                        "maximum_score_gap": self._config.maximum_score_gap,
+                    }
+                ),
+                encoder_namespace=self._encoder_namespace_for_provider(),
+                epochs=self._cache_epochs(),
+                policy_version=self._policy_version,
+            )
+        except (UnstableCacheKey, ValueError) as error:
+            diagnostics.append(
+                f"candidate_cache:bypass:{type(error).__name__}"
+            )
+            return None
+
+    def _policy_cacheable(self) -> bool:
+        if self._policy_version is not None:
+            return True
+        return not any(
+            value is not None
+            for value in (
+                self._policy.candidate_filter,
+                self._policy.vector_candidate_ids,
+                self._policy.vector_ranking_order,
+                self._policy.score_adjuster,
+                self._policy.result_filter,
+                self._policy.post_process,
+            )
+        )
+
+    def _cache_epochs(self) -> SearchEpochs:
+        return SearchEpochs(
+            keyword=_read_lane_epoch(self._keyword_store, "keyword"),
+            vector=_read_lane_epoch(self._vector_store, "vector"),
+            graph=_read_lane_epoch(self._graph_store, "graph"),
+        )
+
+    def _encoder_namespace_for_provider(self) -> str | None:
+        provider = self._embedding_provider
+        if provider is None:
+            return self._encoder_namespace
+        explicit = self._encoder_namespace
+        if explicit:
+            return explicit
+        for name in ("encoder_namespace", "encoder_fingerprint", "fingerprint"):
+            value = getattr(provider, name, None)
+            if isinstance(value, str) and value:
+                return value
+        model_name = self._embedding_model_name or getattr(
+            provider, "model_name", None
+        )
+        dim = self._embedding_dim or getattr(provider, "dim", None)
+        if model_name is None:
+            return None
+        return f"{model_name}|dim={dim}"
 
     async def _acquire_vector(
         self,
@@ -520,26 +683,64 @@ class RecordSearchPipeline:
         self,
         candidates: Sequence[RecordSearchCandidate],
         failures: list[RecordSearchFailure],
+        diagnostics: list[str],
     ) -> list[tuple[RecordSearchCandidate, Record | None]]:
         if not candidates:
             return []
+        versioned: list[
+            tuple[RecordSearchCandidate, HydrationCacheKey]
+        ] = []
+        cached: list[tuple[RecordSearchCandidate, Record | None]] = []
+        misses: list[RecordSearchCandidate] = []
+        if self._hydration_cache is not None and self._policy_version is not None:
+            for candidate in candidates:
+                version = await self._hydration_version_for(candidate.identity)
+                if version is None:
+                    misses.append(candidate)
+                    continue
+                key = HydrationCacheKey.build(
+                    candidate.identity,
+                    record_version=version,
+                    policy_version=self._policy_version,
+                )
+                versioned.append((candidate, key))
+                hit, record = self._hydration_cache.lookup(key)
+                if hit:
+                    cached.append((candidate, record))
+                    diagnostics.append("hydration_cache:hit")
+                else:
+                    misses.append(candidate)
+                    diagnostics.append("hydration_cache:miss")
+        else:
+            misses = list(candidates)
+            if self._hydration_cache is not None:
+                diagnostics.append("hydration_cache:bypass:missing_policy_version")
+
+        if not misses:
+            return cached
         hydrate_records = getattr(self._hydrator, "hydrate_records", None)
         if callable(hydrate_records):
             result = await _capture_stage(
                 "hydration",
                 lambda: _call_async(
                     hydrate_records,
-                    [candidate.identity for candidate in candidates],
+                    [candidate.identity for candidate in misses],
                 ),
             )
             records = self._consume_stage(result, failures)
             if records is None:
-                return []
+                return cached
             records_by_key = cast(Mapping[str, Record | None], records)
-            return [
+            loaded = [
                 (candidate, records_by_key.get(candidate.storage_key))
-                for candidate in candidates
+                for candidate in misses
             ]
+            self._store_hydration_cache(
+                versioned,
+                loaded,
+                diagnostics,
+            )
+            return cached + loaded
 
         semaphore = asyncio.Semaphore(self._config.max_hydration_concurrency)
 
@@ -553,7 +754,7 @@ class RecordSearchPipeline:
                     return candidate, None, error
 
         loaded = await _gather_tasks(
-            [asyncio.create_task(hydrate(candidate)) for candidate in candidates]
+            [asyncio.create_task(hydrate(candidate)) for candidate in misses]
         )
         hydrated: list[tuple[RecordSearchCandidate, Record | None]] = []
         for candidate, record, error in cast(
@@ -564,7 +765,45 @@ class RecordSearchPipeline:
                 self._handle_error("hydration", error, failures)
                 continue
             hydrated.append((candidate, record))
-        return hydrated
+        self._store_hydration_cache(versioned, hydrated, diagnostics)
+        return cached + hydrated
+
+    async def _hydration_version_for(
+        self,
+        identity: RecordIdentity,
+    ) -> object | None:
+        if self._hydration_version is not None:
+            return self._hydration_version
+        provider = self._hydration_version_provider
+        if provider is not None:
+            return await _call_async(provider, identity)
+        for name in ("record_epoch", "hydration_epoch"):
+            value = getattr(self._hydrator, name, None)
+            if callable(value):
+                return await _call_async(value)
+            if value is not None:
+                return value
+        return None
+
+    def _store_hydration_cache(
+        self,
+        versioned: Sequence[tuple[RecordSearchCandidate, HydrationCacheKey]],
+        loaded: Sequence[tuple[RecordSearchCandidate, Record | None]],
+        diagnostics: list[str],
+    ) -> None:
+        if self._hydration_cache is None:
+            return
+        keys = {candidate.storage_key: key for candidate, key in versioned}
+        for candidate, record in loaded:
+            key = keys.get(candidate.storage_key)
+            if key is None:
+                continue
+            try:
+                self._hydration_cache.set(key, record)
+            except Exception as error:  # noqa: BLE001 - cache is optional
+                diagnostics.append(
+                    f"hydration_cache:error:{type(error).__name__}"
+                )
 
     def _build_candidates(
         self,
@@ -736,27 +975,6 @@ class RecordSearchPipeline:
         if provider is None:
             raise ValueError("embedding_provider is required for vector search")
 
-        if hasattr(provider, "embed_query"):
-            vector = await _call_async(
-                cast(QueryEmbeddingProvider, provider).embed_query,
-                query,
-            )
-        else:
-            embed_method = getattr(provider, "embed", None)
-            if callable(embed_method):
-                embeddings = await _call_async(
-                    cast(Callable[[list[str]], list[Vector]], embed_method),
-                    [query],
-                )
-                if len(embeddings) != 1:
-                    raise ValueError("embedding provider must return one query vector")
-                vector = embeddings[0]
-            else:
-                vector = await _call_async(
-                    cast(QueryEmbeddingCallable, provider),
-                    query,
-                )
-
         model_name = self._embedding_model_name or getattr(
             provider, "model_name", None
         )
@@ -765,6 +983,37 @@ class RecordSearchPipeline:
             raise ValueError(
                 "vector search requires embedding model name and dimension"
             )
+        async def compute() -> Vector:
+            if hasattr(provider, "embed_query"):
+                return await _call_async(
+                    cast(QueryEmbeddingProvider, provider).embed_query,
+                    query,
+                )
+            embed_method = getattr(provider, "embed", None)
+            if callable(embed_method):
+                embeddings = await _call_async(
+                    cast(Callable[[list[str]], list[Vector]], embed_method),
+                    [query],
+                )
+                if len(embeddings) != 1:
+                    raise ValueError(
+                        "embedding provider must return one query vector"
+                    )
+                return embeddings[0]
+            return await _call_async(
+                cast(QueryEmbeddingCallable, provider),
+                query,
+            )
+
+        try:
+            vector = await self._query_embedding_cache.async_get_or_compute(
+                encoder_namespace=self._encoder_namespace_for_provider(),
+                query=query,
+                compute=compute,
+            )
+        except Exception:
+            logger.debug("query embedding cache bypassed", exc_info=True)
+            vector = await compute()
         if len(vector) != dim:
             raise ValueError(
                 f"query embedding has dimension {len(vector)}, expected {dim}"
@@ -863,6 +1112,39 @@ def _normalize_hits(
     if sort:
         normalized.sort(key=lambda hit: (-hit.score, hit.storage_key))
     return normalized
+
+
+def _read_lane_epoch(store: object | None, lane: str) -> int:
+    if store is None:
+        return 0
+    epochs = getattr(store, "epochs", None)
+    if callable(epochs):
+        try:
+            values = epochs()
+        except Exception:  # noqa: BLE001 - cache key reads must be best effort
+            values = None
+        if isinstance(values, Mapping):
+            value = values.get(lane)
+            if isinstance(value, int):
+                return value
+    lane_epoch = getattr(store, f"{lane}_epoch", None)
+    if callable(lane_epoch):
+        try:
+            value = lane_epoch()
+        except Exception:  # noqa: BLE001 - cache key reads must be best effort
+            value = None
+        if isinstance(value, int):
+            return value
+    if lane == "vector":
+        epoch = getattr(store, "epoch", None)
+        if callable(epoch):
+            try:
+                value = epoch()
+            except Exception:  # noqa: BLE001 - cache key reads must be best effort
+                value = None
+            if isinstance(value, int):
+                return value
+    return 0
 
 
 def _graph_hit(record_id: str, expansion: Any, seed_by_key: Mapping[str, RecordSearchCandidate]) -> RecordHit:

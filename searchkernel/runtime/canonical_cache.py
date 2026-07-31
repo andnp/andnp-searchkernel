@@ -235,13 +235,18 @@ class HydrationCache[ValueT]:
         return self._cache.metrics
 
     def get(self, key: HydrationCacheKey) -> ValueT | None:
+        _hit, value = self.lookup(key)
+        return value
+
+    def lookup(self, key: HydrationCacheKey) -> tuple[bool, ValueT | None]:
         missing_until = self._missing.get(key)
         if missing_until is not None:
             if missing_until > self._clock():
                 self._missing.move_to_end(key)
-                return None
+                return True, None
             self._missing.pop(key, None)
-        return self._cache.get(key)
+        value = self._cache.get(key)
+        return value is not None, value
 
     def set(self, key: HydrationCacheKey, value: ValueT | None) -> None:
         if value is None:
