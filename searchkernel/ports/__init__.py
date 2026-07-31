@@ -6,6 +6,7 @@ They are purely abstract (Protocol or ABC); implementations live in adapters/.
 Dependency rule: ports import only from domain/ and stdlib/typing.
 """
 
+from searchkernel.ports.candidate_filter import CandidateFilterSupport
 from searchkernel.ports.chunking_config import ChunkTuningConfig
 from searchkernel.ports.content_source import (
     ContentSource,
@@ -31,6 +32,7 @@ from searchkernel.ports.stores import CacheStore, GraphStore, KeywordStore, Vect
 
 __all__ = [
     "CacheStore",
+    "CandidateFilterSupport",
     "ChunkTuningConfig",
     "ContentSource",
     "EmbeddingBatchProvider",
