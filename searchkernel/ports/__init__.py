@@ -14,6 +14,11 @@ from searchkernel.ports.embedding import (
     EmbeddingSink,
 )
 from searchkernel.ports.index_manager import IndexManagerPort
+from searchkernel.ports.live_indices import (
+    GraphIndexPort,
+    KeywordIndexPort,
+    VectorIndexPort,
+)
 from searchkernel.ports.llm import LLMProvider
 from searchkernel.ports.orchestrator_config import OrchestratorConfig
 from searchkernel.ports.rerank import Reranker
@@ -27,13 +32,16 @@ __all__ = [
     "EmbeddingBatchProvider",
     "EmbeddingProvider",
     "EmbeddingSink",
+    "GraphIndexPort",
     "GraphStore",
     "IndexManagerPort",
+    "KeywordIndexPort",
     "KeywordStore",
     "LLMProvider",
     "OrchestratorConfig",
     "Reranker",
     "SearchAPI",
     "SearchableSource",
+    "VectorIndexPort",
     "VectorStore",
 ]
