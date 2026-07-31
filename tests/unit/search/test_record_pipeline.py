@@ -300,7 +300,7 @@ async def test_graph_expansion_reads_only_bounded_seed_neighbors() -> None:
 
     await pipeline.async_search("query", limit=3)
 
-    assert [identity.source_id for identity in calls] == ["a", "b"]
+    assert sorted(identity.source_id for identity in calls) == ["a", "b"]
 
 
 async def test_callable_embedding_provider_accepts_explicit_vector_metadata() -> None:

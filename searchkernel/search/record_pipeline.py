@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
@@ -33,6 +34,8 @@ from searchkernel.search.bounded_graph import (
     expand_bounded_typed_graph,
 )
 from searchkernel.search.fusion import fuse_reciprocal_rank
+
+logger = logging.getLogger(__name__)
 
 RecordHydratorCallable = Callable[
     [RecordIdentity | str],
@@ -180,6 +183,8 @@ class RecordSearchConfig:
     graph_depth: int = 1
     max_graph_seeds: int = 10
     max_neighbors_per_seed: int = 10
+    max_graph_concurrency: int = 8
+    max_hydration_concurrency: int = 8
     adaptive_enabled: bool = False
     maximum_limit: int = 100
     score_ratio_floor: float = 0.5
@@ -271,60 +276,88 @@ class RecordSearchPipeline:
             self._config.minimum_candidate_limit,
         )
         rankings: dict[str, list[RecordHit]] = {}
-
-        if self._keyword_store is not None:
-            try:
-                rankings["keyword"] = _normalize_hits(
-                    await _maybe_await(
-                        self._keyword_store.search(query, acquisition_limit, filters)
-                    ),
-                    filters,
-                )
-            except Exception as error:  # noqa: BLE001 - degraded mode captures backend failures
-                self._handle_error("keyword", error, failures)
-
-        if self._vector_store is not None:
-            try:
-                vector, model_name, dim = await self._query_embedding(query)
-                vector_filters = filters
-                if self._policy.vector_candidate_ids is not None:
-                    candidate_ids = self._policy.vector_candidate_ids(
-                        [
-                            (hit.source_id, hit.score)
-                            for hit in rankings.get("keyword", ())
-                        ],
-                        filters,
+        if self._policy.vector_candidate_ids is not None:
+            stage_results = await _gather_tasks(
+                [
+                    asyncio.create_task(
+                        _capture_stage(
+                            "keyword",
+                            lambda: self._acquire_keyword(
+                                query, acquisition_limit, filters
+                            ),
+                        )
                     )
-                    if candidate_ids is not None:
-                        vector_filters = dict(filters)
-                        vector_filters["candidate_ids"] = list(candidate_ids)
-                vector_ranking = _normalize_hits(
-                    await _search_vector_store(
-                        self._vector_store,
-                        vector,
+                    if self._keyword_store is not None
+                    else None,
+                    asyncio.create_task(
+                        _capture_stage(
+                            "vector",
+                            lambda: self._query_embedding(query),
+                        )
+                    )
+                    if self._vector_store is not None
+                    else None,
+                ]
+            )
+            keyword_result = self._consume_stage(
+                _find_stage(stage_results, "keyword"),
+                failures,
+            )
+            if keyword_result is not None:
+                rankings["keyword"] = cast(list[RecordHit], keyword_result)
+            embedding_result = self._consume_stage(
+                _find_stage(stage_results, "vector"),
+                failures,
+            )
+            if embedding_result is not None:
+                vector_result = await _capture_stage(
+                    "vector",
+                    lambda: self._acquire_vector(
+                        cast(tuple[Vector, str, int], embedding_result),
                         acquisition_limit,
-                        model_name=model_name,
-                        dim=dim,
-                        filters=vector_filters,
-                    ),
-                    filters,
-                    sort=False,
-                )
-                if self._policy.vector_ranking_order is not None:
-                    vector_ranking = _normalize_hits(
-                        self._policy.vector_ranking_order(
-                            [
-                                (hit.source_id, hit.score)
-                                for hit in vector_ranking
-                            ],
-                            filters,
-                        ),
                         filters,
-                        sort=False,
+                        rankings,
+                    ),
+                )
+                vector_value = self._consume_stage(vector_result, failures)
+                if vector_value is not None:
+                    rankings["vector"] = cast(list[RecordHit], vector_value)
+        else:
+            stage_results = await _gather_tasks(
+                [
+                    asyncio.create_task(
+                        _capture_stage(
+                            "keyword",
+                            lambda: self._acquire_keyword(
+                                query, acquisition_limit, filters
+                            ),
+                        )
                     )
-                rankings["vector"] = vector_ranking
-            except Exception as error:  # noqa: BLE001 - degraded mode captures backend failures
-                self._handle_error("vector", error, failures)
+                    if self._keyword_store is not None
+                    else None,
+                    asyncio.create_task(
+                        _capture_stage(
+                            "vector",
+                            lambda: self._acquire_vector(
+                                None,
+                                acquisition_limit,
+                                filters,
+                                rankings,
+                                query=query,
+                            ),
+                        )
+                    )
+                    if self._vector_store is not None
+                    else None,
+                ]
+            )
+            for stage, value, error in stage_results:
+                if error is not None:
+                    self._handle_error(stage, error, failures)
+                elif stage == "keyword":
+                    rankings["keyword"] = cast(list[RecordHit], value)
+                else:
+                    rankings["vector"] = cast(list[RecordHit], value)
 
         fused_scores: dict[str, float] = {}
         if rankings:
@@ -378,12 +411,12 @@ class RecordSearchPipeline:
         )
 
         hydrated: list[RecordSearchResult] = []
-        for candidate in candidates[:result_limit]:
-            try:
-                record = await self._hydrate(candidate.identity)
-            except Exception as error:  # noqa: BLE001 - degraded mode captures hydration failures
-                self._handle_error("hydration", error, failures)
-                continue
+        selected_candidates = candidates[:result_limit]
+        batch_hydration = await self._hydrate_candidates(
+            selected_candidates,
+            failures,
+        )
+        for candidate, record in batch_hydration:
             if record is None:
                 missing_record_ids.append(candidate.record_id)
                 continue
@@ -404,25 +437,161 @@ class RecordSearchPipeline:
             missing_record_ids=tuple(missing_record_ids),
         )
 
+    async def _acquire_keyword(
+        self,
+        query: str,
+        acquisition_limit: int,
+        filters: dict[str, object],
+    ) -> list[RecordHit]:
+        store = self._keyword_store
+        if store is None:
+            return []
+        return _normalize_hits(
+            await _call_async(store.search, query, acquisition_limit, filters),
+            filters,
+        )
+
+    async def _acquire_vector(
+        self,
+        embedding: tuple[Vector, str, int] | None,
+        acquisition_limit: int,
+        filters: dict[str, object],
+        rankings: Mapping[str, Sequence[RecordHit]],
+        *,
+        query: str | None = None,
+    ) -> list[RecordHit]:
+        if embedding is None:
+            if query is None:
+                raise ValueError("query is required when embedding is absent")
+            embedding = await self._query_embedding(query)
+        vector, model_name, dim = embedding
+        vector_filters = filters
+        if self._policy.vector_candidate_ids is not None:
+            candidate_ids = self._policy.vector_candidate_ids(
+                [
+                    (hit.source_id, hit.score)
+                    for hit in rankings.get("keyword", ())
+                ],
+                filters,
+            )
+            if candidate_ids is not None:
+                vector_filters = dict(filters)
+                vector_filters["candidate_ids"] = list(candidate_ids)
+        vector_store = self._vector_store
+        if vector_store is None:
+            return []
+        vector_ranking = _normalize_hits(
+            await _search_vector_store(
+                vector_store,
+                vector,
+                acquisition_limit,
+                model_name=model_name,
+                dim=dim,
+                filters=vector_filters,
+            ),
+            filters,
+            sort=False,
+        )
+        if self._policy.vector_ranking_order is not None:
+            vector_ranking = _normalize_hits(
+                self._policy.vector_ranking_order(
+                    [(hit.source_id, hit.score) for hit in vector_ranking],
+                    filters,
+                ),
+                filters,
+                sort=False,
+            )
+        return vector_ranking
+
+    def _consume_stage(
+        self,
+        result: tuple[FailureStage, Any, Exception | None] | None,
+        failures: list[RecordSearchFailure],
+    ) -> Any | None:
+        if result is None:
+            return None
+        stage, value, error = result
+        if error is not None:
+            self._handle_error(stage, error, failures)
+            return None
+        return value
+
+    async def _hydrate_candidates(
+        self,
+        candidates: Sequence[RecordSearchCandidate],
+        failures: list[RecordSearchFailure],
+    ) -> list[tuple[RecordSearchCandidate, Record | None]]:
+        if not candidates:
+            return []
+        hydrate_records = getattr(self._hydrator, "hydrate_records", None)
+        if callable(hydrate_records):
+            result = await _capture_stage(
+                "hydration",
+                lambda: _call_async(
+                    hydrate_records,
+                    [candidate.identity for candidate in candidates],
+                ),
+            )
+            records = self._consume_stage(result, failures)
+            if records is None:
+                return []
+            records_by_key = cast(Mapping[str, Record | None], records)
+            return [
+                (candidate, records_by_key.get(candidate.storage_key))
+                for candidate in candidates
+            ]
+
+        semaphore = asyncio.Semaphore(self._config.max_hydration_concurrency)
+
+        async def hydrate(
+            candidate: RecordSearchCandidate,
+        ) -> tuple[RecordSearchCandidate, Record | None, Exception | None]:
+            async with semaphore:
+                try:
+                    return candidate, await self._hydrate(candidate.identity), None
+                except Exception as error:  # noqa: BLE001 - captured per candidate
+                    return candidate, None, error
+
+        loaded = await _gather_tasks(
+            [asyncio.create_task(hydrate(candidate)) for candidate in candidates]
+        )
+        hydrated: list[tuple[RecordSearchCandidate, Record | None]] = []
+        for candidate, record, error in cast(
+            list[tuple[RecordSearchCandidate, Record | None, Exception | None]],
+            loaded,
+        ):
+            if error is not None:
+                self._handle_error("hydration", error, failures)
+                continue
+            hydrated.append((candidate, record))
+        return hydrated
+
     def _build_candidates(
         self,
         fused_scores: Mapping[str, float],
         rankings: Mapping[str, Sequence[RecordHit]],
     ) -> list[RecordSearchCandidate]:
         candidates: list[RecordSearchCandidate] = []
+        strategy_maps = {
+            strategy: {
+                hit.storage_key: (rank, hit.score, hit.identity)
+                for rank, hit in enumerate(ranking, start=1)
+            }
+            for strategy, ranking in rankings.items()
+        }
         identities = {
-            hit.storage_key: hit.identity
-            for ranking in rankings.values()
-            for hit in ranking
+            storage_key: identity
+            for strategy_map in strategy_maps.values()
+            for storage_key, (_rank, _score, identity) in strategy_map.items()
         }
         for storage_key, score in fused_scores.items():
             identity = identities[storage_key]
             provenance = SearchResultProvenance(record_identity=identity)
-            for strategy, ranking in rankings.items():
-                for rank, hit in enumerate(ranking, start=1):
-                    if hit.storage_key == storage_key:
-                        provenance.add_strategy(strategy, rank, hit.score)
-                        break
+            for strategy, strategy_map in strategy_maps.items():
+                contribution = strategy_map.get(storage_key)
+                if contribution is not None:
+                    rank, raw_score, _identity = contribution
+                    provenance.add_strategy(strategy, rank, raw_score)
             candidate = RecordSearchCandidate(
                 identity, score, provenance
             )
@@ -473,27 +642,10 @@ class RecordSearchPipeline:
             candidate.storage_key: candidate
             for candidate in graph_seeds
         }
+        neighbors_by_seed = await self._load_graph_neighbors(graph_store, graph_seeds)
         for seed_key in seed_scores:
             seed = seed_by_key[seed_key]
-            raw_neighbors = cast(
-                list[GraphNeighbor | tuple[str, str, float]],
-                await _maybe_await(
-                    graph_store.neighbors(
-                        seed.identity,
-                        depth=self._config.graph_depth,
-                    )
-                ),
-            )
-            if not raw_neighbors:
-                raw_neighbors = cast(
-                    list[GraphNeighbor | tuple[str, str, float]],
-                    await _maybe_await(
-                        graph_store.neighbors(
-                            seed.record_id,
-                            depth=self._config.graph_depth,
-                        )
-                    ),
-                )
+            raw_neighbors = neighbors_by_seed.get(seed_key, ())
             sorted_neighbors = sorted(
                 (
                     _normalize_graph_neighbor(neighbor, seed.identity)
@@ -523,29 +675,86 @@ class RecordSearchPipeline:
             key=lambda item: (-item.score, item.storage_key),
         )
 
+    async def _load_graph_neighbors(
+        self,
+        graph_store: GraphStore | AsyncGraphStore,
+        graph_seeds: Sequence[RecordSearchCandidate],
+    ) -> dict[str, Sequence[GraphNeighbor | tuple[str, str, float]]]:
+        identities = [candidate.identity for candidate in graph_seeds]
+        neighbors_many = getattr(graph_store, "neighbors_many", None)
+        if callable(neighbors_many):
+            result = await _call_async(
+                neighbors_many,
+                identities,
+                depth=self._config.graph_depth,
+            )
+            return dict(
+                cast(
+                    Mapping[
+                        str,
+                        Sequence[GraphNeighbor | tuple[str, str, float]],
+                    ],
+                    result,
+                )
+            )
+
+        semaphore = asyncio.Semaphore(self._config.max_graph_concurrency)
+
+        async def load(
+            seed: RecordSearchCandidate,
+        ) -> tuple[str, Sequence[GraphNeighbor | tuple[str, str, float]]]:
+            async with semaphore:
+                try:
+                    neighbors = await _call_async(
+                        graph_store.neighbors,
+                        seed.identity,
+                        depth=self._config.graph_depth,
+                    )
+                except TypeError:
+                    logger.warning(
+                        "graph adapter rejected canonical identity; "
+                        "using legacy source_id fallback for %s",
+                        seed.storage_key,
+                    )
+                    neighbors = await _call_async(
+                        graph_store.neighbors,
+                        seed.record_id,
+                        depth=self._config.graph_depth,
+                    )
+                return seed.storage_key, cast(
+                    Sequence[GraphNeighbor | tuple[str, str, float]],
+                    neighbors,
+                )
+
+        loaded = await _gather_tasks(
+            [asyncio.create_task(load(seed)) for seed in graph_seeds]
+        )
+        return dict(cast(list[tuple[str, Sequence[GraphNeighbor | tuple[str, str, float]]]], loaded))
+
     async def _query_embedding(self, query: str) -> tuple[Vector, str, int]:
         provider = self._embedding_provider
         if provider is None:
             raise ValueError("embedding_provider is required for vector search")
 
         if hasattr(provider, "embed_query"):
-            vector = await _maybe_await(
-                cast(QueryEmbeddingProvider, provider).embed_query(query)
+            vector = await _call_async(
+                cast(QueryEmbeddingProvider, provider).embed_query,
+                query,
             )
         else:
             embed_method = getattr(provider, "embed", None)
             if callable(embed_method):
-                embeddings = await _maybe_await(
-                    cast(
-                    Callable[[list[str]], list[Vector]], embed_method
-                    )([query])
+                embeddings = await _call_async(
+                    cast(Callable[[list[str]], list[Vector]], embed_method),
+                    [query],
                 )
                 if len(embeddings) != 1:
                     raise ValueError("embedding provider must return one query vector")
                 vector = embeddings[0]
             else:
-                vector = await _maybe_await(
-                    cast(QueryEmbeddingCallable, provider)(query)
+                vector = await _call_async(
+                    cast(QueryEmbeddingCallable, provider),
+                    query,
                 )
 
         model_name = self._embedding_model_name or getattr(
@@ -564,11 +773,13 @@ class RecordSearchPipeline:
 
     async def _hydrate(self, identity: RecordIdentity) -> Record | None:
         if hasattr(self._hydrator, "hydrate_record"):
-            return await _maybe_await(
-                cast(RecordHydrator, self._hydrator).hydrate_record(identity)
+            return await _call_async(
+                cast(RecordHydrator, self._hydrator).hydrate_record,
+                identity,
             )
-        return await _maybe_await(
-            cast(RecordHydratorCallable, self._hydrator)(identity.source_id)
+        return await _call_async(
+            cast(RecordHydratorCallable, self._hydrator),
+            identity.source_id,
         )
 
     def _handle_error(
@@ -598,6 +809,10 @@ class RecordSearchPipeline:
             raise ValueError("max_graph_seeds must be positive")
         if self._config.max_neighbors_per_seed < 1:
             raise ValueError("max_neighbors_per_seed must be positive")
+        if self._config.max_graph_concurrency < 1:
+            raise ValueError("max_graph_concurrency must be positive")
+        if self._config.max_hydration_concurrency < 1:
+            raise ValueError("max_hydration_concurrency must be positive")
         if self._config.failure_mode not in {"strict", "lenient"}:
             raise ValueError("failure_mode must be 'strict' or 'lenient'")
 
@@ -605,7 +820,7 @@ class RecordSearchPipeline:
     def _sort_candidates(
         candidates: Sequence[RecordSearchCandidate],
     ) -> list[RecordSearchCandidate]:
-        return sorted(candidates, key=lambda item: (-item.score, item.record_id))
+        return sorted(candidates, key=lambda item: (-item.score, item.storage_key))
 
 
 def _normalize_hits(
@@ -682,11 +897,55 @@ def _normalize_graph_neighbor(
     return target_id, edge_type, weight
 
 
-async def _maybe_await[T](value: T | Awaitable[T]) -> T:
-    """Allow synchronous adapters during the migration while ports go async."""
+async def _call_async[T](
+    function: Callable[..., T | Awaitable[T]],
+    *args: Any,
+    **kwargs: Any,
+) -> T:
+    """Run blocking adapter calls away from the async event loop."""
+    if inspect.iscoroutinefunction(function):
+        value = function(*args, **kwargs)
+    else:
+        value = await asyncio.to_thread(function, *args, **kwargs)
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+async def _capture_stage(
+    stage: FailureStage,
+    operation: Callable[[], Awaitable[Any]],
+) -> tuple[FailureStage, Any, Exception | None]:
+    try:
+        return stage, await operation(), None
+    except Exception as error:  # noqa: BLE001 - stage errors are handled by the caller
+        return stage, None, error
+
+
+async def _gather_tasks(
+    tasks: Sequence[asyncio.Task[Any] | None],
+) -> list[Any]:
+    pending = [task for task in tasks if task is not None]
+    if not pending:
+        return []
+    try:
+        return list(await asyncio.gather(*pending))
+    except BaseException:
+        for task in pending:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        raise
+
+
+def _find_stage(
+    results: Sequence[tuple[FailureStage, Any, Exception | None]],
+    stage: FailureStage,
+) -> tuple[FailureStage, Any, Exception | None] | None:
+    for result_stage, value, error in results:
+        if result_stage == stage:
+            return result_stage, value, error
+    return None
 
 
 async def _search_vector_store(
@@ -700,7 +959,7 @@ async def _search_vector_store(
 ) -> Sequence[RecordHit | tuple[str, float]]:
     async_search = getattr(store, "async_search", None)
     if callable(async_search):
-        return await _maybe_await(
+        return await _call_async(
             cast(
                 Callable[
                     ...,
@@ -708,20 +967,18 @@ async def _search_vector_store(
                     | Awaitable[Sequence[RecordHit | tuple[str, float]]],
                 ],
                 async_search,
-            )(
-                vector,
-                k,
-                model_name=model_name,
-                dim=dim,
-                filters=filters,
-            )
-        )
-    return await _maybe_await(
-        store.search(
+            ),
             vector,
             k,
             model_name=model_name,
             dim=dim,
             filters=filters,
         )
+    return await _call_async(
+        store.search,
+        vector,
+        k,
+        model_name=model_name,
+        dim=dim,
+        filters=filters,
     )
