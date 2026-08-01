@@ -2,8 +2,15 @@
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from typing import Any
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
+from typing import Any, cast
 
 from searchkernel.domain import (
     Cursor,
@@ -22,6 +29,7 @@ from searchkernel.ports.content_source import (
     RecordIngestionResult,
     RecordIngestor,
     SearchableSource,
+    SourceBatch,
 )
 from searchkernel.ports.embedding import (
     AsyncEmbeddingProvider,
@@ -249,6 +257,42 @@ class SearchKernel:
 
         all_results: list[RecordIngestionResult] = []
         checkpoint_blocked = False
+        batch_iterator = getattr(source, "iter_batches", None)
+        if callable(batch_iterator):
+            stream = batch_iterator(since=current_checkpoint)
+            if inspect.isawaitable(stream):
+                stream = await stream
+            if not hasattr(stream, "__aiter__"):
+                raise TypeError(
+                    "BatchContentSource.iter_batches must return an async iterator"
+                )
+            async for source_batch in cast(AsyncIterator[SourceBatch], stream):
+                if not isinstance(source_batch, SourceBatch):
+                    raise TypeError("BatchContentSource yielded an invalid SourceBatch")
+                records = tuple(source_batch.records)
+                for record in records:
+                    if not isinstance(record, Record):
+                        raise TypeError("SourceBatch contained a non-Record value")
+                current_checkpoint, batch_results, checkpoint_blocked = (
+                    await self._ingest_batch(
+                        source,
+                        records,
+                        current_checkpoint=current_checkpoint,
+                        checkpoint_blocked=checkpoint_blocked,
+                        workspace_id=workspace_id,
+                        failure_mode=failure_mode,
+                        checkpoint_store=checkpoint_store,
+                        terminal_cursor=source_batch.terminal_cursor,
+                    )
+                )
+                all_results.extend(batch_results)
+            return IngestionReceipt(
+                source_kind=source_kind,
+                workspace_id=workspace_id or _single_workspace(all_results),
+                checkpoint=current_checkpoint,
+                records=tuple(all_results),
+            )
+
         stream = source.iter_records(since=current_checkpoint)
         if inspect.isawaitable(stream):
             stream = await stream
@@ -308,7 +352,22 @@ class SearchKernel:
         workspace_id: str | None,
         failure_mode: IngestionFailureMode,
         checkpoint_store: CheckpointStore | None,
+        terminal_cursor: Cursor = None,
     ) -> tuple[Cursor, list[RecordIngestionResult], bool]:
+        if not records:
+            candidate = (
+                current_checkpoint
+                if checkpoint_blocked or terminal_cursor is None
+                else terminal_cursor
+            )
+            if candidate != current_checkpoint and checkpoint_store is not None:
+                await checkpoint_store.save(
+                    source.source_kind,
+                    workspace_id,
+                    candidate,
+                )
+            return candidate, [], checkpoint_blocked
+
         try:
             ingestor = self._ingestor
             if ingestor is None:
@@ -346,6 +405,10 @@ class SearchKernel:
         batch_has_failure = any(not result.successful for result in results)
         if checkpoint_blocked:
             candidate = current_checkpoint
+        elif terminal_cursor is not None and all(
+            result.successful for result in results
+        ):
+            candidate = terminal_cursor
         else:
             candidate = _safe_batch_checkpoint(
                 results,
