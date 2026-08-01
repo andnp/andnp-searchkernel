@@ -221,7 +221,7 @@ async def test_candidate_filter_runs_before_graph_expansion() -> None:
         ),
     )
 
-    outcome = await pipeline.async_search("query", limit=3)
+    outcome = await pipeline.async_search("what relates to seed?", limit=3)
 
     assert [result.record_id for result in outcome.results] == ["seed", "allowed"]
     assert "blocked" not in {result.record_id for result in outcome.results}
@@ -264,7 +264,7 @@ async def test_graph_expansion_is_bounded_and_missing_records_are_reported() -> 
         continue_on_error=True,
     )
 
-    outcome = await pipeline.async_search("query", limit=3)
+    outcome = await pipeline.async_search("what relates to the seed?", limit=3)
 
     assert [result.record_id for result in outcome.results] == ["seed"]
     assert outcome.missing_record_ids == ("missing",)
@@ -300,7 +300,7 @@ async def test_graph_expansion_reads_only_bounded_seed_neighbors() -> None:
         continue_on_error=True,
     )
 
-    await pipeline.async_search("query", limit=3)
+    await pipeline.async_search("what relates to this module?", limit=3)
 
     assert sorted(identity.source_id for identity in calls) == ["a", "b"]
 
@@ -476,7 +476,7 @@ async def test_graph_neighbors_preserve_canonical_identity() -> None:
         hydrator=_hydrator(records),
     )
 
-    outcome = await pipeline.async_search("query", limit=2)
+    outcome = await pipeline.async_search("what relates to the seed?", limit=2)
 
     assert [result.storage_key for result in outcome.results] == [
         seed.storage_key,
@@ -676,6 +676,28 @@ async def test_graph_disabled_does_not_touch_graph_store() -> None:
 
     assert outcome.results[0].record_id == "a"
     assert "query_plan:skip:graph:disabled" in outcome.diagnostics
+
+
+async def test_ordinary_query_does_not_touch_available_graph_store() -> None:
+    class FailingGraph(FakeGraphStore):
+        def neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+        ) -> list[GraphNeighbor | tuple[str, str, float]]:
+            raise AssertionError("graph should be skipped for ordinary queries")
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        graph_store=FailingGraph({}),
+        hydrator=_hydrator({"a": _record("a")}),
+    )
+
+    outcome = await pipeline.async_search("what is caching?", limit=1)
+
+    assert outcome.results[0].record_id == "a"
+    assert "query_plan:skip:graph:query_not_relationship" in outcome.diagnostics
 
 
 async def test_conditional_expansion_is_called_once_after_weak_first_pass() -> None:
@@ -943,7 +965,7 @@ async def test_batch_graph_and_hydration_use_canonical_keys_once() -> None:
         hydrator=hydrator,
     )
 
-    outcome = await pipeline.async_search("query", limit=2)
+    outcome = await pipeline.async_search("what relates to the seed?", limit=2)
 
     assert graph.calls == 1
     assert graph.identities == [seed]
@@ -1048,7 +1070,7 @@ async def test_scalar_graph_fallback_is_bounded() -> None:
         config=RecordSearchConfig(max_graph_concurrency=2),
     )
 
-    await pipeline.async_search("query", limit=4)
+    await pipeline.async_search("what relates to these records?", limit=4)
 
     assert maximum_active == 2
 
@@ -1083,7 +1105,7 @@ async def test_batch_graph_failures_keep_strict_and_lenient_modes() -> None:
         hydrator=_hydrator({"a": _record("a")}),
     )
     with pytest.raises(RecordSearchError, match="graph retrieval failed"):
-        await strict.async_search("query")
+        await strict.async_search("what relates to record a?")
 
     lenient = RecordSearchPipeline(
         keyword_store=FakeKeywordStore([("a", 1.0)]),
@@ -1091,7 +1113,7 @@ async def test_batch_graph_failures_keep_strict_and_lenient_modes() -> None:
         hydrator=_hydrator({"a": _record("a")}),
         continue_on_error=True,
     )
-    outcome = await lenient.async_search("query")
+    outcome = await lenient.async_search("what relates to record a?")
     assert [result.record_id for result in outcome.results] == ["a"]
     assert outcome.failures[0].stage == "graph"
 

@@ -28,7 +28,7 @@ def test_lane_budgets_are_independently_configurable() -> None:
             minimum_candidate_limit=1,
         )
     ).route(
-        "what is dependency injection?",
+        "what is caching?",
         limit=3,
         keyword_available=True,
         vector_available=True,
@@ -52,3 +52,43 @@ def test_disabled_graph_is_diagnostic_only() -> None:
 
     assert not plan.graph_enabled
     assert "graph:disabled" in plan.diagnostic_skip_reasons
+
+
+def test_ordinary_query_skips_graph_with_an_explicitly_available_store() -> None:
+    plan = QueryRouter().route(
+        "what is caching?",
+        limit=1,
+        keyword_available=True,
+        vector_available=True,
+        graph_available=True,
+    )
+
+    assert not plan.graph_enabled
+    assert "graph:query_not_relationship" in plan.diagnostic_skip_reasons
+
+
+def test_relationship_query_enables_graph_expansion() -> None:
+    plan = QueryRouter().route(
+        "what depends on this module?",
+        limit=1,
+        keyword_available=True,
+        vector_available=True,
+        graph_available=True,
+    )
+
+    assert plan.signals.relationship
+    assert plan.graph_enabled
+    assert "graph:query_not_relationship" not in plan.diagnostic_skip_reasons
+
+
+def test_unavailable_graph_is_diagnostic_only() -> None:
+    plan = QueryRouter().route(
+        "what depends on this module?",
+        limit=1,
+        keyword_available=True,
+        vector_available=True,
+        graph_available=False,
+    )
+
+    assert not plan.graph_enabled
+    assert "graph:unavailable" in plan.diagnostic_skip_reasons

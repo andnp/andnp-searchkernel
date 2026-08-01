@@ -196,7 +196,11 @@ class RecordSearchError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class RecordSearchConfig:
-    """Deterministic limits and optional graph/adaptive retrieval settings."""
+    """Deterministic limits and optional graph/adaptive retrieval settings.
+
+    ``graph_enabled`` is an explicit opt-out; enabled graph work still
+    requires a relationship signal in the query.
+    """
 
     candidate_multiplier: int = 5
     minimum_candidate_limit: int = 1

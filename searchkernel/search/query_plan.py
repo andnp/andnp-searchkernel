@@ -112,7 +112,9 @@ class QueryRouter:
         )
         keyword_enabled = keyword_available
         vector_enabled = vector_available
-        graph_is_enabled = graph_available and graph_enabled
+        graph_is_enabled = (
+            graph_available and graph_enabled and signals.relationship
+        )
         skip_reasons: list[str] = []
 
         if not keyword_enabled:
@@ -123,6 +125,8 @@ class QueryRouter:
             skip_reasons.append("graph:unavailable")
         elif not graph_enabled:
             skip_reasons.append("graph:disabled")
+        elif not signals.relationship:
+            skip_reasons.append("graph:query_not_relationship")
 
         if signals.artifact:
             vector_candidates_keyword_bounded = True
