@@ -129,14 +129,18 @@ class QueryRouter:
             skip_reasons.append("graph:query_not_relationship")
 
         if signals.artifact:
-            vector_candidates_keyword_bounded = True
+            vector_candidates_keyword_bounded = keyword_enabled
             weights = get_adaptive_weights(
                 QueryType.FACTUAL,
                 self.config.base_semantic_weight,
                 self.config.base_keyword_weight,
                 self.config.base_graph_weight,
             )
-            skip_reasons.append("vector:awaiting_keyword_confidence")
+            skip_reasons.append(
+                "vector:awaiting_keyword_confidence"
+                if keyword_enabled
+                else "vector:keyword_unavailable_unbounded"
+            )
         elif query_type == QueryType.EXPLORATORY:
             vector_candidates_keyword_bounded = False
             weights = get_adaptive_weights(

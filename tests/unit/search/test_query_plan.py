@@ -20,6 +20,20 @@ def test_artifact_plan_prefers_keyword_and_bounds_vector_candidates() -> None:
     assert plan.vector_candidate_budget == 15
 
 
+def test_artifact_plan_uses_unbounded_vector_without_keyword_store() -> None:
+    plan = QueryRouter().route(
+        "src/search_kernel.py",
+        limit=3,
+        keyword_available=False,
+        vector_available=True,
+        graph_available=False,
+    )
+
+    assert plan.vector_enabled
+    assert not plan.vector_candidates_keyword_bounded
+    assert "vector:keyword_unavailable_unbounded" in plan.diagnostic_skip_reasons
+
+
 def test_lane_budgets_are_independently_configurable() -> None:
     plan = QueryRouter(
         QueryRouterConfig(

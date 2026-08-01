@@ -666,6 +666,63 @@ async def test_artifact_keyword_confidence_skips_embedding() -> None:
     assert "vector:artifact_keyword_confident" in outcome.diagnostics
 
 
+async def test_artifact_keyword_results_bound_vector_acquisition() -> None:
+    class AnyEmbedder(FakeEmbedder):
+        def embed_query(self, query: str) -> list[float]:
+            return [1.0, 0.0]
+
+    keyword_store = FakeKeywordStore([("keyword", 0.1)])
+    vector_store = FakeVectorStore([("vector", 0.9)])
+    pipeline = RecordSearchPipeline(
+        keyword_store=keyword_store,
+        vector_store=vector_store,
+        embedding_provider=AnyEmbedder(),
+        hydrator=_hydrator(
+            {"keyword": _record("keyword"), "vector": _record("vector")}
+        ),
+    )
+
+    await pipeline.async_search("src/search_kernel.py", limit=1)
+
+    assert vector_store.filters[0] == {
+        "statuses": ["active"],
+        "candidate_storage_keys": [
+            RecordIdentity(None, "legacy", "keyword").storage_key
+        ],
+    }
+
+
+async def test_artifact_vector_only_search_falls_back_to_unbounded_acquisition() -> None:
+    class AnyEmbedder(FakeEmbedder):
+        def embed_query(self, query: str) -> list[float]:
+            return [1.0, 0.0]
+
+    vector_store = FakeVectorStore([("vector", 0.9)])
+    pipeline = RecordSearchPipeline(
+        vector_store=vector_store,
+        embedding_provider=AnyEmbedder(),
+        hydrator=_hydrator({"vector": _record("vector")}),
+    )
+
+    outcome = await pipeline.async_search("src/search_kernel.py", limit=1)
+
+    assert [result.record_id for result in outcome.results] == ["vector"]
+    assert vector_store.filters == [{"statuses": ["active"]}]
+    assert "query_plan:skip:vector:keyword_unavailable_unbounded" in (
+        outcome.diagnostics
+    )
+
+
+async def test_artifact_search_without_keyword_or_vector_returns_no_results() -> None:
+    pipeline = RecordSearchPipeline(hydrator=_hydrator({}))
+
+    outcome = await pipeline.async_search("src/search_kernel.py", limit=1)
+
+    assert outcome.results == ()
+    assert "query_plan:skip:keyword:unavailable" in outcome.diagnostics
+    assert "query_plan:skip:vector:unavailable" in outcome.diagnostics
+
+
 async def test_lane_budgets_reach_their_respective_stores() -> None:
     class AnyEmbedder(FakeEmbedder):
         def embed_query(self, query: str) -> list[float]:

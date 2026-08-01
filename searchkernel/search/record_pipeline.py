@@ -976,10 +976,12 @@ class RecordSearchPipeline:
                 vector_filters = dict(filters)
                 vector_filters["candidate_ids"] = list(candidate_ids)
         elif plan is not None and plan.vector_candidates_keyword_bounded:
-            vector_filters = dict(filters)
-            vector_filters["candidate_storage_keys"] = [
-                hit.storage_key for hit in rankings.get("keyword", ())
-            ]
+            keyword_ranking = rankings.get("keyword", ())
+            if keyword_ranking:
+                vector_filters = dict(filters)
+                vector_filters["candidate_storage_keys"] = [
+                    hit.storage_key for hit in keyword_ranking
+                ]
         vector_store = self._vector_store
         if vector_store is None:
             return []
