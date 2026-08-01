@@ -33,6 +33,7 @@ def _record(
     title: str | None = None,
     uri: str | None = None,
     metadata: dict | None = None,
+    indexed_text: str | None = None,
 ) -> Record:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
     return Record(
@@ -46,6 +47,7 @@ def _record(
         status=status,
         uri=uri,
         metadata=metadata or {},
+        indexed_text=indexed_text,
     )
 
 
@@ -99,6 +101,27 @@ def test_local_store_uses_collision_safe_identity_and_filters(tmp_path) -> None:
     assert graph.neighbors(
         RecordIdentity("one", "note", "same")
     ) == [GraphNeighbor(RecordIdentity("one", "commit", "same"), "related", 0.5)]
+
+
+def test_local_keyword_searches_indexed_text_hydrates_raw_body(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    record = _record(
+        "note",
+        "indexed",
+        "Raw citation body",
+        indexed_text="search-only vocabulary",
+    )
+
+    backend.index([record])
+
+    assert [hit.source_id for hit in backend.search_keyword("vocabulary", 10)] == [
+        "indexed"
+    ]
+    assert backend.search_keyword("citation", 10) == []
+    hydrated = backend.hydrate_record(record.storage_key)
+    assert hydrated is not None
+    assert hydrated.body == "Raw citation body"
+    assert hydrated.indexed_text == "search-only vocabulary"
 
 
 def test_local_batch_hydration_and_graph_preserve_canonical_keys(tmp_path) -> None:

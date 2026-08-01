@@ -45,7 +45,7 @@ from searchkernel.storage.db import DatabaseManager, SQLiteTuning
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 _LOCAL_KEYWORD_SCHEMA = "local_records_fts"
-_LOCAL_KEYWORD_SCHEMA_VERSION = 1
+_LOCAL_KEYWORD_SCHEMA_VERSION = 2
 _LOCAL_FTS_TABLE = "local_records_fts"
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
@@ -126,6 +126,7 @@ class LocalRecordBackend:
                 source_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 body TEXT NOT NULL,
+                indexed_text TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 metadata TEXT NOT NULL,
@@ -181,6 +182,7 @@ class LocalRecordBackend:
             """
         )
         self._ensure_local_record_column(conn, "keywords", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_local_record_column(conn, "indexed_text", "TEXT")
         self._initialize_keyword_schema(conn)
         self._migrate_legacy_vectors(conn)
         self._initialize_graph_schema(conn)
@@ -465,8 +467,45 @@ class LocalRecordBackend:
             or version_row is None
             or version_row[0] != _LOCAL_KEYWORD_SCHEMA_VERSION
         ):
-            conn.execute(
-                f"INSERT INTO {_LOCAL_FTS_TABLE}({_LOCAL_FTS_TABLE}) VALUES ('rebuild')"
+            try:
+                conn.execute(f"DELETE FROM {_LOCAL_FTS_TABLE}")
+            except sqlite3.DatabaseError:
+                conn.execute(f"DROP TABLE IF EXISTS {_LOCAL_FTS_TABLE}")
+                conn.execute(
+                    f"""
+                    CREATE VIRTUAL TABLE {_LOCAL_FTS_TABLE} USING fts5(
+                        title,
+                        body,
+                        uri,
+                        keywords,
+                        content='local_records',
+                        content_rowid='rowid',
+                        tokenize='unicode61'
+                    )
+                    """
+                )
+            rows = conn.execute(
+                """
+                SELECT rowid, title, body, indexed_text, uri, keywords
+                FROM local_records
+                """
+            ).fetchall()
+            conn.executemany(
+                f"""
+                INSERT INTO {_LOCAL_FTS_TABLE}
+                    (rowid, title, body, uri, keywords)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        row["rowid"],
+                        row["title"],
+                        row["indexed_text"] or row["body"],
+                        row["uri"],
+                        row["keywords"],
+                    )
+                    for row in rows
+                ),
             )
 
         conn.execute(
@@ -514,6 +553,7 @@ class LocalRecordBackend:
             record.source_id,
             record.title,
             record.body,
+            record.indexed_text,
             record.created_at.isoformat(),
             record.updated_at.isoformat(),
             json.dumps(record.metadata, sort_keys=True),
@@ -533,7 +573,13 @@ class LocalRecordBackend:
                 ({_LOCAL_FTS_TABLE}, rowid, title, body, uri, keywords)
             VALUES ('delete', ?, ?, ?, ?, ?)
             """,
-            (row["rowid"], row["title"], row["body"], row["uri"], row["keywords"]),
+            (
+                row["rowid"],
+                row["title"],
+                row["indexed_text"] or row["body"],
+                row["uri"],
+                row["keywords"],
+            ),
         )
 
     @staticmethod
@@ -547,7 +593,13 @@ class LocalRecordBackend:
                 (rowid, title, body, uri, keywords)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (row["rowid"], row["title"], row["body"], row["uri"], row["keywords"]),
+            (
+                row["rowid"],
+                row["title"],
+                row["indexed_text"] or row["body"],
+                row["uri"],
+                row["keywords"],
+            ),
         )
 
     def _write_records(
@@ -558,7 +610,7 @@ class LocalRecordBackend:
         for record in rows:
             old_row = conn.execute(
                 """
-                SELECT rowid, title, body, uri, keywords
+                SELECT rowid, title, body, indexed_text, uri, keywords
                 FROM local_records
                 WHERE storage_key = ?
                 """,
@@ -570,14 +622,15 @@ class LocalRecordBackend:
                 """
                 INSERT INTO local_records (
                     storage_key, workspace_id, source_kind, source_id, title, body,
-                    created_at, updated_at, metadata, uri, keywords, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    indexed_text, created_at, updated_at, metadata, uri, keywords, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(storage_key) DO UPDATE SET
                     workspace_id = excluded.workspace_id,
                     source_kind = excluded.source_kind,
                     source_id = excluded.source_id,
                     title = excluded.title,
                     body = excluded.body,
+                    indexed_text = excluded.indexed_text,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at,
                     metadata = excluded.metadata,
@@ -590,7 +643,7 @@ class LocalRecordBackend:
             if self._fts5_available:
                 new_row = conn.execute(
                     """
-                    SELECT rowid, title, body, uri, keywords
+                    SELECT rowid, title, body, indexed_text, uri, keywords
                     FROM local_records
                     WHERE storage_key = ?
                     """,
@@ -799,6 +852,7 @@ class LocalRecordBackend:
                     r.source_id,
                     r.title,
                     r.body,
+                    r.indexed_text,
                     r.uri,
                     r.keywords,
                     -bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0) AS score
@@ -817,7 +871,7 @@ class LocalRecordBackend:
                 normalized_query = _keyword_scoring.normalize_artifact_value(query)
                 score += _keyword_scoring.score_field_aware_match(
                     query,
-                    content=row["body"],
+                    content=row["indexed_text"] or row["body"],
                     title=row["title"],
                     headers=row["keywords"],
                     source_file=row["uri"] or "",
@@ -857,7 +911,8 @@ class LocalRecordBackend:
             conn = self._db.get_connection()
             rows = conn.execute(
                 f"""
-                SELECT storage_key, workspace_id, source_kind, source_id, title, body
+                SELECT storage_key, workspace_id, source_kind, source_id, title, body,
+                       indexed_text
                 FROM local_records r
                 WHERE {" AND ".join(clause.replace("r.", "") for clause in clauses)}
                 LIMIT ?
@@ -872,7 +927,8 @@ class LocalRecordBackend:
             return []
         hits: list[RecordHit] = []
         for row in rows:
-            haystack = f"{row['title']} {row['body']}".lower()
+            indexed_text = row["indexed_text"] or row["body"]
+            haystack = f"{row['title']} {indexed_text}".lower()
             score = sum(haystack.count(term) for term in terms)
             if score:
                 hits.append(
@@ -1134,6 +1190,7 @@ class LocalRecordBackend:
                 source_id=row["source_id"],
                 title=row["title"],
                 body=row["body"],
+                indexed_text=row["indexed_text"],
                 created_at=datetime.fromisoformat(row["created_at"]),
                 updated_at=datetime.fromisoformat(row["updated_at"]),
                 metadata=json.loads(row["metadata"]),
@@ -1164,6 +1221,7 @@ class LocalRecordBackend:
                 source_id=row["source_id"],
                 title=row["title"],
                 body=row["body"],
+                indexed_text=row["indexed_text"],
                 created_at=datetime.fromisoformat(row["created_at"]),
                 updated_at=datetime.fromisoformat(row["updated_at"]),
                 metadata=json.loads(row["metadata"]),
@@ -1205,7 +1263,7 @@ class LocalRecordBackend:
                     )
                     old_row = conn.execute(
                         """
-                        SELECT rowid, title, body, uri, keywords
+                        SELECT rowid, title, body, indexed_text, uri, keywords
                         FROM local_records
                         WHERE storage_key = ?
                         """,
@@ -1302,7 +1360,7 @@ class LocalRecordBackend:
             return not bool(missing)
 
     def rebuild_keyword_index(self) -> None:
-        """Rebuild the external-content keyword index from local records."""
+        """Rebuild the keyword index from effective indexed text."""
         with self._lock:
             conn = self._db.get_connection()
             if not self._fts5_available:
@@ -1312,8 +1370,29 @@ class LocalRecordBackend:
                 )
                 return
             try:
-                conn.execute(
-                    f"INSERT INTO {_LOCAL_FTS_TABLE}({_LOCAL_FTS_TABLE}) VALUES ('rebuild')"
+                conn.execute(f"DELETE FROM {_LOCAL_FTS_TABLE}")
+                rows = conn.execute(
+                    """
+                    SELECT rowid, title, body, indexed_text, uri, keywords
+                    FROM local_records
+                    """
+                ).fetchall()
+                conn.executemany(
+                    f"""
+                    INSERT INTO {_LOCAL_FTS_TABLE}
+                        (rowid, title, body, uri, keywords)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        (
+                            row["rowid"],
+                            row["title"],
+                            row["indexed_text"] or row["body"],
+                            row["uri"],
+                            row["keywords"],
+                        )
+                        for row in rows
+                    ),
                 )
                 conn.commit()
             except sqlite3.DatabaseError:
@@ -1332,8 +1411,28 @@ class LocalRecordBackend:
                     )
                     """
                 )
-                conn.execute(
-                    f"INSERT INTO {_LOCAL_FTS_TABLE}({_LOCAL_FTS_TABLE}) VALUES ('rebuild')"
+                rows = conn.execute(
+                    """
+                    SELECT rowid, title, body, indexed_text, uri, keywords
+                    FROM local_records
+                    """
+                ).fetchall()
+                conn.executemany(
+                    f"""
+                    INSERT INTO {_LOCAL_FTS_TABLE}
+                        (rowid, title, body, uri, keywords)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        (
+                            row["rowid"],
+                            row["title"],
+                            row["indexed_text"] or row["body"],
+                            row["uri"],
+                            row["keywords"],
+                        )
+                        for row in rows
+                    ),
                 )
                 conn.commit()
 

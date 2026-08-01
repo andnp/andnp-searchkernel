@@ -312,6 +312,9 @@ def _migrate_records_schema(cursor) -> None:
         "ALTER TABLE records ADD COLUMN IF NOT EXISTS workspace_id TEXT;"
     )
     cursor.execute(
+        "ALTER TABLE records ADD COLUMN IF NOT EXISTS indexed_text TEXT;"
+    )
+    cursor.execute(
         "SELECT record_id, workspace_id, source_kind, source_id FROM records;"
     )
     rows = cursor.fetchall()
@@ -919,15 +922,16 @@ class PGVectorStore:
             # Upsert records table
             for record in records:
                 metadata_json = json.dumps(record.metadata)
-                tsvector_text = f"{record.title} {record.body}"
+                indexed_text = record.indexed_text or record.body
+                tsvector_text = f"{record.title} {indexed_text}"
                 record_key = record.storage_key
 
                 cursor.execute(
                     """
                     INSERT INTO records
                     (record_id, workspace_id, source_kind, source_id, title, body,
-                     tsvector_body, created_at, updated_at, metadata, uri, status)
-                    VALUES (%s, %s, %s, %s, %s, %s,
+                     indexed_text, tsvector_body, created_at, updated_at, metadata, uri, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s,
                             to_tsvector('english', %s), %s, %s, %s, %s, %s)
                     ON CONFLICT (record_id) DO UPDATE SET
                         workspace_id = EXCLUDED.workspace_id,
@@ -935,7 +939,8 @@ class PGVectorStore:
                         source_id = EXCLUDED.source_id,
                         title = EXCLUDED.title,
                         body = EXCLUDED.body,
-                        tsvector_body = to_tsvector('english', EXCLUDED.title || ' ' || EXCLUDED.body),
+                        indexed_text = EXCLUDED.indexed_text,
+                        tsvector_body = to_tsvector('english', EXCLUDED.title || ' ' || COALESCE(EXCLUDED.indexed_text, EXCLUDED.body)),
                         created_at = EXCLUDED.created_at,
                         updated_at = EXCLUDED.updated_at,
                         metadata = EXCLUDED.metadata,
@@ -949,6 +954,7 @@ class PGVectorStore:
                         record.source_id,
                         record.title,
                         record.body,
+                        record.indexed_text,
                         tsvector_text,
                         _utc_timestamp(record.created_at),
                         _utc_timestamp(record.updated_at),
@@ -1252,7 +1258,10 @@ class PGKeywordStore:
                 WHERE r.record_id = data.record_id;
                 """,
                 [
-                    (record.storage_key, f"{record.title} {record.body}")
+                    (
+                        record.storage_key,
+                        f"{record.title} {record.indexed_text or record.body}",
+                    )
                     for record in records
                 ],
             )
