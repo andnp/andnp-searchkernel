@@ -331,13 +331,14 @@ def _merge_stage_outcomes(
     keyword_outcomes: Sequence[RecordIngestionResult],
     semantic_outcomes: Sequence[RecordIngestionResult],
 ) -> IngestionReceipt:
-    keyword_by_id = {result.source_id: result for result in keyword_outcomes}
-    semantic_by_id = {result.source_id: result for result in semantic_outcomes}
+    keyword_by_id = {_result_key(result): result for result in keyword_outcomes}
+    semantic_by_id = {_result_key(result): result for result in semantic_outcomes}
     outcomes: list[RecordIngestionResult] = []
     for record in records:
+        record_key = _result_key(record)
         stage_results = (
-            keyword_by_id.get(record.source_id),
-            semantic_by_id.get(record.source_id),
+            keyword_by_id.get(record_key),
+            semantic_by_id.get(record_key),
         )
         errors = [
             result.error
@@ -368,6 +369,12 @@ def _merge_stage_outcomes(
                 )
             )
     return _receipt(records, checkpoint, outcomes)
+
+
+def _result_key(
+    result: Record | RecordIngestionResult,
+) -> tuple[str, str, str | None]:
+    return result.source_kind, result.source_id, result.workspace_id
 
 
 def _workspace_id(records: Sequence[Record]) -> str | None:
