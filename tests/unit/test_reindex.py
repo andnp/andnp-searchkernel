@@ -41,9 +41,11 @@ class FakeProvider:
         self.fail_on_call = fail_on_call
         self.model_name = model_name
         self.dim = dim
+        self.embedded_texts: list[list[str]] = []
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         self.calls += 1
+        self.embedded_texts.append(texts)
         if self.calls == self.fail_on_call:
             raise RuntimeError("embedding failed")
         return [
@@ -447,6 +449,16 @@ def test_backfill_writes_target_records_without_mutating_source_records():
     assert all(record.embedding_model == "target-model" for batch, _, _ in store.calls for record in batch)
 
 
+def test_legacy_backfill_embeds_indexed_text_with_body_fallback():
+    records = make_records()
+    records[0].indexed_text = "indexed text"
+    provider = FakeProvider()
+
+    ReindexRoutine(records, provider, FakeStore(), batch_size=3).backfill()
+
+    assert provider.embedded_texts == [["indexed text", "body 1", "body 2"]]
+
+
 def test_backfill_failure_preserves_completed_batches_for_retry():
     store = FakeStore()
     routine = ReindexRoutine(
@@ -501,6 +513,18 @@ def test_local_lifecycle_keeps_old_namespace_during_target_backfill(tmp_path: Pa
     assert backend.vector_count(source.model_name, source.dim) == len(records)
     assert backend.vector_count("new-model", 3) == len(records)
     _assert_records_are_preserved(backend, records)
+
+
+def test_lifecycle_backfill_embeds_indexed_text_with_body_fallback(tmp_path: Path):
+    records, backend, store, source = _local_migration(tmp_path, count=2)
+    records[0].indexed_text = "indexed text"
+    provider = FakeProvider(model_name="new-model")
+    routine = _routine(records, backend, store, source, provider=provider)
+
+    routine.expand()
+    routine.backfill()
+
+    assert provider.embedded_texts == [["indexed text", "local body 1"]]
 
 
 def test_backfill_failure_is_resumable_and_retryable(tmp_path: Path):

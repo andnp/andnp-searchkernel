@@ -18,6 +18,7 @@ from searchkernel.domain.reindex import (
     RollbackMetadata,
     ValidationResult,
 )
+from searchkernel.indexing.semantic import semantic_input_for_record
 from searchkernel.ports.embedding import EmbeddingProvider
 from searchkernel.ports.reindex import (
     ActiveModelStore,
@@ -221,7 +222,7 @@ class ReindexRoutine:
             self._save(state)
             try:
                 embeddings = self.target_provider.embed(
-                    [record.body for record in batch]
+                    [semantic_input_for_record(record).text for record in batch]
                 )
                 if len(embeddings) != len(batch):
                     raise ReindexError(
@@ -587,7 +588,7 @@ class ReindexRoutine:
             batch = self.records[offset : offset + self.batch_size]
             try:
                 embeddings = self.target_provider.embed(
-                    [record.body for record in batch]
+                    [semantic_input_for_record(record).text for record in batch]
                 )
                 if len(embeddings) != len(batch):
                     raise ReindexError(
