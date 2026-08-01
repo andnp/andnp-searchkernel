@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from searchkernel.domain import Chunk
+from searchkernel.domain import Chunk, Record
 from searchkernel.indexing.embedding_cache import SQLiteEmbeddingCache
 from searchkernel.indexing.semantic import (
     EncoderFingerprint,
@@ -16,6 +16,7 @@ from searchkernel.indexing.semantic import (
     SemanticWorkPlanner,
     embedding_identity,
     semantic_input_for_chunk,
+    semantic_input_for_record,
 )
 
 
@@ -167,6 +168,87 @@ class TestSemanticInputForChunk:
         )
         assert input_item.tier == "coarse"
         assert input_item.priority == 10
+
+
+class TestSemanticInputForRecord:
+    def test_semantic_input_uses_indexed_text_and_storage_key(self) -> None:
+        timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+        record = Record(
+            workspace_id="workspace",
+            source_kind="note",
+            source_id="note-1",
+            title="Title",
+            body="Raw body",
+            indexed_text="Search text",
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+
+        input_item = semantic_input_for_record(record, "test-ns")
+
+        assert input_item.source_id == record.storage_key
+        assert input_item.text == "Search text"
+        assert input_item.content_hash == embedding_identity("Search text", "test-ns")
+
+    def test_semantic_input_falls_back_to_body(self) -> None:
+        timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+        record = Record(
+            "note",
+            "note-1",
+            "Title",
+            "Raw body",
+            timestamp,
+            timestamp,
+        )
+
+        assert semantic_input_for_record(record).text == "Raw body"
+
+    def test_record_inputs_share_work_for_duplicate_indexed_text(self) -> None:
+        timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+        records = [
+            Record(
+                "note",
+                f"note-{index}",
+                "Title",
+                f"Raw body {index}",
+                timestamp,
+                timestamp,
+                indexed_text="same search text",
+            )
+            for index in range(2)
+        ]
+        inputs = [semantic_input_for_record(record) for record in records]
+
+        plan = SemanticWorkPlanner("test-ns", dimension=3).plan(inputs, FakeCache())
+
+        assert len(plan.groups) == 1
+        group = next(iter(plan.groups.values()))
+        assert [item.source_id for item in group] == [
+            record.storage_key for record in records
+        ]
+
+    def test_record_inputs_reuse_cached_embedding(self) -> None:
+        timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+        record = Record(
+            "note",
+            "note-1",
+            "Title",
+            "Raw body",
+            timestamp,
+            timestamp,
+            indexed_text="Search text",
+        )
+        input_item = semantic_input_for_record(record)
+        planner = SemanticWorkPlanner("test-ns", dimension=384)
+        cache = FakeCache()
+        encoder = FakeEncoder()
+
+        planner.execute([input_item], cache, encoder, FakeMaterializer())
+        progress = planner.execute([input_item], cache, encoder, FakeMaterializer())
+
+        assert encoder.call_count == 1
+        assert progress.cache_hits == 1
+        assert progress.cache_misses == 0
 
 
 class TestSemanticWorkPlanner:
