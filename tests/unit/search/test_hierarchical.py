@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from searchkernel.domain import ScoredRef
+from searchkernel.domain import RecordIdentity, ScoredRef
 from searchkernel.ports import SourceCapabilities
 from searchkernel.runtime.federation import search_anything
 from searchkernel.runtime.registry import SourceRegistry
@@ -77,6 +77,138 @@ async def test_hierarchical_search_promotes_children_with_parent_provenance():
         "parent_score": 1.0,
         "kind": "fine_child",
     }
+
+
+@pytest.mark.asyncio
+async def test_hierarchical_search_groups_children_by_composite_parent_identity():
+    parent_a = ScoredRef(
+        "shared",
+        1.0,
+        "note",
+        workspace_id="workspace-a",
+    )
+    parent_b = ScoredRef(
+        "shared",
+        0.9,
+        "commit",
+        workspace_id="workspace-b",
+    )
+
+    class _CollisionSource(_HierarchicalSource):
+        def __init__(self) -> None:
+            self.requested_parent_keys: list[str] = []
+
+        async def search_parents(self, query, k, filters=None):
+            return [parent_b, parent_a]
+
+        async def search_children(self, query, parent_ids, k, filters=None):
+            self.requested_parent_keys = list(parent_ids)
+            return [
+                ScoredRef(
+                    "child-b",
+                    0.8,
+                    "commit",
+                    {
+                        "parent_storage_key": parent_b.storage_key,
+                        "text": "commit child",
+                    },
+                    workspace_id="workspace-b",
+                ),
+                ScoredRef(
+                    "child-a",
+                    0.7,
+                    "note",
+                    {
+                        "parent_identity": RecordIdentity(
+                            "workspace-a", "note", "shared"
+                        ),
+                        "text": "note child",
+                    },
+                    workspace_id="workspace-a",
+                ),
+            ]
+
+    source = _CollisionSource()
+    results = await search_hierarchical(
+        source,
+        "query",
+        k=2,
+        config=HierarchicalRetrievalConfig(
+            enabled=True,
+            max_parents=2,
+            children_per_parent=1,
+        ),
+    )
+
+    assert source.requested_parent_keys == [
+        parent_a.storage_key,
+        parent_b.storage_key,
+    ]
+    assert [result.source_id for result in results] == ["child-a", "child-b"]
+    assert [
+        result.metadata["hierarchical_provenance"]["parent_storage_key"]
+        for result in results
+    ] == [parent_a.storage_key, parent_b.storage_key]
+
+
+@pytest.mark.asyncio
+async def test_hierarchical_search_adapts_legacy_parent_ids_when_unambiguous():
+    class _LegacySource(_HierarchicalSource):
+        async def search_children(self, query, parent_ids, k, filters=None):
+            if parent_ids != ["parent-1", "parent-2"]:
+                return []
+            return [
+                ScoredRef(
+                    "child-1",
+                    0.8,
+                    "structured",
+                    {"parent_id": "parent-1"},
+                )
+            ]
+
+    results = await search_hierarchical(
+        _LegacySource(),
+        "query",
+        k=1,
+        config=HierarchicalRetrievalConfig(enabled=True),
+    )
+
+    assert [result.source_id for result in results] == ["child-1"]
+
+
+@pytest.mark.asyncio
+async def test_hierarchical_search_does_not_adapt_ambiguous_parent_ids():
+    parent_a = ScoredRef("shared", 1.0, "note", workspace_id="workspace-a")
+    parent_b = ScoredRef("shared", 0.9, "commit", workspace_id="workspace-b")
+
+    class _LegacySource(_HierarchicalSource):
+        async def search_parents(self, query, k, filters=None):
+            return [parent_a, parent_b]
+
+        async def search_children(self, query, parent_ids, k, filters=None):
+            if parent_ids != ["shared", "shared"]:
+                return []
+            return [
+                ScoredRef(
+                    "child",
+                    0.8,
+                    "note",
+                    {"parent_id": "shared"},
+                )
+            ]
+
+    results = await search_hierarchical(
+        _LegacySource(),
+        "query",
+        k=2,
+        config=HierarchicalRetrievalConfig(enabled=True),
+    )
+
+    assert [result.source_id for result in results] == ["shared", "shared"]
+    assert [
+        result.metadata["hierarchical_provenance"]["parent_storage_key"]
+        for result in results
+    ] == [parent_a.storage_key, parent_b.storage_key]
 
 
 @pytest.mark.asyncio

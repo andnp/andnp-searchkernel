@@ -186,6 +186,11 @@ class HierarchicalSearchableSource(Protocol):
         k: int,
         filters: dict[str, Any] | None = None,
     ) -> Iterable[ScoredRef]:
+        """Search children for canonical parent storage keys.
+
+        Legacy source-id requests remain adaptable when the selected parent
+        identities have unique source IDs.
+        """
         ...
 
 
