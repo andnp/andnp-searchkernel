@@ -199,6 +199,7 @@ class MigrationState:
     checkpoint: int = 0
     attempts: int = 0
     total_records: int | None = None
+    corpus_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if not self.migration_id.strip():
@@ -220,6 +221,11 @@ class MigrationState:
             )
         ):
             raise ValueError("total_records must be non-negative or None")
+        if (
+            self.corpus_fingerprint is not None
+            and not self.corpus_fingerprint.strip()
+        ):
+            raise ValueError("corpus_fingerprint must be non-empty or None")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -230,6 +236,7 @@ class MigrationState:
             "checkpoint": self.checkpoint,
             "attempts": self.attempts,
             "total_records": self.total_records,
+            "corpus_fingerprint": self.corpus_fingerprint,
             "validation": (
                 self.validation.to_dict() if self.validation is not None else None
             ),
@@ -262,6 +269,7 @@ class MigrationState:
                 if data.get("total_records") is not None
                 else None
             ),
+            corpus_fingerprint=data.get("corpus_fingerprint"),
             validation=(
                 ValidationResult.from_dict(validation)
                 if validation is not None

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -630,6 +632,7 @@ class ReindexRoutine:
         store = self._lifecycle()
         saved = store.load_migration(self.migration_id)
         target = self.target_namespace
+        corpus_fingerprint = self._corpus_fingerprint()
         if saved is not None:
             if saved.target != target:
                 raise ReindexError(
@@ -639,6 +642,13 @@ class ReindexRoutine:
             self._check_namespace_dimensions(saved.source, saved.target)
             if self.source_namespace is not None and saved.source != self.source_namespace:
                 raise ReindexError("migration source namespace does not match")
+            if saved.corpus_fingerprint is None:
+                return self._migrate_legacy_state(saved, corpus_fingerprint)
+            if saved.corpus_fingerprint != corpus_fingerprint:
+                raise ReindexError(
+                    "migration checkpoint corpus identity does not match "
+                    "the supplied records"
+                )
             if (
                 saved.total_records is not None
                 and saved.total_records != len(self.records)
@@ -663,7 +673,69 @@ class ReindexRoutine:
             source=source,
             target=target,
             total_records=len(self.records),
+            corpus_fingerprint=corpus_fingerprint,
         )
+
+    def _migrate_legacy_state(
+        self,
+        saved: MigrationState,
+        corpus_fingerprint: str,
+    ) -> MigrationState:
+        if saved.checkpoint == 0:
+            migrated = replace(
+                saved,
+                total_records=len(self.records),
+                corpus_fingerprint=corpus_fingerprint,
+            )
+            self._save(migrated)
+            return migrated
+        if saved.phase in {
+            MigrationPhase.FLIP,
+            MigrationPhase.CONTRACT,
+            MigrationPhase.COMPLETE,
+            MigrationPhase.ROLLBACK,
+        }:
+            raise ReindexError(
+                "legacy migration checkpoint lacks corpus identity; "
+                "refusing to resume a completed serving transition"
+            )
+
+        migrated = replace(
+            saved,
+            checkpoint=0,
+            total_records=len(self.records),
+            corpus_fingerprint=corpus_fingerprint,
+            validation=None,
+            phase=(
+                MigrationPhase.FAILED
+                if saved.phase is MigrationPhase.FAILED
+                else MigrationPhase.BACKFILL
+            ),
+            resume_phase=(
+                MigrationPhase.BACKFILL
+                if saved.phase is MigrationPhase.FAILED
+                else None
+            ),
+            error=saved.error if saved.phase is MigrationPhase.FAILED else None,
+        )
+        self._save(migrated)
+        return migrated
+
+    def _corpus_fingerprint(self) -> str:
+        payload = [
+            {
+                "identity": record.storage_key,
+                "body": record.body,
+            }
+            for record in self.records
+        ]
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
     def _check_namespace_dimensions(

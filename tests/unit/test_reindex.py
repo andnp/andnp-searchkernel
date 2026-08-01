@@ -4,6 +4,7 @@ import json
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -558,7 +559,7 @@ def test_backfill_failure_is_resumable_and_retryable(tmp_path: Path):
     _assert_records_are_preserved(backend, records)
 
 
-def test_checkpoint_survives_routine_restart(tmp_path: Path):
+def test_checkpoint_resumes_unchanged_corpus_after_restart(tmp_path: Path):
     records, backend, store, source = _local_migration(tmp_path, count=5)
     first = _routine(
         records,
@@ -582,6 +583,7 @@ def test_checkpoint_survives_routine_restart(tmp_path: Path):
     assert restarted.checkpoint == 2
     assert restarted.state is not None
     assert restarted.state.phase is MigrationPhase.FAILED
+    assert restarted.state.corpus_fingerprint is not None
 
     restarted.retry()
     restarted.backfill()
@@ -589,6 +591,116 @@ def test_checkpoint_survives_routine_restart(tmp_path: Path):
     assert restarted_provider.calls == 2
     assert backend.vector_count("new-model", 3) == len(records)
     _assert_records_are_preserved(backend, records)
+
+
+def test_checkpoint_rejects_reordered_corpus(tmp_path: Path):
+    records, backend, store, source = _local_migration(tmp_path, count=5)
+    first = _routine(
+        records,
+        backend,
+        store,
+        source,
+        provider=FakeProvider(model_name="new-model", fail_on_call=2),
+    )
+    first.expand()
+    with pytest.raises(ReindexError):
+        first.backfill()
+
+    reordered = [records[1], records[0], *records[2:]]
+    restarted_provider = FakeProvider(model_name="new-model")
+    restarted = _routine(
+        reordered,
+        backend,
+        store,
+        source,
+        provider=restarted_provider,
+    )
+
+    with pytest.raises(ReindexError, match="corpus identity"):
+        restarted.backfill()
+
+    assert restarted_provider.calls == 0
+    assert backend.vector_count("new-model", 3) == 2
+
+
+def test_checkpoint_rejects_replaced_record_with_same_corpus_length(
+    tmp_path: Path,
+):
+    records, backend, store, source = _local_migration(tmp_path, count=5)
+    first = _routine(
+        records,
+        backend,
+        store,
+        source,
+        provider=FakeProvider(model_name="new-model", fail_on_call=2),
+    )
+    first.expand()
+    with pytest.raises(ReindexError):
+        first.backfill()
+
+    replaced = [
+        *records[:2],
+        replace(
+            records[2],
+            source_id="replacement-2",
+            body="replacement body",
+        ),
+        *records[3:],
+    ]
+    restarted_provider = FakeProvider(model_name="new-model")
+    restarted = _routine(
+        replaced,
+        backend,
+        store,
+        source,
+        provider=restarted_provider,
+    )
+
+    with pytest.raises(ReindexError, match="corpus identity"):
+        restarted.backfill()
+
+    assert restarted_provider.calls == 0
+    assert backend.vector_count("new-model", 3) == 2
+
+
+def test_legacy_checkpoint_resets_before_resume(tmp_path: Path):
+    records, backend, store, source = _local_migration(tmp_path, count=5)
+    first = _routine(
+        records,
+        backend,
+        store,
+        source,
+        provider=FakeProvider(model_name="new-model", fail_on_call=2),
+    )
+    first.expand()
+    with pytest.raises(ReindexError):
+        first.backfill()
+
+    saved = store.load_migration("local-migration")
+    assert saved is not None
+    legacy_data = saved.to_dict()
+    legacy_data.pop("corpus_fingerprint")
+    atomic_write_json(store.migration_dir / "local-migration.json", legacy_data)
+
+    restarted_provider = FakeProvider(model_name="new-model")
+    restarted = _routine(
+        records,
+        backend,
+        store,
+        source,
+        provider=restarted_provider,
+    )
+
+    retried = restarted.retry()
+    assert retried.checkpoint == 0
+    assert retried.corpus_fingerprint is not None
+    assert retried.phase is MigrationPhase.BACKFILL
+
+    progress = restarted.backfill()
+
+    assert progress.complete
+    assert restarted_provider.calls == 3
+    assert backend.vector_count("new-model", 3) == len(records)
 
 
 def test_validation_failure_does_not_flip_or_lose_source_data(tmp_path: Path):
