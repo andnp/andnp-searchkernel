@@ -39,11 +39,15 @@ class HuggingFaceEmbeddingProvider:
         *,
         truncate_dim: int | None = None,
         device: str | None = None,
+        batch_size: int = 32,
     ):
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
         from sentence_transformers import SentenceTransformer
 
         self.model_name = model_name
         self._truncate_dim = truncate_dim
+        self._batch_size = batch_size
         # Matryoshka (MRL): passing truncate_dim makes the model emit
         # truncated + re-normalized vectors directly.
         self._model: SentenceTransformer = SentenceTransformer(
@@ -67,7 +71,7 @@ class HuggingFaceEmbeddingProvider:
         """Embed DOCUMENTS (no instruction prompt), L2-normalized."""
         embeddings = self._model.encode(
             texts,
-            batch_size=32,
+            batch_size=self._batch_size,
             normalize_embeddings=True,
             convert_to_numpy=True,
         )
@@ -83,7 +87,7 @@ class HuggingFaceEmbeddingProvider:
             embeddings = self._model.encode(
                 texts,
                 prompt_name="query",
-                batch_size=32,
+                batch_size=self._batch_size,
                 normalize_embeddings=True,
                 convert_to_numpy=True,
             )
@@ -91,7 +95,7 @@ class HuggingFaceEmbeddingProvider:
             embeddings = self._model.encode(
                 texts,
                 prompt=_QWEN3_QUERY_INSTRUCTION,
-                batch_size=32,
+                batch_size=self._batch_size,
                 normalize_embeddings=True,
                 convert_to_numpy=True,
             )
