@@ -14,6 +14,7 @@ from searchkernel.ports.content_source import (
     IngestionError,
     IngestionReceipt,
     RecordIngestionResult,
+    SourceBatch,
 )
 
 
@@ -30,6 +31,29 @@ class _ContentSource:
         async def stream() -> AsyncIterator[Record]:
             for record in self.records:
                 yield record
+
+        return stream()
+
+    def change_signal(self) -> ChangeSignal:
+        return {"poll_interval": 60}
+
+    def cursor_for(self, record: Record) -> str:
+        return str(record.metadata["cursor"])
+
+
+class _BatchContentSource:
+    source_kind = "notes"
+
+    def __init__(self, batches: list[SourceBatch]) -> None:
+        self.batches = batches
+        self.since_values: list[str | None] = []
+
+    def iter_batches(self, since: str | None = None) -> AsyncIterator[SourceBatch]:
+        self.since_values.append(since)
+
+        async def stream() -> AsyncIterator[SourceBatch]:
+            for batch in self.batches:
+                yield batch
 
         return stream()
 
@@ -121,6 +145,75 @@ async def test_ingest_source_batches_records_and_persists_after_commit() -> None
     assert source.since_values == [None]
     assert ingestor.calls == [["one", "two"], ["three"]]
     assert await checkpoints.load("notes") == "three"
+
+
+@pytest.mark.asyncio
+async def test_empty_batch_advances_terminal_cursor() -> None:
+    source = _BatchContentSource([SourceBatch((), terminal_cursor="empty")])
+    ingestor = _RecordIngestor()
+    checkpoints = MemoryCheckpointStore()
+    kernel = SearchKernel.build(
+        content_sources=[cast(ContentSource, source)],
+        ingestor=ingestor,
+    )
+
+    receipt = await kernel.ingest_source("notes", checkpoint_store=checkpoints)
+
+    assert receipt.checkpoint == "empty"
+    assert receipt.records == ()
+    assert ingestor.calls == []
+    assert await checkpoints.load("notes") == "empty"
+
+
+@pytest.mark.asyncio
+async def test_strict_batch_failure_does_not_consume_terminal_cursor() -> None:
+    source = _BatchContentSource(
+        [
+            SourceBatch(
+                (_record("one"), _record("bad")),
+                terminal_cursor="batch-terminal",
+            )
+        ]
+    )
+    ingestor = _RecordIngestor({"bad"})
+    checkpoints = MemoryCheckpointStore()
+    kernel = SearchKernel.build(
+        content_sources=[cast(ContentSource, source)],
+        ingestor=ingestor,
+    )
+
+    with pytest.raises(IngestionError) as error:
+        await kernel.ingest_source("notes", checkpoint_store=checkpoints)
+
+    assert error.value.receipt.checkpoint is None
+    assert await checkpoints.load("notes") is None
+
+
+@pytest.mark.asyncio
+async def test_lenient_batch_failure_uses_contiguous_record_cursor() -> None:
+    source = _BatchContentSource(
+        [
+            SourceBatch(
+                (_record("one"), _record("bad")),
+                terminal_cursor="batch-terminal",
+            )
+        ]
+    )
+    ingestor = _RecordIngestor({"bad"})
+    checkpoints = MemoryCheckpointStore()
+    kernel = SearchKernel.build(
+        content_sources=[cast(ContentSource, source)],
+        ingestor=ingestor,
+    )
+
+    receipt = await kernel.ingest_source(
+        "notes",
+        failure_mode="lenient",
+        checkpoint_store=checkpoints,
+    )
+
+    assert receipt.checkpoint == "one"
+    assert await checkpoints.load("notes") == "one"
 
 
 @pytest.mark.asyncio
