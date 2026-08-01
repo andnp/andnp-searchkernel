@@ -49,10 +49,11 @@ async def ingest_git_source(
     batch_size: int = 100,
     failure_mode: IngestionFailureMode = "strict",
 ) -> IngestionReceipt:
-    """Ingest a git source through the async batch index boundary.
+    """Legacy direct ingestion helper for callers owning an IndexManager.
 
-    The source cursor is returned by the batch receipts. Durable persistence is
-    intentionally owned by the caller so it happens after the index commit.
+    ``SearchKernel.ingest_source`` is the canonical path for checkpointed
+    ingestion, including sources that emit terminal batch cursors. This helper
+    remains for callers that own the index manager and durable persistence.
     """
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
