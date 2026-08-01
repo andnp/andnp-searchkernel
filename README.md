@@ -4,7 +4,9 @@ A domain-agnostic search/indexing kernel for building hybrid vector + keyword + 
 
 ## Status
 
-**Pre-alpha, extraction in progress.** This library is being extracted from [`mcp-markdown-ragdocs`](https://github.com/andnp/mcp-markdown-ragdocs) to enable reuse across arbitrary content sources and search backends.
+**Pre-alpha, canonical record path established.** The legacy chunk query
+pipeline has been removed; source adapters, backend integrations, and
+performance validation remain subject to change.
 
 ## Optional backends
 
@@ -39,8 +41,9 @@ kernel = SearchKernel.build(
 `SearchKernel.build` registers a canonical `SearchOrchestrator` for these
 dependencies. Callers that already own one may pass `orchestrator=` instead.
 The deprecated chunk-oriented execution path has been removed; migrate callers
-to this record composition or use `LegacyLocalOrchestratorAdapter` only when
-wrapping an existing legacy orchestrator.
+to this record composition. For an explicit migration bridge around an
+existing legacy orchestrator, import `LegacyLocalOrchestratorAdapter` from
+`searchkernel.runtime.local`; it is not the supported search pipeline.
 
 ## Integration tests
 

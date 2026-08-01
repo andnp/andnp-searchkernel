@@ -1,16 +1,27 @@
 # Search Performance and Retrieval Quality Roadmap
 
-Status: proposed implementation plan  
-Last reviewed: 2026-07-31  
+Status: implementation complete; performance validation remains scoped
+Last reviewed: 2026-08-01
 Applies to: `andnp-searchkernel` 0.2.x pre-alpha
+
+## Implementation status
+
+Milestones 0-9 are implemented in the current code and committed contract
+tests. The canonical record path now owns query execution, with FTS5 keyword
+retrieval, compact local vectors, optional FAISS, batched retrieval, caching,
+query routing, filtered pgvector support, storage integrity, source diversity,
+hierarchical retrieval, and the legacy chunk query pipeline removed.
+
+The implementation status does not imply production performance parity. The
+committed evidence and remaining validation limits are recorded in
+[Committed evidence and limits](#committed-evidence-and-limits).
 
 ## 1. Purpose
 
-This document is an implementation plan for making `andnp-searchkernel` fast,
-lightweight, and effective for AI-driven search across diverse data sources.
-It is intentionally detailed enough for an agent unfamiliar with the project
-to implement each milestone without having to rediscover the architecture or
-the reasoning behind the recommendations.
+This document records the implementation and validation plan for making
+`andnp-searchkernel` fast, lightweight, and effective for AI-driven search
+across diverse data sources. It preserves the architecture, constraints, and
+evidence requirements behind the completed milestones.
 
 The main conclusion of the review is that the largest near-term gains do not
 require adding complex retrieval methods. The repository already contains many
@@ -348,6 +359,22 @@ uv run pytest -q tests/unit/test_eval_golden.py \
 uv run ruff check searchkernel/eval tests/unit/test_eval_*.py
 uv run pyright searchkernel/eval
 ```
+
+### Committed evidence and limits
+
+`benchmarks/milestone-0-baseline.json` records a synthetic 1k-record,
+single-process cold/warm baseline with 16 queries, one warmup, and three
+measured repetitions. It is a harness baseline, not a production or
+cross-backend performance comparison.
+
+`benchmarks/local_scale_gate.py` with
+`benchmarks/local_scale_gate.json` defines the reproducible local scale-gate
+scope: synthetic 1k, 10k, and 100k record corpora; seed 0; 32-dimensional
+vectors; top-10 retrieval; one warmup; three serial repetitions; and optional
+FAISS recall@10 with a configured 0.9 minimum when FAISS is available. No
+committed scale-gate report exists for those runs. In particular, this
+roadmap makes no unrun claims about 10k/100k scaling, ANN recall, keyword
+scaling, pgvector latency, or production-corpus relevance.
 
 ## 8. Milestone 1: canonical SQLite FTS5 keyword index
 
@@ -1019,6 +1046,9 @@ The following is a guide, not permission to implement all milestones in one
 change. Before each milestone, agree on its exact commit plan and keep every
 commit independently testable.
 
+The implementation sequence through legacy-pipeline removal is landed in the
+current history. This list is retained as an audit trail, not pending work.
+
 1. `fix(eval): use standard latency percentiles`
 2. `feat(eval): support graded labeled golden entries`
 3. `feat(eval): add repeated concurrent benchmark runs`
@@ -1084,27 +1114,31 @@ For each rollout:
 Search fallbacks must be visible in diagnostics. Silent fallback can hide an
 index that is permanently corrupt or never used.
 
-## 20. Definition of done
+## 20. Completion status and remaining validation
 
-The roadmap is complete when all of the following are true:
+The code and contract portion of the definition of done is satisfied:
 
 - local keyword search uses FTS5 rather than a table scan;
 - local vectors are compact, normalized once, and searched through exact or
-  optional ANN engines selected by measured policy;
+  optional ANN engines;
 - filters are applied before expensive scoring wherever possible;
 - record hydration and graph lookup are batched;
 - independent retrieval work overlaps safely;
-- repeated queries reuse a model-safe async query embedding cache;
-- candidate caches use stable keys and correct lane epochs;
-- query routing can skip semantic and graph work when it is not useful;
-- fusion, reranking, and diversity behavior is evaluation-backed;
-- pgvector filtered retrieval returns complete, contract-compatible results;
-- hashes and graph edges have indexed, transactional lifecycle storage;
-- benchmark gates cover relevance, latency, throughput, memory, disk size, and
-  ANN recall;
+- query embedding and candidate caches use stable keys and lane epochs;
+- query routing, fusion, reranking, diversity, and hierarchical retrieval are
+  implemented behind the canonical record path;
+- pgvector filtered retrieval, indexed storage, and graph lifecycle contracts
+  are covered by current code and tests;
 - one canonical record pipeline remains;
 - default installation remains SQLite/NumPy-only and optional integrations stay
   optional.
+
+The benchmark gate itself remains an evidence task rather than a completed
+performance claim. The harness supports relevance, latency, throughput,
+memory, disk-size, and optional ANN-recall checks, but the committed artifacts
+currently provide only the 1k synthetic baseline described above. A future
+scale-gate report must be produced before making comparative 1k/10k/100k,
+ANN, or production-performance claims.
 
 ## 21. Baseline verification from the review
 
