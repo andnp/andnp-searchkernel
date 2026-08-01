@@ -12,7 +12,7 @@ from searchkernel.ports import (
     search,
     stores,
 )
-from searchkernel.search import orchestrator, pipeline, query_plan
+from searchkernel.search import orchestrator, query_plan
 from searchkernel.storage import db
 from searchkernel.utils import similarity
 
@@ -25,7 +25,6 @@ API_EXPORTS = {
     "Record": models.Record,
     "SearchKernel": SearchKernel,
     "SearchOrchestrator": orchestrator.SearchOrchestrator,
-    "SearchPipeline": pipeline.SearchPipeline,
     "SearchResult": models.SearchResult,
     "SemanticInput": semantic.SemanticInput,
     "cosine_similarity": similarity.cosine_similarity,

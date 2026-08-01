@@ -14,9 +14,6 @@ from dataclasses import replace
 from searchkernel.chunking.base import ChunkingStrategy
 from searchkernel.domain import Chunk, Record, RecordStatus
 from searchkernel.indices.hash_store import ChunkHashStore
-from searchkernel.pipeline.stage import SearchContext
-from searchkernel.pipeline.stages.chunk import ChunkStage
-from searchkernel.pipeline.stages.index import IndexStage
 from searchkernel.ports.live_indices import (
     GraphIndexPort,
     KeywordIndexPort,
@@ -42,15 +39,13 @@ class IndexCore:
         self._hash_store = hash_store
 
     def chunk_record(self, record: Record) -> list[Chunk]:
-        context = ChunkStage(self._chunker).run(
-            SearchContext(query="", metadata={"record": record})
-        )
-        return context.state.chunks
+        return self._chunker.chunk_record(record)
 
     def index_chunks(self, chunks: list[Chunk]) -> None:
-        IndexStage(self.vector, self.keyword, self.graph).run(
-            SearchContext(query="", metadata={"chunks": chunks})
-        )
+        self.vector.add_chunks(chunks)
+        self.keyword.add_chunks(chunks)
+        for chunk in chunks:
+            self.graph.add_node(chunk.chunk_id, chunk.metadata)
 
     def detect_changed_chunks(
         self, chunks: list[Chunk]

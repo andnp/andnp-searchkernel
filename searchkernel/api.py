@@ -46,13 +46,6 @@ from searchkernel.indexing.semantic import (
     semantic_input_for_record,
 )
 from searchkernel.kernel import SearchKernel
-from searchkernel.pipeline import (
-    PipelineSpec,
-    SearchContext,
-    SearchStage,
-    SearchState,
-    StageSpec,
-)
 from searchkernel.ports import (
     ActiveModelStore,
     AsyncEmbeddingProvider,
@@ -114,7 +107,6 @@ from searchkernel.search import (
     route_query,
     search_hierarchical,
 )
-from searchkernel.search.pipeline import SearchPipeline, SearchPipelineConfig
 from searchkernel.search.record_pipeline import (
     QueryEmbeddingProvider,
     RecordHydrator,
@@ -189,7 +181,6 @@ __all__ = [
     "ModelNamespaceStore",
     "ModelValidationStore",
     "OrchestratorConfig",
-    "PipelineSpec",
     "QueryEmbeddingProvider",
     "QueryPlan",
     "QueryRouter",
@@ -217,16 +208,11 @@ __all__ = [
     "SQLiteTuning",
     "ScoredRef",
     "SearchAPI",
-    "SearchContext",
     "SearchKernel",
     "SearchOrchestrator",
-    "SearchPipeline",
-    "SearchPipelineConfig",
     "SearchResult",
     "SearchResultDict",
     "SearchResultProvenance",
-    "SearchStage",
-    "SearchState",
     "SearchStrategyStats",
     "SearchableSource",
     "SemanticInput",
@@ -234,7 +220,6 @@ __all__ = [
     "SourceBatch",
     "SourceCapabilities",
     "SourceDiversityPolicy",
-    "StageSpec",
     "StrategyContribution",
     "Tier",
     "ValidationResult",

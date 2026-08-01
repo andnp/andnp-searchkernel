@@ -104,7 +104,6 @@ type = "forbidden"
 source_modules = ["searchkernel.domain", "searchkernel.ports"]
 forbidden_modules = [
     "searchkernel.adapters",
-    "searchkernel.pipeline",
     "searchkernel.search",
     "searchkernel.indices",
     "searchkernel.storage",

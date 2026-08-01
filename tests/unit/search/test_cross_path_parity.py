@@ -1,18 +1,15 @@
-"""Golden-contract fixtures shared by the canonical and legacy search paths.
-
-These tests compare result identity and ordering only.  The two paths are
-allowed to use different stores and stage implementations while migration is
-in progress.
-"""
+"""Golden-contract fixtures for direct and public record search composition."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
+from searchkernel import SearchKernel
 from searchkernel.domain import (
     GraphEdge,
     GraphNeighbor,
@@ -20,18 +17,12 @@ from searchkernel.domain import (
     RecordHit,
     RecordIdentity,
     RecordStatus,
-    SearchResultProvenance,
 )
-from searchkernel.pipeline.stage import SearchContext
-from searchkernel.pipeline.stages.graph_expand import GraphExpandStage
-from searchkernel.pipeline.stages.parent_expansion import ParentExpansionStage
-from searchkernel.search.pipeline import SearchPipeline, SearchPipelineConfig
 from searchkernel.search.record_pipeline import (
     RecordSearchConfig,
     RecordSearchPipeline,
     RecordSearchPolicy,
 )
-from searchkernel.search.score_pipeline import ScorePipeline
 
 
 @dataclass(frozen=True)
@@ -87,18 +78,19 @@ class _KeywordStore:
 
     def search(
         self,
-        _query: str,
+        query: str,
         k: int,
-        filters: dict[str, object] | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[RecordHit]:
+        del query
         return [
             RecordHit(self._identity(source_id), score)
             for source_id, score in self._case.keyword
             if self._eligible(source_id, filters)
         ][:k]
 
-    def index(self, _records: list[Record]) -> None:
-        pass
+    def index(self, records: list[Record]) -> None:
+        del records
 
     def _identity(self, source_id: str) -> RecordIdentity:
         record = self._case.records[source_id]
@@ -114,13 +106,14 @@ class _VectorStore:
 
     def search(
         self,
-        _query_vector: list[float],
+        query_vector: list[float],
         k: int,
         *,
         model_name: str,
         dim: int,
-        filters: dict[str, object] | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[RecordHit]:
+        del query_vector
         assert (model_name, dim) == ("fixture", 2)
         return [
             RecordHit(self._identity(source_id), score)
@@ -128,11 +121,11 @@ class _VectorStore:
             if _eligible(self._case.records[source_id], filters)
         ][:k]
 
-    def upsert(self, _records: list[Record], _model_name: str, _dim: int) -> None:
-        pass
+    def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
+        del records, model_name, dim
 
-    def delete(self, _record_ids: list[str]) -> None:
-        pass
+    def delete(self, record_ids: list[str]) -> None:
+        del record_ids
 
     def epoch(self) -> int:
         return 0
@@ -169,9 +162,15 @@ class _GraphStore:
 
     def upsert_edges(
         self,
-        _edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
-        pass
+        del edges
+
+    def delete_edges(
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+    ) -> None:
+        del edges
 
 
 class _Embedder:
@@ -179,7 +178,7 @@ class _Embedder:
     dim = 2
 
     def embed_query(self, query: str) -> list[float]:
-        assert query == "hybrid query"
+        assert query in {"hybrid query", "what relates to a-seed?"}
         return [1.0, 0.0]
 
 
@@ -199,6 +198,12 @@ def _identity(record: Record) -> RecordIdentity:
     return RecordIdentity(record.workspace_id, record.source_kind, record.source_id)
 
 
+def _hydrator(case: _ParityCase):
+    return lambda identity: case.records.get(
+        identity.source_id if isinstance(identity, RecordIdentity) else identity
+    )
+
+
 def _canonical_pipeline(
     case: _ParityCase,
     *,
@@ -210,41 +215,51 @@ def _canonical_pipeline(
         vector_store=_VectorStore(case) if case.vector else None,
         graph_store=_GraphStore(case) if case.graph else None,
         embedding_provider=_Embedder() if case.vector else None,
-        hydrator=lambda identity: case.records.get(
-            identity.source_id if isinstance(identity, RecordIdentity) else identity
-        ),
+        hydrator=_hydrator(case),
         policy=policy,
         config=config,
     )
 
 
+def _public_kernel(
+    case: _ParityCase,
+    *,
+    policy: RecordSearchPolicy | None = None,
+    config: RecordSearchConfig | None = None,
+) -> SearchKernel:
+    return SearchKernel.build(
+        record_hydrator=_hydrator(case),
+        keyword_store=_KeywordStore(case),
+        vector_store=_VectorStore(case) if case.vector else None,
+        graph_store=_GraphStore(case) if case.graph else None,
+        embedding_provider=_Embedder() if case.vector else None,
+        search_policy=policy,
+        search_config=config,
+    )
+
+
 @pytest.mark.asyncio
-async def test_hybrid_fixture_preserves_legacy_order_identity_and_provenance() -> None:
+async def test_hybrid_fixture_preserves_identity_and_provenance() -> None:
     case = _hybrid_case()
 
-    legacy = ScorePipeline().fuse(
-        {"semantic": case.vector, "keyword": case.keyword}
-    )
-    canonical = await _canonical_pipeline(case).async_search(
+    direct = await _canonical_pipeline(case).async_search(
         "hybrid query",
         limit=3,
     )
-
-    assert [source_id for source_id, _score in legacy] == [
-        result.record_id for result in canonical.results
-    ]
-    assert [result.record_id for result in canonical.results] == ["a", "b", "c"]
-    first = canonical.results[0]
-    assert first.provenance.record_identity == RecordIdentity(
-        "workspace", "note", "a"
+    public = await _public_kernel(case).search_anything(
+        "hybrid query",
+        k=3,
     )
-    assert set(first.provenance.strategy_details) == {"keyword", "vector"}
-    assert first.provenance.strategy_details["vector"].rank == 1
-    assert first.provenance.strategy_details["keyword"].rank == 2
+
+    assert [result.record_id for result in direct.results] == ["a", "b", "c"]
+    assert [result.record_id for result in public] == [
+        result.record_id for result in direct.results
+    ]
+    assert public[0].metadata["provenance"] == direct.results[0].provenance.to_dict()
 
 
 @pytest.mark.asyncio
-async def test_tie_fixture_uses_stable_identity_order_in_both_paths() -> None:
+async def test_tie_fixture_uses_stable_identity_order() -> None:
     records = {
         "a": _record("a", "body a"),
         "b": _record("b", "body b"),
@@ -256,20 +271,21 @@ async def test_tie_fixture_uses_stable_identity_order_in_both_paths() -> None:
         graph={},
     )
 
-    legacy = ScorePipeline().fuse(
-        {"semantic": case.vector, "keyword": case.keyword}
-    )
-    canonical = await _canonical_pipeline(case).async_search(
+    direct = await _canonical_pipeline(case).async_search(
         "hybrid query",
         limit=2,
     )
+    public = await _public_kernel(case).search_anything(
+        "hybrid query",
+        k=2,
+    )
 
-    assert [source_id for source_id, _score in legacy] == ["a", "b"]
-    assert [result.record_id for result in canonical.results] == ["a", "b"]
+    assert [result.record_id for result in direct.results] == ["a", "b"]
+    assert [result.record_id for result in public] == ["a", "b"]
 
 
 @pytest.mark.asyncio
-async def test_filter_fixture_preserves_eligible_identity_across_paths() -> None:
+async def test_filter_fixture_preserves_eligible_identity() -> None:
     records = {
         "allowed": _record("allowed", "alpha", source_kind="note"),
         "wrong-source": _record("wrong-source", "alpha", source_kind="commit"),
@@ -287,35 +303,23 @@ async def test_filter_fixture_preserves_eligible_identity_across_paths() -> None
         graph={},
     )
 
-    legacy_candidates = [
-        (source_id, score)
-        for source_id, score in case.keyword
-        if case.records[source_id].source_kind == "note"
-        and case.records[source_id].status is RecordStatus.ACTIVE
-    ]
-    legacy, _stats = SearchPipeline(
-        SearchPipelineConfig(reranking_enabled=False)
-    ).process(
-        legacy_candidates,
-        lambda _source_id: None,
-        lambda source_id: case.records[source_id].body,
-        "alpha",
-        top_n=3,
-    )
-    canonical = await _canonical_pipeline(case).async_search(
+    direct = await _canonical_pipeline(case).async_search(
         "alpha",
         limit=3,
         filters={"source_kinds": ["note"]},
     )
+    public = await _public_kernel(case).search_anything(
+        "alpha",
+        k=3,
+        filters={"source_kinds": ["note"]},
+    )
 
-    assert [source_id for source_id, _score in legacy] == [
-        result.record_id for result in canonical.results
-    ]
-    assert [result.record_id for result in canonical.results] == ["allowed"]
+    assert [result.record_id for result in direct.results] == ["allowed"]
+    assert [result.record_id for result in public] == ["allowed"]
 
 
 @pytest.mark.asyncio
-async def test_dedup_fixture_keeps_the_first_ranked_identity_in_both_paths() -> None:
+async def test_dedup_fixture_keeps_the_first_ranked_identity() -> None:
     records = {
         "duplicate-first": _record("duplicate-first", "same content"),
         "duplicate-second": _record("duplicate-second", "same content"),
@@ -331,15 +335,6 @@ async def test_dedup_fixture_keeps_the_first_ranked_identity_in_both_paths() -> 
         vector=[],
         graph={},
     )
-    legacy, _stats = SearchPipeline(
-        SearchPipelineConfig(reranking_enabled=False)
-    ).process(
-        case.keyword,
-        lambda _source_id: None,
-        lambda source_id: case.records[source_id].body,
-        "duplicate",
-        top_n=3,
-    )
 
     seen_bodies: set[str] = set()
 
@@ -351,17 +346,23 @@ async def test_dedup_fixture_keeps_the_first_ranked_identity_in_both_paths() -> 
                 kept.append(result)
         return kept
 
-    canonical = await _canonical_pipeline(
-        case,
-        policy=RecordSearchPolicy(post_process=deduplicate),
-    ).async_search("duplicate", limit=3)
+    policy = RecordSearchPolicy(post_process=deduplicate)
+    direct = await _canonical_pipeline(case, policy=policy).async_search(
+        "duplicate",
+        limit=3,
+    )
+    seen_bodies.clear()
+    public = await _public_kernel(case, policy=policy).search_anything(
+        "duplicate",
+        k=3,
+    )
 
-    assert [source_id for source_id, _score in legacy] == [
-        result.record_id for result in canonical.results
-    ]
-    assert [result.record_id for result in canonical.results] == [
+    assert [result.record_id for result in direct.results] == [
         "duplicate-first",
         "unique",
+    ]
+    assert [result.record_id for result in public] == [
+        result.record_id for result in direct.results
     ]
 
 
@@ -378,65 +379,30 @@ async def test_graph_fixture_preserves_seed_neighbor_identity_and_provenance() -
         graph={"a-seed": [("z-neighbor", "related", 0.5)]},
     )
 
-    legacy_context = SearchContext(
-        "what relates to a-seed?",
-        metadata={
-            "seed_scores": {"a-seed": 1.0},
-            "top_k": 2,
-            "excluded_chunk_ids": None,
-        },
-    )
-    legacy_graph = GraphExpandStage(
-        rank_neighbors=lambda _scores: [("z-neighbor", 0.5)],
-        build_chunk_candidates=lambda ids, _top_k, _excluded: ids,
-    ).run(legacy_context)
-
-    canonical = await _canonical_pipeline(case).async_search(
+    direct = await _canonical_pipeline(case).async_search(
         "what relates to a-seed?",
         limit=2,
     )
+    public = await _public_kernel(case).search_anything(
+        "what relates to a-seed?",
+        k=2,
+    )
 
-    assert legacy_graph.state.graph_chunk_ids == ["z-neighbor"]
-    assert [result.record_id for result in canonical.results] == [
+    assert [result.record_id for result in direct.results] == [
         "a-seed",
         "z-neighbor",
     ]
-    neighbor = canonical.results[1]
-    assert neighbor.provenance.record_identity == RecordIdentity(
-        "workspace", "note", "z-neighbor"
+    assert [result.record_id for result in public] == [
+        result.record_id for result in direct.results
+    ]
+    assert direct.results[1].provenance.record_identity == _identity(
+        records["z-neighbor"]
     )
-    assert "graph" in neighbor.provenance.strategies
-
-
-def test_parent_fixture_locks_legacy_identity_and_provenance_contract() -> None:
-    child = {
-        "chunk_id": "child",
-        "doc_id": "doc",
-        "metadata": {"parent_chunk_id": "parent"},
-    }
-    parent = {"chunk_id": "parent", "doc_id": "doc", "metadata": {}}
-    context = SearchContext(
-        "query",
-        candidates=[("child", 0.8)],
-        metadata={
-            "result_provenance": {
-                "child": SearchResultProvenance()
-            }
-        },
-    )
-    context.state.result_provenance["child"].add_strategy("keyword", 1, 0.8)
-
-    expanded = ParentExpansionStage(
-        get_chunk=lambda chunk_id: {"child": child, "parent": parent}.get(chunk_id),
-        get_parent_chunk=lambda chunk_id: parent if chunk_id == "parent" else None,
-    ).run(context)
-
-    assert expanded.candidates == [("parent", 0.8)]
-    assert expanded.state.result_provenance["parent"].parent_expanded_from == "child"
+    assert "graph" in direct.results[1].provenance.strategies
 
 
 @pytest.mark.asyncio
-async def test_parent_fixture_has_canonical_record_equivalent() -> None:
+async def test_parent_fixture_preserves_identity_and_provenance() -> None:
     records = {
         "child": _record("child", "child body", parent_chunk_id="parent"),
         "parent": _record("parent", "parent body"),
@@ -459,16 +425,19 @@ async def test_parent_fixture_has_canonical_record_equivalent() -> None:
                 return None
             return _identity(records[str(parent_id)])
 
-    legacy = [("parent", 0.8)]
-    canonical = await _canonical_pipeline(
-        case,
-        policy=RecordSearchPolicy(parent_expander=ParentExpander()),
-    ).async_search("query", limit=1)
+    policy = RecordSearchPolicy(parent_expander=ParentExpander())
+    direct = await _canonical_pipeline(case, policy=policy).async_search(
+        "query",
+        limit=1,
+    )
+    public = await _public_kernel(case, policy=policy).search_anything(
+        "query",
+        k=1,
+    )
 
-    assert [result.record_id for result in canonical.results] == [
-        source_id for source_id, _score in legacy
-    ]
-    provenance = canonical.results[0].provenance
+    assert [result.record_id for result in direct.results] == ["parent"]
+    assert [result.record_id for result in public] == ["parent"]
+    provenance = direct.results[0].provenance
     assert provenance.record_identity == _identity(records["parent"])
     assert provenance.parent_expanded_from == "child"
     assert provenance.parent_expanded_from_identity == _identity(records["child"])

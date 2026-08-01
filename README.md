@@ -8,7 +8,7 @@ A domain-agnostic search/indexing kernel for building hybrid vector + keyword + 
 
 ## Optional backends
 
-The core package provides the domain models, ports, search pipeline, and
+The core package provides the domain models, ports, record search pipeline, and
 evaluation primitives. Install only the integrations required by an
 application:
 
@@ -38,9 +38,9 @@ kernel = SearchKernel.build(
 
 `SearchKernel.build` registers a canonical `SearchOrchestrator` for these
 dependencies. Callers that already own one may pass `orchestrator=` instead.
-The legacy chunk pipeline remains available as `SearchPipeline` and
-`SearchPipelineConfig` from `searchkernel.api` for downstream migration, but
-it is not the supported composition path.
+The deprecated chunk-oriented execution path has been removed; migrate callers
+to this record composition or use `LegacyLocalOrchestratorAdapter` only when
+wrapping an existing legacy orchestrator.
 
 ## Integration tests
 

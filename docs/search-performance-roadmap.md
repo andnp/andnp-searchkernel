@@ -72,33 +72,21 @@ Important files:
 
 ### 3.2 Older chunk-oriented path
 
-The repository also contains a richer older path built around `Chunk`,
-`VectorIndex`, `KeywordIndex`, `GraphStore`, `SearchPipeline`, and declarative
-pipeline stages. It already includes useful implementations of:
+The richer older query path built around `Chunk`, `VectorIndex`, `KeywordIndex`,
+`GraphStore`, and declarative pipeline stages has been retired. The chunk
+indices and indexing transforms remain only where they serve ingestion and
+indexing contracts. The canonical record path now owns query execution.
 
-- SQLite FTS5 keyword search and field-aware scoring;
-- FAISS vector search;
-- query classification and adaptive strategy weights;
-- tag and graph expansion;
-- exact, n-gram, and semantic deduplication;
-- document diversity limits and parent expansion;
-- reranking and optional query expansion;
-- per-query lookup caches and detailed execution statistics.
-
-Important files include:
+The remaining indexing compatibility files include:
 
 - `searchkernel/indices/keyword.py`;
 - `searchkernel/indices/vector.py`;
 - `searchkernel/indices/graph.py`;
-- `searchkernel/search/query_execution.py`;
-- `searchkernel/search/classifier.py`;
-- `searchkernel/search/score_pipeline.py`;
-- `searchkernel/pipeline/default_query_spec.py`;
-- `searchkernel/pipeline/stages/`.
+- `searchkernel/indexing/core.py`;
+- `searchkernel/indexing/stages.py`.
 
-Do not build a third pipeline. Reuse or adapt these components behind the
-record-oriented ports, then remove obsolete chunk-only execution code once
-behavioral parity is proven.
+Do not build a third pipeline. Reuse pure indexing primitives behind the
+record-oriented ports while keeping query execution on the canonical path.
 
 ### 3.3 Existing primitives that must be reused
 
@@ -147,8 +135,8 @@ Consequences:
 - SQL filters are applied in Python;
 - a process-wide `RLock` is held during the scan;
 - synchronous CPU and database work can block the async search loop;
-- the `FAISSVectorStore` alias in `indices/local.py` is misleading because the
-  implementation is brute-force SQLite/NumPy, not FAISS.
+- the misleading `FAISSVectorStore` alias has been removed; callers must choose
+  the explicit `FAISSLocalVectorStore` backend.
 
 ### 4.3 The canonical record pipeline performs N+1 operations
 
@@ -495,10 +483,8 @@ threshold. The exact threshold must come from M0 benchmarks.
 - fall back to exact search if the ANN index is absent, stale, or corrupt;
 - verify ANN recall against exact cosine search.
 
-Do not keep the `FAISSVectorStore` name as an alias for a brute-force backend.
 Use names that reveal the engine, such as `SQLiteExactVectorStore` and
-`FAISSLocalVectorStore`, while retaining a documented compatibility alias only
-for a deprecation period.
+`FAISSLocalVectorStore`; the misleading compatibility alias is removed.
 
 ### Filtering
 

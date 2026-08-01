@@ -1961,13 +1961,11 @@ class LocalGraphStore:
         return self._backend.neighbors_many(identities, depth=depth)
 
 
-FAISSVectorStore = FAISSLocalVectorStore
 SQLiteKeywordStore = LocalKeywordStore
 SQLiteGraphStore = LocalGraphStore
 
 __all__ = [
     "FAISSLocalVectorStore",
-    "FAISSVectorStore",
     "LocalGraphStore",
     "LocalKeywordStore",
     "LocalRecordBackend",

@@ -4,8 +4,8 @@ Source-agnostic search/indexing kernel.
 A domain-agnostic library for building hybrid vector+keyword+graph search systems
 with pluggable embedding/LLM/reranker providers.
 
-Record-oriented retrieval is the supported search path. ``SearchPipelineConfig``
-remains exported for compatibility with legacy chunk-oriented callers.
+Record-oriented retrieval is the supported search path. The deprecated
+chunk-oriented execution path is no longer exported.
 """
 
 from searchkernel.domain import (
@@ -39,7 +39,6 @@ from searchkernel.ports import (
     SourceBatch,
 )
 from searchkernel.search.orchestrator import SearchOrchestrator
-from searchkernel.search.pipeline import SearchPipelineConfig
 from searchkernel.search.query_plan import (
     QueryPlan,
     QueryRouter,
@@ -98,7 +97,6 @@ __all__ = [
     "SearchAPI",
     "SearchKernel",
     "SearchOrchestrator",
-    "SearchPipelineConfig",
     "SearchResult",
     "SearchableSource",
     "SourceBatch",
