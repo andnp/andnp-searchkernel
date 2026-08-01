@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from searchkernel.domain import Chunk
+from searchkernel.domain import Chunk, Record
 
 SemanticTier = Literal["coarse", "fine"]
 
@@ -67,6 +67,24 @@ def semantic_input_for_chunk(
     text = build_embedding_text(chunk.metadata.get("header_path", ""), chunk.content)
     return SemanticInput(
         source_id=chunk.chunk_id,
+        text=text,
+        content_hash=embedding_identity(text, encoder_namespace),
+        tier=tier,
+        priority=priority,
+    )
+
+
+def semantic_input_for_record(
+    record: Record,
+    encoder_namespace: str = "",
+    *,
+    tier: SemanticTier = "fine",
+    priority: int = 0,
+) -> SemanticInput:
+    """Build the canonical semantic input for one source-agnostic record."""
+    text = record.indexed_text or record.body
+    return SemanticInput(
+        source_id=record.storage_key,
         text=text,
         content_hash=embedding_identity(text, encoder_namespace),
         tier=tier,
