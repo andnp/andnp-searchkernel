@@ -112,35 +112,103 @@ class SemanticRecordIngestor:
         if not records:
             return IngestionReceipt("", None, checkpoint, ())
 
+        keyword_task = asyncio.create_task(
+            self._index_keyword_stage(records, failure_mode=failure_mode)
+        )
+        semantic_task = asyncio.create_task(
+            self._index_semantic_stage(records, failure_mode=failure_mode)
+        )
+        try:
+            keyword_outcomes, semantic_outcomes = await asyncio.gather(
+                keyword_task,
+                semantic_task,
+            )
+        except asyncio.CancelledError:
+            keyword_task.cancel()
+            semantic_task.cancel()
+            await asyncio.gather(
+                keyword_task,
+                semantic_task,
+                return_exceptions=True,
+            )
+            raise
+
+        return _merge_stage_outcomes(
+            records,
+            checkpoint=checkpoint,
+            failure_mode=failure_mode,
+            keyword_outcomes=keyword_outcomes,
+            semantic_outcomes=semantic_outcomes,
+        )
+
+    async def _index_keyword_stage(
+        self,
+        records: Sequence[Record],
+        *,
+        failure_mode: IngestionFailureMode,
+    ) -> list[RecordIngestionResult]:
+        outcomes: list[RecordIngestionResult] = []
+        for record in records:
+            try:
+                await asyncio.to_thread(self.keyword_store.index, [record])
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001
+                outcomes.append(
+                    RecordIngestionResult(
+                        source_kind=record.source_kind,
+                        source_id=record.source_id,
+                        workspace_id=record.workspace_id,
+                        status="failed",
+                        error=f"{type(error).__name__}: {error}",
+                    )
+                )
+                if failure_mode == "strict":
+                    break
+            else:
+                outcomes.append(
+                    RecordIngestionResult(
+                        source_kind=record.source_kind,
+                        source_id=record.source_id,
+                        workspace_id=record.workspace_id,
+                        status="committed",
+                    )
+                )
+
+        return outcomes
+
+    async def _index_semantic_stage(
+        self,
+        records: Sequence[Record],
+        *,
+        failure_mode: IngestionFailureMode,
+    ) -> list[RecordIngestionResult]:
         try:
             await asyncio.to_thread(self._index_semantic_batch, records)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             # Preserve per-record failure attribution if batch embedding fails.
-            return await self._index_records_individually(
+            return await self._index_semantic_records_individually(
                 records,
-                checkpoint=checkpoint,
                 failure_mode=failure_mode,
             )
 
-        return await self._index_materialized_records(
+        return await self._index_vector_records(
             records,
-            checkpoint=checkpoint,
             failure_mode=failure_mode,
         )
 
-    async def _index_records_individually(
+    async def _index_semantic_records_individually(
         self,
         records: Sequence[Record],
         *,
-        checkpoint: Cursor | None,
         failure_mode: IngestionFailureMode,
-    ) -> IngestionReceipt:
+    ) -> list[RecordIngestionResult]:
         outcomes: list[RecordIngestionResult] = []
         for record in records:
             try:
-                await asyncio.to_thread(self._index_record, record)
+                await asyncio.to_thread(self._index_record_semantic_and_vector, record)
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001
@@ -165,19 +233,18 @@ class SemanticRecordIngestor:
                     )
                 )
 
-        return _receipt(records, checkpoint, outcomes)
+        return outcomes
 
-    async def _index_materialized_records(
+    async def _index_vector_records(
         self,
         records: Sequence[Record],
         *,
-        checkpoint: Cursor | None,
         failure_mode: IngestionFailureMode,
-    ) -> IngestionReceipt:
+    ) -> list[RecordIngestionResult]:
         outcomes: list[RecordIngestionResult] = []
         for record in records:
             try:
-                await asyncio.to_thread(self._index_record_stores, record)
+                await asyncio.to_thread(self._index_record_vector, record)
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001
@@ -202,7 +269,7 @@ class SemanticRecordIngestor:
                     )
                 )
 
-        return _receipt(records, checkpoint, outcomes)
+        return outcomes
 
     def _index_semantic_batch(self, records: Sequence[Record]) -> None:
         inputs = [
@@ -219,7 +286,7 @@ class SemanticRecordIngestor:
             ),
         )
 
-    def _index_record(self, record: Record) -> None:
+    def _index_record_semantic(self, record: Record) -> None:
         semantic_input = semantic_input_for_record(
             record,
             self.encoder_namespace,
@@ -230,10 +297,12 @@ class SemanticRecordIngestor:
             self._encoder,
             _RecordMaterializer(record, self.embedding_provider.model_name),
         )
-        self._index_record_stores(record)
+ 
+    def _index_record_semantic_and_vector(self, record: Record) -> None:
+        self._index_record_semantic(record)
+        self._index_record_vector(record)
 
-    def _index_record_stores(self, record: Record) -> None:
-        self.keyword_store.index([record])
+    def _index_record_vector(self, record: Record) -> None:
         self.vector_store.upsert(
             [record],
             self.embedding_provider.model_name,
@@ -252,6 +321,53 @@ def _receipt(
         checkpoint=checkpoint,
         records=tuple(outcomes),
     )
+
+
+def _merge_stage_outcomes(
+    records: Sequence[Record],
+    *,
+    checkpoint: Cursor | None,
+    failure_mode: IngestionFailureMode,
+    keyword_outcomes: Sequence[RecordIngestionResult],
+    semantic_outcomes: Sequence[RecordIngestionResult],
+) -> IngestionReceipt:
+    keyword_by_id = {result.source_id: result for result in keyword_outcomes}
+    semantic_by_id = {result.source_id: result for result in semantic_outcomes}
+    outcomes: list[RecordIngestionResult] = []
+    for record in records:
+        stage_results = (
+            keyword_by_id.get(record.source_id),
+            semantic_by_id.get(record.source_id),
+        )
+        errors = [
+            result.error
+            for result in stage_results
+            if result is not None and result.status == "failed" and result.error
+        ]
+        if any(result is None for result in stage_results):
+            errors.append("index stage did not report an outcome")
+        if errors:
+            outcomes.append(
+                RecordIngestionResult(
+                    source_kind=record.source_kind,
+                    source_id=record.source_id,
+                    workspace_id=record.workspace_id,
+                    status="failed",
+                    error="; ".join(errors),
+                )
+            )
+            if failure_mode == "strict":
+                break
+        else:
+            outcomes.append(
+                RecordIngestionResult(
+                    source_kind=record.source_kind,
+                    source_id=record.source_id,
+                    workspace_id=record.workspace_id,
+                    status="committed",
+                )
+            )
+    return _receipt(records, checkpoint, outcomes)
 
 
 def _workspace_id(records: Sequence[Record]) -> str | None:

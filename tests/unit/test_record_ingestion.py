@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -21,6 +23,18 @@ class _Provider:
     def embed(self, texts: list[str]) -> list[list[float]]:
         self.calls.append(texts)
         return [[float(len(text))] for text in texts]
+
+
+class _BlockingProvider(_Provider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        self.started.set()
+        self.release.wait(timeout=5)
+        return super().embed(texts)
 
 
 class _KeywordStore:
@@ -146,6 +160,27 @@ async def test_batch_embedding_encodes_unique_texts_together(tmp_path) -> None:
     assert receipt.committed == 3
     assert len(provider.calls) == 1
     assert sorted(provider.calls[0]) == ["first text", "second text"]
+
+
+@pytest.mark.asyncio
+async def test_keyword_stage_commits_while_embedding_is_blocked(tmp_path) -> None:
+    provider = _BlockingProvider()
+    ingestor, keyword, vector = _ingestor(
+        provider,
+        cache=SQLiteEmbeddingCache(tmp_path / "embeddings.db", "stages", 1),
+    )
+    task = asyncio.create_task(ingestor.index_records([_record("one")]))
+
+    started = await asyncio.to_thread(provider.started.wait, 5)
+    keyword_ids = [record.source_id for record in keyword.records]
+    vector_ids = [record.source_id for record in vector.records]
+    provider.release.set()
+    receipt = await task
+
+    assert started
+    assert keyword_ids == ["one"]
+    assert vector_ids == []
+    assert receipt.committed == 1
 
 
 @pytest.mark.asyncio
