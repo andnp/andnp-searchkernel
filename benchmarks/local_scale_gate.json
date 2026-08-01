@@ -1,0 +1,19 @@
+{
+  "sizes": [
+    "1k",
+    "10k",
+    "100k"
+  ],
+  "seed": 0,
+  "dimension": 32,
+  "model_name": "synthetic-local-v1",
+  "k": 10,
+  "warmup_count": 1,
+  "measured_repetitions": 3,
+  "concurrency": 1,
+  "ann": {
+    "enabled": true,
+    "required": false,
+    "min_recall_at_k": 0.9
+  }
+}
