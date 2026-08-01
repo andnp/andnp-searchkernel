@@ -725,7 +725,7 @@ class ReindexRoutine:
         payload = [
             {
                 "identity": record.storage_key,
-                "body": record.body,
+                "text": semantic_input_for_record(record).text,
             }
             for record in self.records
         ]

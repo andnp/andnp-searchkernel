@@ -593,6 +593,70 @@ def test_checkpoint_resumes_unchanged_corpus_after_restart(tmp_path: Path):
     _assert_records_are_preserved(backend, records)
 
 
+def test_checkpoint_rejects_changed_indexed_text(tmp_path: Path):
+    records, backend, store, source = _local_migration(tmp_path, count=5)
+    first = _routine(
+        records,
+        backend,
+        store,
+        source,
+        provider=FakeProvider(model_name="new-model", fail_on_call=2),
+    )
+    first.expand()
+    with pytest.raises(ReindexError):
+        first.backfill()
+
+    records[2].indexed_text = "updated semantic text"
+    restarted_provider = FakeProvider(model_name="new-model")
+    restarted = _routine(
+        records,
+        backend,
+        store,
+        source,
+        provider=restarted_provider,
+    )
+
+    with pytest.raises(ReindexError, match="corpus identity"):
+        restarted.backfill()
+
+    assert restarted_provider.calls == 0
+    assert backend.vector_count("new-model", 3) == 2
+
+
+def test_checkpoint_keeps_body_fallback_identity_stable(tmp_path: Path):
+    records, backend, store, source = _local_migration(tmp_path, count=5)
+    first = _routine(
+        records,
+        backend,
+        store,
+        source,
+        provider=FakeProvider(model_name="new-model", fail_on_call=2),
+    )
+    first.expand()
+    with pytest.raises(ReindexError):
+        first.backfill()
+
+    records[2].indexed_text = ""
+    restarted_provider = FakeProvider(model_name="new-model")
+    restarted = _routine(
+        records,
+        backend,
+        store,
+        source,
+        provider=restarted_provider,
+    )
+
+    assert restarted.checkpoint == 2
+    restarted.retry()
+    progress = restarted.backfill()
+
+    assert progress.complete
+    assert restarted_provider.embedded_texts == [
+        ["local body 2", "local body 3"],
+        ["local body 4"],
+    ]
+
+
 def test_checkpoint_rejects_reordered_corpus(tmp_path: Path):
     records, backend, store, source = _local_migration(tmp_path, count=5)
     first = _routine(
