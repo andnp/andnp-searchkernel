@@ -195,12 +195,31 @@ class MigrationState:
     backup: BackupMetadata | None = None
     rollback: RollbackMetadata | None = None
     error: str | None = None
+    resume_phase: MigrationPhase | None = None
+    checkpoint: int = 0
+    attempts: int = 0
+    total_records: int | None = None
 
     def __post_init__(self) -> None:
         if not self.migration_id.strip():
             raise ValueError("migration_id must not be empty")
         if self.source == self.target:
             raise ValueError("source and target namespaces must differ")
+        if (
+            isinstance(self.checkpoint, bool)
+            or self.checkpoint < 0
+        ):
+            raise ValueError("checkpoint must be a non-negative integer")
+        if isinstance(self.attempts, bool) or self.attempts < 0:
+            raise ValueError("attempts must be a non-negative integer")
+        if (
+            self.total_records is not None
+            and (
+                isinstance(self.total_records, bool)
+                or self.total_records < 0
+            )
+        ):
+            raise ValueError("total_records must be non-negative or None")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -208,6 +227,9 @@ class MigrationState:
             "source": self.source.to_dict(),
             "target": self.target.to_dict(),
             "phase": self.phase.value,
+            "checkpoint": self.checkpoint,
+            "attempts": self.attempts,
+            "total_records": self.total_records,
             "validation": (
                 self.validation.to_dict() if self.validation is not None else None
             ),
@@ -216,6 +238,11 @@ class MigrationState:
                 self.rollback.to_dict() if self.rollback is not None else None
             ),
             "error": self.error,
+            "resume_phase": (
+                self.resume_phase.value
+                if self.resume_phase is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -228,6 +255,13 @@ class MigrationState:
             source=ModelNamespace.from_dict(data["source"]),
             target=ModelNamespace.from_dict(data["target"]),
             phase=MigrationPhase(data.get("phase", MigrationPhase.INIT.value)),
+            checkpoint=int(data.get("checkpoint", 0)),
+            attempts=int(data.get("attempts", 0)),
+            total_records=(
+                int(data["total_records"])
+                if data.get("total_records") is not None
+                else None
+            ),
             validation=(
                 ValidationResult.from_dict(validation)
                 if validation is not None
@@ -242,4 +276,9 @@ class MigrationState:
                 else None
             ),
             error=data.get("error"),
+            resume_phase=(
+                MigrationPhase(data["resume_phase"])
+                if data.get("resume_phase") is not None
+                else None
+            ),
         )

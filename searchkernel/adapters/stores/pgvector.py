@@ -24,6 +24,7 @@ from psycopg2 import sql
 from searchkernel.domain import (
     GraphEdge,
     GraphNeighbor,
+    ModelDimensionMismatchError,
     Record,
     RecordHit,
     RecordIdentity,
@@ -853,7 +854,7 @@ class PGVectorStore:
         rows = cursor.fetchall()
         for existing_dim, existing_table in rows:
             if existing_dim != dim:
-                raise ValueError(
+                raise ModelDimensionMismatchError(
                     f"Dimension mismatch for model {model_name}: "
                     f"expected {existing_dim}, got {dim}"
                 )

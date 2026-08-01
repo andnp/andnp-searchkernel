@@ -23,6 +23,7 @@ import numpy as np
 from searchkernel.domain import (
     GraphEdge,
     GraphNeighbor,
+    ModelDimensionMismatchError,
     Record,
     RecordHit,
     RecordIdentity,
@@ -675,24 +676,41 @@ class LocalRecordBackend:
         if dim < 1:
             raise ValueError("dim must be positive")
         rows = list(records)
-        packed_vectors: list[tuple[str, bytes]] = []
-        for record in rows:
-            if record.embedding is not None:
-                packed_vectors.append(
-                    (
-                        record.storage_key,
-                        PackedVectorCodec.encode(
-                            record.embedding,
-                            dim,
-                            context=f"embedding for {record.storage_key}",
-                        ),
-                    )
-                )
         if not rows:
             return
         with self._lock:
             conn = self._db.get_connection()
             try:
+                existing_dims = {
+                    int(row[0])
+                    for row in conn.execute(
+                        """
+                        SELECT DISTINCT dim
+                        FROM local_vectors_v2
+                        WHERE encoder_namespace = ?
+                        """,
+                        (model_name,),
+                    ).fetchall()
+                }
+                if existing_dims and existing_dims != {dim}:
+                    existing_dim = next(iter(existing_dims))
+                    raise ModelDimensionMismatchError(
+                        f"Dimension mismatch for model {model_name!r}: "
+                        f"expected {existing_dim}, got {dim}"
+                    )
+                packed_vectors: list[tuple[str, bytes]] = []
+                for record in rows:
+                    if record.embedding is not None:
+                        packed_vectors.append(
+                            (
+                                record.storage_key,
+                                PackedVectorCodec.encode(
+                                    record.embedding,
+                                    dim,
+                                    context=f"embedding for {record.storage_key}",
+                                ),
+                            )
+                        )
                 self._write_records(conn, rows)
                 conn.executemany(
                     """
