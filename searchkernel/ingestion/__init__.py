@@ -8,10 +8,12 @@ from searchkernel.ingestion.embedding import (
     embed_and_upsert,
     embed_in_batches,
 )
+from searchkernel.ingestion.records import SemanticRecordIngestor
 
 __all__ = [
     "EmbeddingBatchResult",
     "EmbeddingInput",
+    "SemanticRecordIngestor",
     "async_embed_and_upsert",
     "async_embed_in_batches",
     "embed_and_upsert",

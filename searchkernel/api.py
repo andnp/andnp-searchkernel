@@ -45,6 +45,7 @@ from searchkernel.indexing.semantic import (
     semantic_input_for_chunk,
     semantic_input_for_record,
 )
+from searchkernel.ingestion.records import SemanticRecordIngestor
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
     ActiveModelStore,
@@ -216,6 +217,7 @@ __all__ = [
     "SearchStrategyStats",
     "SearchableSource",
     "SemanticInput",
+    "SemanticRecordIngestor",
     "SemanticTier",
     "SourceBatch",
     "SourceCapabilities",
