@@ -114,7 +114,8 @@ async def test_duplicate_effective_text_reuses_embedding_and_preserves_raw_body(
     assert receipt.records[0].source_id == "one"
     assert receipt.records[1].source_id == "two"
     assert provider.calls == [["same indexed text"]]
-    assert cache.metrics.hits == 1
+    assert cache.metrics.hits == 0
+    assert cache.metrics.misses == 1
     assert first.embedding == second.embedding == [17.0]
     assert first.body == "raw one"
     assert second.body == "raw two"
@@ -126,6 +127,25 @@ async def test_duplicate_effective_text_reuses_embedding_and_preserves_raw_body(
         first.storage_key,
         second.storage_key,
     ]
+
+
+@pytest.mark.asyncio
+async def test_batch_embedding_encodes_unique_texts_together(tmp_path) -> None:
+    provider = _Provider()
+    cache = SQLiteEmbeddingCache(tmp_path / "embeddings.db", "batch", 1)
+    ingestor, _, _ = _ingestor(provider, cache=cache)
+
+    receipt = await ingestor.index_records(
+        [
+            _record("one", indexed_text="first text"),
+            _record("two", indexed_text="second text"),
+            _record("three", indexed_text="first text"),
+        ]
+    )
+
+    assert receipt.committed == 3
+    assert len(provider.calls) == 1
+    assert sorted(provider.calls[0]) == ["first text", "second text"]
 
 
 @pytest.mark.asyncio
