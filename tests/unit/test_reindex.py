@@ -1,5 +1,9 @@
 import base64
+import fcntl
 import json
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -97,10 +101,16 @@ class LocalLifecycleStore:
         self.root = root
         self.backend = backend
         self.active_path = root / "active-model.json"
-        self.migration_path = root / "migration.json"
+        self.migration_dir = root / "migrations"
         self.backup_dir = root / "backups"
         self.fail_active_update = False
+        self.transition_path = root / "active-model-transition.lock"
+        self._transition_mutex = threading.RLock()
+        self._transition_depth = 0
+        self._transition_file = None
         root.mkdir(parents=True, exist_ok=True)
+        self.migration_dir.mkdir(parents=True, exist_ok=True)
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
 
     def ensure_namespace(self, namespace: ModelNamespace) -> None:
         conn = self.backend.db_manager.get_connection()
@@ -167,7 +177,43 @@ class LocalLifecycleStore:
     def set_active_model(self, active_model: ActiveModelMetadata) -> None:
         if self.fail_active_update:
             raise RuntimeError("active model update failed")
-        atomic_write_json(self.active_path, active_model.to_dict())
+        with self._active_model_lock():
+            atomic_write_json(self.active_path, active_model.to_dict())
+
+    def compare_and_set_active_model(
+        self,
+        expected: ActiveModelMetadata | None,
+        active_model: ActiveModelMetadata,
+    ) -> bool:
+        with self._active_model_lock():
+            if self.get_active_model() != expected:
+                return False
+            self.set_active_model(active_model)
+            return True
+
+    @contextmanager
+    def acquire_transition_lock(self) -> Iterator[None]:
+        with self._active_model_lock():
+            yield
+
+    @contextmanager
+    def _active_model_lock(self) -> Iterator[None]:
+        with self._transition_mutex:
+            if self._transition_depth == 0:
+                lock_file = self.transition_path.open("a+")
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                self._transition_file = lock_file
+            self._transition_depth += 1
+            try:
+                yield
+            finally:
+                self._transition_depth -= 1
+                if self._transition_depth == 0:
+                    lock_file = self._transition_file
+                    if lock_file is not None:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                        lock_file.close()
+                    self._transition_file = None
 
     def create_backup(self, namespace: ModelNamespace) -> BackupMetadata:
         conn = self.backend.db_manager.get_connection()
@@ -245,15 +291,61 @@ class LocalLifecycleStore:
         )
 
     def load_migration(self, migration_id: str) -> MigrationState | None:
-        if not self.migration_path.exists():
+        migration_path = self.migration_dir / f"{migration_id}.json"
+        if not migration_path.exists():
             return None
         state = MigrationState.from_dict(
-            json.loads(self.migration_path.read_text())
+            json.loads(migration_path.read_text())
         )
         return state if state.migration_id == migration_id else None
 
     def save_migration(self, migration: MigrationState) -> None:
-        atomic_write_json(self.migration_path, migration.to_dict())
+        atomic_write_json(
+            self.migration_dir / f"{migration.migration_id}.json",
+            migration.to_dict(),
+        )
+
+
+class CoordinatedLifecycleStore(LocalLifecycleStore):
+    def __init__(
+        self,
+        root: Path,
+        backend: LocalRecordBackend,
+        read_barrier: threading.Barrier,
+    ):
+        super().__init__(root, backend)
+        self.read_barrier = read_barrier
+        self.block_unlocked_reads = False
+
+    def get_active_model(self) -> ActiveModelMetadata | None:
+        active = super().get_active_model()
+        if self.block_unlocked_reads and self._transition_depth == 0:
+            self.read_barrier.wait(timeout=5)
+        return active
+
+
+class ContractOwnershipStore(LocalLifecycleStore):
+    def __init__(self, root: Path, backend: LocalRecordBackend):
+        super().__init__(root, backend)
+        self.active_model_after_backup: ActiveModelMetadata | None = None
+        self.active_model_after_source_write: ActiveModelMetadata | None = None
+
+    def create_backup(self, namespace: ModelNamespace) -> BackupMetadata:
+        backup = super().create_backup(namespace)
+        if self.active_model_after_backup is not None:
+            atomic_write_json(
+                self.active_path,
+                self.active_model_after_backup.to_dict(),
+            )
+        return backup
+
+    def set_active_model(self, active_model: ActiveModelMetadata) -> None:
+        super().set_active_model(active_model)
+        if self.active_model_after_source_write is not None:
+            atomic_write_json(
+                self.active_path,
+                self.active_model_after_source_write.to_dict(),
+            )
 
 
 def _local_records(count: int = 4) -> list[Record]:
@@ -539,6 +631,68 @@ def test_active_model_flip_is_atomic_on_failure(tmp_path: Path):
     assert active.generation == 2
 
 
+def test_concurrent_flips_serialize_active_model_ownership(tmp_path: Path):
+    records = _local_records()
+    root = tmp_path / "lifecycle"
+    backend = LocalRecordBackend(root / "records.db")
+    source = ModelNamespace("old-model", 2)
+    backend.upsert(records, source.model_name, source.dim)
+    initial_store = LocalLifecycleStore(root, backend)
+    initial_store.set_active_model(ActiveModelMetadata(source, generation=1))
+
+    read_barrier = threading.Barrier(2)
+    store_b = CoordinatedLifecycleStore(root, backend, read_barrier)
+    store_c = CoordinatedLifecycleStore(root, backend, read_barrier)
+    routine_b = _routine(
+        records,
+        backend,
+        store_b,
+        source,
+        provider=FakeProvider(model_name="model-b"),
+        migration_id="migration-b",
+    )
+    routine_c = _routine(
+        records,
+        backend,
+        store_c,
+        source,
+        provider=FakeProvider(model_name="model-c"),
+        migration_id="migration-c",
+    )
+    for routine in (routine_b, routine_c):
+        routine.expand()
+        routine.backfill()
+        routine.validate()
+
+    store_b.block_unlocked_reads = True
+    store_c.block_unlocked_reads = True
+    results: list[tuple[str, MigrationState | str]] = []
+
+    def flip(routine: ReindexRoutine) -> None:
+        try:
+            results.append(("success", routine.flip()))
+        except ReindexError as exc:
+            results.append(("error", str(exc)))
+
+    first = threading.Thread(target=flip, args=(routine_b,))
+    second = threading.Thread(target=flip, args=(routine_c,))
+    first.start()
+    second.start()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert [kind for kind, _ in results].count("success") == 1
+    assert [kind for kind, _ in results].count("error") == 1
+    active = initial_store.get_active_model()
+    assert active is not None
+    assert active.namespace in {
+        ModelNamespace("model-b", 3),
+        ModelNamespace("model-c", 3),
+    }
+
+
 def test_contract_protects_old_namespace_cleanup(tmp_path: Path):
     records, backend, store, source = _local_migration(tmp_path)
     routine = _routine(records, backend, store, source)
@@ -558,6 +712,31 @@ def test_contract_protects_old_namespace_cleanup(tmp_path: Path):
     assert active is not None
     assert active.namespace == ModelNamespace("new-model", 3)
     _assert_records_are_preserved(backend, records)
+
+
+def test_contract_revalidates_active_ownership_before_cleanup(tmp_path: Path):
+    records = _local_records()
+    root = tmp_path / "lifecycle"
+    backend = LocalRecordBackend(root / "records.db")
+    store = ContractOwnershipStore(root, backend)
+    source = ModelNamespace("old-model", 2)
+    backend.upsert(records, source.model_name, source.dim)
+    store.set_active_model(ActiveModelMetadata(source, generation=1))
+    routine = _routine(records, backend, store, source)
+    routine.run()
+
+    foreign = ActiveModelMetadata(
+        ModelNamespace("other-model", 3),
+        generation=9,
+    )
+    store.active_model_after_backup = foreign
+
+    with pytest.raises(ReindexError, match="Failed to contract old model"):
+        routine.contract(source.model_name)
+
+    assert store.get_active_model() == foreign
+    assert backend.vector_count(source.model_name, source.dim) == len(records)
+    assert backend.vector_count("new-model", 3) == len(records)
 
 
 def test_mixed_dimension_namespace_is_rejected(tmp_path: Path):
@@ -625,3 +804,28 @@ def test_rollback_after_flip_restores_backup_without_data_loss(tmp_path: Path):
     assert backend.vector_count(source.model_name, source.dim) == len(records)
     assert backend.vector_count("new-model", 3) == 0
     _assert_records_are_preserved(backend, records)
+
+
+def test_rollback_revalidates_active_ownership_before_cleanup(tmp_path: Path):
+    records = _local_records()
+    root = tmp_path / "lifecycle"
+    backend = LocalRecordBackend(root / "records.db")
+    store = ContractOwnershipStore(root, backend)
+    source = ModelNamespace("old-model", 2)
+    backend.upsert(records, source.model_name, source.dim)
+    store.set_active_model(ActiveModelMetadata(source, generation=1))
+    routine = _routine(records, backend, store, source)
+    routine.run(contract=True)
+
+    foreign = ActiveModelMetadata(
+        ModelNamespace("other-model", 3),
+        generation=9,
+    )
+    store.active_model_after_source_write = foreign
+
+    with pytest.raises(ReindexError, match="Failed to roll back migration"):
+        routine.rollback(source.model_name)
+
+    assert store.get_active_model() == foreign
+    assert backend.vector_count(source.model_name, source.dim) == len(records)
+    assert backend.vector_count("new-model", 3) == len(records)

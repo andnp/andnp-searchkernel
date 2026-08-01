@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
@@ -332,182 +334,212 @@ class ReindexRoutine:
     def flip(self) -> MigrationState:
         """Atomically select the validated target model for new queries."""
         self._require_lifecycle("flip")
-        store = self._lifecycle()
-        state = self._load_or_create_state()
-        self._reject_failed(state)
-        if state.validation is None or not state.validation.passed:
-            raise ReindexError("Cannot flip before validation passes")
-        if state.phase not in {
-            MigrationPhase.VALIDATE,
-            MigrationPhase.FLIP,
-        }:
-            raise ReindexError("Cannot flip before validation is complete")
+        with self._transition_lock() as store:
+            state = self._load_or_create_state()
+            self._reject_failed(state)
+            if state.validation is None or not state.validation.passed:
+                raise ReindexError("Cannot flip before validation passes")
+            if state.phase not in {
+                MigrationPhase.VALIDATE,
+                MigrationPhase.FLIP,
+            }:
+                raise ReindexError("Cannot flip before validation is complete")
 
-        active = store.get_active_model()
-        if active is not None and active.namespace == state.target:
-            state = replace(
+            active = store.get_active_model()
+            if active is not None and active.namespace == state.target:
+                state = replace(
+                    state,
+                    phase=MigrationPhase.FLIP,
+                    error=None,
+                    resume_phase=None,
+                )
+                self._save(state)
+                self._current_stage = MigrationPhase.FLIP.value
+                return state
+            if active is not None and active.namespace != state.source:
+                raise ReindexError(
+                    "active model changed during migration; refusing to overwrite policy"
+                )
+
+            pending = replace(
                 state,
                 phase=MigrationPhase.FLIP,
                 error=None,
                 resume_phase=None,
             )
+            self._save(pending)
+            generation = (active.generation if active is not None else 0) + 1
+            target_active = ActiveModelMetadata(
+                namespace=state.target,
+                generation=generation,
+                activated_at=datetime.now(UTC).isoformat(),
+            )
+            try:
+                self._compare_and_set_active_model(
+                    store,
+                    expected=active,
+                    active_model=target_active,
+                    error_message=(
+                        "active model changed during migration; refusing to "
+                        "overwrite policy"
+                    ),
+                )
+            except Exception as exc:
+                self._fail(pending, MigrationPhase.FLIP, str(exc))
+                raise ReindexError(f"Failed to flip active model: {exc}") from exc
+
+            state = replace(pending, error=None, resume_phase=None)
             self._save(state)
             self._current_stage = MigrationPhase.FLIP.value
             return state
-        if active is not None and active.namespace != state.source:
-            raise ReindexError(
-                "active model changed during migration; refusing to overwrite policy"
-            )
-
-        pending = replace(
-            state,
-            phase=MigrationPhase.FLIP,
-            error=None,
-            resume_phase=None,
-        )
-        self._save(pending)
-        generation = (active.generation if active is not None else 0) + 1
-        target_active = ActiveModelMetadata(
-            namespace=state.target,
-            generation=generation,
-            activated_at=datetime.now(UTC).isoformat(),
-        )
-        try:
-            store.set_active_model(target_active)
-        except Exception as exc:
-            self._fail(pending, MigrationPhase.FLIP, str(exc))
-            raise ReindexError(f"Failed to flip active model: {exc}") from exc
-
-        state = replace(pending, error=None, resume_phase=None)
-        self._save(state)
-        self._current_stage = MigrationPhase.FLIP.value
-        return state
 
     def contract(self, old_model_name: str | None = None) -> MigrationState:
         """Backup and delete the old namespace after a validated flip."""
         self._require_lifecycle("contract")
-        store = self._lifecycle()
-        state = self._load_or_create_state()
-        self._check_old_model_name(state, old_model_name)
-        self._reject_failed(state)
-        if state.phase is MigrationPhase.COMPLETE:
-            return state
-        if state.phase not in {
-            MigrationPhase.FLIP,
-            MigrationPhase.CONTRACT,
-        }:
-            raise ReindexError("Cannot contract before flip is complete")
-        if state.validation is None or not state.validation.passed:
-            raise ReindexError("Cannot contract before validation passes")
+        with self._transition_lock() as store:
+            state = self._load_or_create_state()
+            self._check_old_model_name(state, old_model_name)
+            self._reject_failed(state)
+            if state.phase is MigrationPhase.COMPLETE:
+                return state
+            if state.phase not in {
+                MigrationPhase.FLIP,
+                MigrationPhase.CONTRACT,
+            }:
+                raise ReindexError("Cannot contract before flip is complete")
+            if state.validation is None or not state.validation.passed:
+                raise ReindexError("Cannot contract before validation passes")
 
-        active = store.get_active_model()
-        if active is None or active.namespace != state.target:
-            raise ReindexError(
-                "Cannot contract while the target model is not active"
+            active = store.get_active_model()
+            if active is None or active.namespace != state.target:
+                raise ReindexError(
+                    "Cannot contract while the target model is not active"
+                )
+
+            pending = replace(
+                state,
+                phase=MigrationPhase.CONTRACT,
+                error=None,
+                resume_phase=None,
             )
+            self._save(pending)
+            if pending.backup is None:
+                try:
+                    backup = store.create_backup(state.source)
+                except Exception as exc:
+                    self._fail(pending, MigrationPhase.CONTRACT, str(exc))
+                    raise ReindexError(f"Failed to back up old model: {exc}") from exc
+                pending = replace(pending, backup=backup)
+                self._save(pending)
 
-        pending = replace(
-            state,
-            phase=MigrationPhase.CONTRACT,
-            error=None,
-            resume_phase=None,
-        )
-        self._save(pending)
-        if pending.backup is None:
             try:
-                backup = store.create_backup(state.source)
+                self._require_active_owner(
+                    store,
+                    active,
+                    "active model changed during contract; refusing to delete "
+                    "the old namespace",
+                )
+                store.delete_namespace(state.source)
             except Exception as exc:
                 self._fail(pending, MigrationPhase.CONTRACT, str(exc))
-                raise ReindexError(f"Failed to back up old model: {exc}") from exc
-            pending = replace(pending, backup=backup)
-            self._save(pending)
+                raise ReindexError(f"Failed to contract old model: {exc}") from exc
 
-        try:
-            store.delete_namespace(state.source)
-        except Exception as exc:
-            self._fail(pending, MigrationPhase.CONTRACT, str(exc))
-            raise ReindexError(f"Failed to contract old model: {exc}") from exc
-
-        complete = replace(
-            pending,
-            phase=MigrationPhase.COMPLETE,
-            error=None,
-            resume_phase=None,
-        )
-        self._save(complete)
-        self._current_stage = MigrationPhase.COMPLETE.value
-        return complete
+            complete = replace(
+                pending,
+                phase=MigrationPhase.COMPLETE,
+                error=None,
+                resume_phase=None,
+            )
+            self._save(complete)
+            self._current_stage = MigrationPhase.COMPLETE.value
+            return complete
 
     def rollback(self, old_model_name: str | None = None) -> MigrationState:
         """Restore the source model or remove an unflipped target namespace."""
         self._require_lifecycle("rollback")
-        store = self._lifecycle()
-        state = self._load_or_create_state()
-        self._check_old_model_name(state, old_model_name)
+        with self._transition_lock() as store:
+            state = self._load_or_create_state()
+            self._check_old_model_name(state, old_model_name)
 
-        effective_phase = (
-            state.resume_phase
-            if state.phase is MigrationPhase.FAILED and state.resume_phase is not None
-            else state.phase
-        )
-        if effective_phase is MigrationPhase.ROLLBACK:
-            restore_required = False
-        else:
-            restore_required = (
-                state.backup is not None
-                and effective_phase in {
-                    MigrationPhase.CONTRACT,
-                    MigrationPhase.COMPLETE,
-                }
+            effective_phase = (
+                state.resume_phase
+                if state.phase is MigrationPhase.FAILED and state.resume_phase is not None
+                else state.phase
             )
-        if effective_phase is MigrationPhase.INIT:
-            return state
-
-        pending = replace(
-            state,
-            phase=MigrationPhase.ROLLBACK,
-            error=None,
-            resume_phase=None,
-        )
-        self._save(pending)
-        rollback_metadata = pending.rollback
-        try:
-            if restore_required and pending.backup is not None:
-                rollback_metadata = store.restore_backup(pending.backup)
-
-            active = store.get_active_model()
-            if active is not None and active.namespace not in {
-                state.source,
-                state.target,
-            }:
-                raise ReindexError(
-                    "active model changed during rollback; refusing to overwrite policy"
+            if effective_phase is MigrationPhase.ROLLBACK:
+                restore_required = False
+            else:
+                restore_required = (
+                    state.backup is not None
+                    and effective_phase in {
+                        MigrationPhase.CONTRACT,
+                        MigrationPhase.COMPLETE,
+                    }
                 )
-            if restore_required or active is None or active.namespace == state.target:
-                source_generation = (active.generation if active else 0) + 1
-                store.set_active_model(
-                    ActiveModelMetadata(
+            if effective_phase is MigrationPhase.INIT:
+                return state
+
+            pending = replace(
+                state,
+                phase=MigrationPhase.ROLLBACK,
+                error=None,
+                resume_phase=None,
+            )
+            self._save(pending)
+            rollback_metadata = pending.rollback
+            try:
+                if restore_required and pending.backup is not None:
+                    rollback_metadata = store.restore_backup(pending.backup)
+
+                active = store.get_active_model()
+                if active is not None and active.namespace not in {
+                    state.source,
+                    state.target,
+                }:
+                    raise ReindexError(
+                        "active model changed during rollback; refusing to overwrite policy"
+                    )
+                if active is None or active.namespace == state.target:
+                    source_generation = (active.generation if active else 0) + 1
+                    source_active = ActiveModelMetadata(
                         namespace=state.source,
                         generation=source_generation,
                         activated_at=datetime.now(UTC).isoformat(),
                     )
+                    self._compare_and_set_active_model(
+                        store,
+                        expected=active,
+                        active_model=source_active,
+                        error_message=(
+                            "active model changed during rollback; refusing to "
+                            "overwrite policy"
+                        ),
+                    )
+                    active_after = source_active
+                else:
+                    active_after = active
+                self._require_active_owner(
+                    store,
+                    active_after,
+                    "active model changed during rollback; refusing to delete "
+                    "the target namespace",
                 )
-            if effective_phase is not MigrationPhase.INIT:
-                store.delete_namespace(state.target)
-        except Exception as exc:
-            self._fail(pending, MigrationPhase.ROLLBACK, str(exc))
-            raise ReindexError(f"Failed to roll back migration: {exc}") from exc
+                if effective_phase is not MigrationPhase.INIT:
+                    store.delete_namespace(state.target)
+            except Exception as exc:
+                self._fail(pending, MigrationPhase.ROLLBACK, str(exc))
+                raise ReindexError(f"Failed to roll back migration: {exc}") from exc
 
-        complete = replace(
-            pending,
-            phase=MigrationPhase.ROLLBACK,
-            rollback=rollback_metadata,
-            error=None,
-            resume_phase=None,
-        )
-        self._save(complete)
-        self._current_stage = MigrationPhase.ROLLBACK.value
-        return complete
+            complete = replace(
+                pending,
+                phase=MigrationPhase.ROLLBACK,
+                rollback=rollback_metadata,
+                error=None,
+                resume_phase=None,
+            )
+            self._save(complete)
+            self._current_stage = MigrationPhase.ROLLBACK.value
+            return complete
 
     def retry(self) -> MigrationState:
         """Clear a durable failure and expose the exact stage to retry."""
@@ -678,6 +710,49 @@ class ReindexRoutine:
     def _save(self, state: MigrationState) -> None:
         self._lifecycle().save_migration(state)
         self._current_stage = state.phase.value
+
+    @contextmanager
+    def _transition_lock(self) -> Iterator[ModelLifecycleStore]:
+        store = self._lifecycle()
+        acquire = getattr(store, "acquire_transition_lock", None)
+        if acquire is None:
+            raise ReindexError(
+                "active model transitions require a durable lifecycle lock"
+            )
+        try:
+            lock = acquire()
+        except Exception as exc:
+            raise ReindexError(
+                f"Failed to acquire active model transition lock: {exc}"
+            ) from exc
+        with lock:
+            yield store
+
+    @staticmethod
+    def _compare_and_set_active_model(
+        store: ModelLifecycleStore,
+        *,
+        expected: ActiveModelMetadata | None,
+        active_model: ActiveModelMetadata,
+        error_message: str,
+    ) -> None:
+        compare_and_set = getattr(store, "compare_and_set_active_model", None)
+        if compare_and_set is not None:
+            if not compare_and_set(expected, active_model):
+                raise ReindexError(error_message)
+            return
+        if store.get_active_model() != expected:
+            raise ReindexError(error_message)
+        store.set_active_model(active_model)
+
+    @staticmethod
+    def _require_active_owner(
+        store: ModelLifecycleStore,
+        expected: ActiveModelMetadata,
+        error_message: str,
+    ) -> None:
+        if store.get_active_model() != expected:
+            raise ReindexError(error_message)
 
     def _require_lifecycle(self, operation: str) -> None:
         if self.lifecycle_store is None:

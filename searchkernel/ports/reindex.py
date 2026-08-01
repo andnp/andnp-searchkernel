@@ -1,5 +1,6 @@
 """Capability protocols for embedding-model migration."""
 
+from contextlib import AbstractContextManager
 from typing import Protocol
 
 from searchkernel.domain.reindex import (
@@ -47,6 +48,14 @@ class ActiveModelStore(Protocol):
         """Atomically select the model for new queries."""
         ...
 
+    def compare_and_set_active_model(
+        self,
+        expected: ActiveModelMetadata | None,
+        active_model: ActiveModelMetadata,
+    ) -> bool:
+        """Select a model only when the current metadata matches expected."""
+        ...
+
 
 class ModelBackupStore(Protocol):
     """Create and restore model-scoped rollback backups."""
@@ -68,6 +77,10 @@ class ModelLifecycleStore(
     Protocol,
 ):
     """Full capability set required by the future migration state machine."""
+
+    def acquire_transition_lock(self) -> AbstractContextManager[None]:
+        """Acquire a durable lock for one full active-model transition."""
+        ...
 
     def load_migration(self, migration_id: str) -> MigrationState | None:
         """Load durable migration state, if present."""
