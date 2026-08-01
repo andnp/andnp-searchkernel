@@ -630,6 +630,39 @@ class TestKeywordStore:
         top_record = next(r for r in fixture_records if r.source_id == top_id)
         assert "machine" in top_record.body.lower()
 
+    def test_keyword_search_uses_indexed_text_with_raw_body_persisted(self, pg_conn):
+        """Search uses the override while records retain citation text."""
+        timestamp = datetime.now(UTC)
+        record = Record(
+            source_kind="test",
+            source_id="indexed",
+            title="Indexed text",
+            body="Raw citation body",
+            indexed_text="search-only vocabulary",
+            created_at=timestamp,
+            updated_at=timestamp,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        vector_store = PGVectorStore(pg_conn)
+        keyword_store = PGKeywordStore(pg_conn)
+
+        vector_store.upsert([record], model_name="test-model", dim=4)
+        keyword_store.index([record])
+
+        assert [hit.source_id for hit in keyword_store.search("vocabulary", 10)] == [
+            "indexed"
+        ]
+        assert keyword_store.search("citation", 10) == []
+        conn = pg_conn.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT body, indexed_text FROM records WHERE record_id = %s;",
+            (record.storage_key,),
+        )
+        assert cursor.fetchone() == ("Raw citation body", "search-only vocabulary")
+        cursor.close()
+        pg_conn.put_connection(conn)
+
     def test_keyword_search_with_filters(self, pg_conn, fixture_records):
         """Test keyword search with source_kind filter."""
         vector_store = PGVectorStore(pg_conn)
