@@ -1,3 +1,11 @@
+"""Compatibility processing for the legacy chunk-oriented search path.
+
+Canonical callers should use ``RecordSearchPipeline`` with record stores and
+``RecordSearchConfig``/``RecordSearchPolicy``. This module remains available
+for downstream migrations and parity tests; it is not used by
+``SearchKernel.build``.
+"""
+
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -13,6 +21,8 @@ from searchkernel.search.reranker import ReRanker
 
 @dataclass
 class SearchPipelineConfig:
+    """Compatibility configuration for legacy chunk post-processing."""
+
     min_confidence: float = 0.0
     max_chunks_per_doc: int = 0
     dedup_threshold: float = 0.85

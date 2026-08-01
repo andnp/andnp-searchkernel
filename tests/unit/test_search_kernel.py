@@ -8,6 +8,8 @@ from searchkernel import SearchAPI, SearchKernel
 from searchkernel.domain import (
     ChunkResult,
     Record,
+    RecordHit,
+    RecordIdentity,
     ScoredRef,
     SearchResult,
     SearchResultProvenance,
@@ -73,6 +75,53 @@ async def test_search_kernel_delegates_fusion_and_returns_search_results():
         )
     ]
     assert source.calls == [("query", 1, {"workspace": "personal"})]
+
+
+@pytest.mark.asyncio
+async def test_search_kernel_builds_canonical_local_source_from_record_ports():
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    record = Record(
+        source_kind="note",
+        source_id="record-1",
+        title="Record title",
+        body="record body",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    class _KeywordStore:
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, Any] | None = None,
+        ) -> list[RecordHit]:
+            assert query == "query"
+            assert filters == {"statuses": ["active"]}
+            return [
+                RecordHit(
+                    RecordIdentity(
+                        record.workspace_id,
+                        record.source_kind,
+                        record.source_id,
+                    ),
+                    1.0,
+                )
+            ][:k]
+
+        def index(self, records: list[Record]) -> None:
+            pass
+
+    kernel = SearchKernel.build(
+        record_hydrator=lambda identity: record,
+        keyword_store=_KeywordStore(),
+    )
+
+    results = await kernel.search_anything("query", k=1)
+
+    assert results[0].record_id == "record-1"
+    assert results[0].source_kind == "note"
+    assert results[0].metadata["text"] == "record body"
 
 
 @pytest.mark.asyncio

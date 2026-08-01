@@ -20,6 +20,28 @@ Available extras are `faiss`, `pgvector`, `huggingface`, and `markdown`.
 FAISS and pgvector implement the same record-oriented backend contracts; they
 can be selected independently or used together during migrations.
 
+## Canonical search composition
+
+Compose local search from the record-oriented ports:
+
+```python
+from searchkernel.api import SearchKernel
+
+kernel = SearchKernel.build(
+    record_hydrator=record_hydrator,
+    keyword_store=keyword_store,
+    vector_store=vector_store,
+    graph_store=graph_store,
+    embedding_provider=embedding_provider,
+)
+```
+
+`SearchKernel.build` registers a canonical `SearchOrchestrator` for these
+dependencies. Callers that already own one may pass `orchestrator=` instead.
+The legacy chunk pipeline remains available as `SearchPipeline` and
+`SearchPipelineConfig` from `searchkernel.api` for downstream migration, but
+it is not the supported composition path.
+
 ## Integration tests
 
 The pgvector integration tests automatically start a temporary

@@ -2,10 +2,17 @@
 
 import asyncio
 import inspect
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import Any
 
-from searchkernel.domain import Cursor, Record, ScoredRef, SearchResult
+from searchkernel.domain import (
+    Cursor,
+    Record,
+    RecordIdentity,
+    ScoredRef,
+    SearchResult,
+    Vector,
+)
 from searchkernel.ports.content_source import (
     CheckpointStore,
     ContentSource,
@@ -16,8 +23,19 @@ from searchkernel.ports.content_source import (
     RecordIngestor,
     SearchableSource,
 )
-from searchkernel.ports.embedding import EmbeddingProvider
+from searchkernel.ports.embedding import (
+    AsyncEmbeddingProvider,
+    EmbeddingProvider,
+)
 from searchkernel.ports.rerank import Reranker
+from searchkernel.ports.stores import (
+    AsyncGraphStore,
+    AsyncKeywordStore,
+    AsyncVectorStore,
+    GraphStore,
+    KeywordStore,
+    VectorStore,
+)
 from searchkernel.runtime import federation
 from searchkernel.runtime.federation import DEFAULT_PER_SOURCE_TIMEOUT_S
 from searchkernel.runtime.local import LocalSearchSource
@@ -25,6 +43,12 @@ from searchkernel.runtime.registry import SourceRegistry
 from searchkernel.search.diversity import SourceDiversityPolicy
 from searchkernel.search.hierarchical import HierarchicalRetrievalConfig
 from searchkernel.search.orchestrator import SearchOrchestrator
+from searchkernel.search.record_pipeline import (
+    QueryEmbeddingProvider,
+    RecordHydrator,
+    RecordSearchConfig,
+    RecordSearchPolicy,
+)
 
 
 class SearchKernel:
@@ -66,6 +90,28 @@ class SearchKernel:
         embedder: EmbeddingProvider | None = None,
         reranker: Reranker | None = None,
         orchestrator: SearchOrchestrator | None = None,
+        record_hydrator: (
+            RecordHydrator
+            | Callable[
+                [RecordIdentity | str],
+                Record | None | Awaitable[Record | None],
+            ]
+            | None
+        ) = None,
+        keyword_store: KeywordStore | AsyncKeywordStore | None = None,
+        vector_store: VectorStore | AsyncVectorStore | None = None,
+        graph_store: GraphStore | AsyncGraphStore | None = None,
+        embedding_provider: (
+            EmbeddingProvider
+            | AsyncEmbeddingProvider
+            | QueryEmbeddingProvider
+            | Callable[[str], Vector | Awaitable[Vector]]
+            | None
+        ) = None,
+        embedding_model_name: str | None = None,
+        embedding_dim: int | None = None,
+        search_policy: RecordSearchPolicy | None = None,
+        search_config: RecordSearchConfig | None = None,
         registry: SourceRegistry | None = None,
         per_source_timeout_s: float = DEFAULT_PER_SOURCE_TIMEOUT_S,
         diversity_policy: SourceDiversityPolicy | None = None,
@@ -76,7 +122,54 @@ class SearchKernel:
         ``config`` and ``embedder`` are retained as composition dependencies for
         ingestion/admin capabilities; query execution only needs the registered
         sources and reranker. A reranker may be supplied by ``config.reranker``.
+
+        Pass the record stores and ``record_hydrator`` to compose the canonical
+        local record pipeline. ``orchestrator`` remains available for callers
+        that already own a canonical ``SearchOrchestrator``; legacy chunk
+        orchestrators must be wrapped explicitly with
+        ``LegacyLocalOrchestratorAdapter``.
         """
+        record_dependencies = (
+            record_hydrator,
+            keyword_store,
+            vector_store,
+            graph_store,
+            embedding_provider,
+            embedding_model_name,
+            embedding_dim,
+            search_policy,
+            search_config,
+        )
+        if orchestrator is not None and any(
+            dependency is not None for dependency in record_dependencies
+        ):
+            raise ValueError(
+                "orchestrator cannot be combined with record search dependencies"
+            )
+        if orchestrator is None and any(
+            dependency is not None for dependency in record_dependencies[1:]
+        ):
+            if record_hydrator is None:
+                raise ValueError(
+                    "record_hydrator is required when composing record stores"
+                )
+            orchestrator = SearchOrchestrator(
+                hydrator=record_hydrator,
+                keyword_store=keyword_store,
+                vector_store=vector_store,
+                graph_store=graph_store,
+                embedding_provider=embedding_provider,
+                embedding_model_name=embedding_model_name,
+                embedding_dim=embedding_dim,
+                policy=search_policy,
+                config=search_config,
+            )
+        elif orchestrator is None and record_hydrator is not None:
+            orchestrator = SearchOrchestrator(
+                hydrator=record_hydrator,
+                policy=search_policy,
+                config=search_config,
+            )
         effective_reranker = reranker
         if effective_reranker is None:
             if isinstance(config, Mapping):
