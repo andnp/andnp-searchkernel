@@ -29,7 +29,11 @@ from searchkernel.ports.live_indices import (
 )
 from searchkernel.ports.llm import LLMProvider
 from searchkernel.ports.orchestrator_config import OrchestratorConfig
-from searchkernel.ports.record_search import AsyncRecordHydrator, BatchRecordHydrator
+from searchkernel.ports.record_search import (
+    AsyncRecordHydrator,
+    BatchRecordHydrator,
+    ParentRecordExpander,
+)
 from searchkernel.ports.rerank import Reranker
 from searchkernel.ports.retrieval import (
     RetrievalFieldExtractor,
@@ -73,6 +77,7 @@ __all__ = [
     "KeywordStore",
     "LLMProvider",
     "OrchestratorConfig",
+    "ParentRecordExpander",
     "RecordIngestor",
     "Reranker",
     "RetrievalFieldExtractor",

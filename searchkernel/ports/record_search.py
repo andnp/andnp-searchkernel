@@ -1,7 +1,7 @@
 """Optional batch boundaries for canonical record search."""
 
 from collections.abc import Awaitable, Mapping, Sequence
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from searchkernel.domain import Record, RecordIdentity
 
@@ -23,4 +23,15 @@ class BatchRecordHydrator(Protocol):
         self,
         identities: Sequence[RecordIdentity],
     ) -> Mapping[str, Record | None] | Awaitable[Mapping[str, Record | None]]:
+        ...
+
+
+@runtime_checkable
+class ParentRecordExpander(Protocol):
+    """Resolve an optional parent while retaining canonical identity."""
+
+    def parent_identity(
+        self,
+        identity: RecordIdentity,
+    ) -> RecordIdentity | None | Awaitable[RecordIdentity | None]:
         ...

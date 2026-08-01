@@ -433,3 +433,42 @@ def test_parent_fixture_locks_legacy_identity_and_provenance_contract() -> None:
 
     assert expanded.candidates == [("parent", 0.8)]
     assert expanded.state.result_provenance["parent"].parent_expanded_from == "child"
+
+
+@pytest.mark.asyncio
+async def test_parent_fixture_has_canonical_record_equivalent() -> None:
+    records = {
+        "child": _record("child", "child body", parent_chunk_id="parent"),
+        "parent": _record("parent", "parent body"),
+    }
+    case = _ParityCase(
+        records=records,
+        keyword=[("child", 0.8)],
+        vector=[],
+        graph={},
+    )
+
+    class ParentExpander:
+        def parent_identity(
+            self,
+            identity: RecordIdentity,
+        ) -> RecordIdentity | None:
+            record = records.get(identity.source_id)
+            parent_id = record.metadata.get("parent_chunk_id") if record else None
+            if parent_id is None or parent_id not in records:
+                return None
+            return _identity(records[str(parent_id)])
+
+    legacy = [("parent", 0.8)]
+    canonical = await _canonical_pipeline(
+        case,
+        policy=RecordSearchPolicy(parent_expander=ParentExpander()),
+    ).async_search("query", limit=1)
+
+    assert [result.record_id for result in canonical.results] == [
+        source_id for source_id, _score in legacy
+    ]
+    provenance = canonical.results[0].provenance
+    assert provenance.record_identity == _identity(records["parent"])
+    assert provenance.parent_expanded_from == "child"
+    assert provenance.parent_expanded_from_identity == _identity(records["child"])

@@ -429,6 +429,7 @@ class SearchResultProvenance:
     project_uplift: float | None = None
     parent_expanded_from: str | None = None
     record_identity: RecordIdentity | None = None
+    parent_expanded_from_identity: RecordIdentity | None = None
 
     def add_strategy(self, strategy: str, rank: int, raw_score: float) -> None:
         if strategy in self.strategy_details:
@@ -449,6 +450,7 @@ class SearchResultProvenance:
             community_boost=self.community_boost,
             project_uplift=self.project_uplift,
             parent_expanded_from=self.parent_expanded_from,
+            parent_expanded_from_identity=self.parent_expanded_from_identity,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -474,6 +476,12 @@ class SearchResultProvenance:
             adjustments["project_uplift"] = self.project_uplift
         if self.parent_expanded_from is not None:
             adjustments["parent_expanded_from"] = self.parent_expanded_from
+        if self.parent_expanded_from_identity is not None:
+            adjustments["parent_expanded_from_identity"] = {
+                "workspace_id": self.parent_expanded_from_identity.workspace_id,
+                "source_kind": self.parent_expanded_from_identity.source_kind,
+                "source_id": self.parent_expanded_from_identity.source_id,
+            }
         if adjustments:
             result["adjustments"] = adjustments
 

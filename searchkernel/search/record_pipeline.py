@@ -28,6 +28,7 @@ from searchkernel.ports import (
     EmbeddingProvider,
     GraphStore,
     KeywordStore,
+    ParentRecordExpander,
     VectorStore,
 )
 from searchkernel.ports.rerank import Reranker
@@ -60,8 +61,19 @@ RecordHydratorCallable = Callable[
     [RecordIdentity | str],
     Record | None | Awaitable[Record | None],
 ]
+ParentIdentityResolver = Callable[
+    [RecordIdentity],
+    RecordIdentity | None | Awaitable[RecordIdentity | None],
+]
 QueryEmbeddingCallable = Callable[[str], Vector | Awaitable[Vector]]
-FailureStage = Literal["keyword", "vector", "graph", "hydration", "rerank"]
+FailureStage = Literal[
+    "keyword",
+    "vector",
+    "graph",
+    "parent_expansion",
+    "hydration",
+    "rerank",
+]
 
 
 class RecordHydrator(Protocol):
@@ -106,6 +118,7 @@ class RecordSearchPolicy:
     post_process: (
         Callable[[list[RecordSearchResult]], Sequence[RecordSearchResult]] | None
     ) = None
+    parent_expander: ParentRecordExpander | ParentIdentityResolver | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -623,6 +636,7 @@ class RecordSearchPipeline:
 
             candidates = self._apply_score_adjustments(candidates)
             candidates = self._sort_candidates(candidates)
+            candidates = await self._expand_parents(candidates, failures)
             if candidate_key is not None:
                 try:
                     self._candidate_cache.set(candidate_key, tuple(candidates))
@@ -856,6 +870,9 @@ class RecordSearchPipeline:
                         "score_ratio_floor": self._config.score_ratio_floor,
                         "minimum_score": self._config.minimum_score,
                         "maximum_score_gap": self._config.maximum_score_gap,
+                        "parent_expansion": (
+                            self._policy.parent_expander is not None
+                        ),
                     }
                 ),
                 encoder_namespace=self._encoder_namespace_for_provider(),
@@ -880,6 +897,7 @@ class RecordSearchPipeline:
                 self._policy.score_adjuster,
                 self._policy.result_filter,
                 self._policy.post_process,
+                self._policy.parent_expander,
             )
         )
 
@@ -1187,6 +1205,49 @@ class RecordSearchPipeline:
             for candidate in candidates
         ]
 
+    async def _expand_parents(
+        self,
+        candidates: Sequence[RecordSearchCandidate],
+        failures: list[RecordSearchFailure],
+    ) -> list[RecordSearchCandidate]:
+        expander = self._policy.parent_expander
+        if expander is None:
+            return list(candidates)
+
+        expanded: list[RecordSearchCandidate] = []
+        seen: set[str] = set()
+        for candidate in self._sort_candidates(candidates):
+            try:
+                parent_identity = await _resolve_parent_identity(
+                    expander,
+                    candidate.identity,
+                )
+            except Exception as error:  # noqa: BLE001 - policy failure is staged
+                self._handle_error("parent_expansion", error, failures)
+                parent_identity = None
+
+            if parent_identity is None:
+                if candidate.storage_key not in seen:
+                    seen.add(candidate.storage_key)
+                    expanded.append(candidate)
+                continue
+
+            if parent_identity.storage_key in seen:
+                continue
+            provenance = candidate.provenance.clone()
+            provenance.record_identity = parent_identity
+            provenance.parent_expanded_from = candidate.record_id
+            provenance.parent_expanded_from_identity = candidate.identity
+            seen.add(parent_identity.storage_key)
+            expanded.append(
+                RecordSearchCandidate(
+                    identity=parent_identity,
+                    score=candidate.score,
+                    provenance=provenance,
+                )
+            )
+        return expanded
+
     def _apply_candidate_policy(
         self, candidates: Sequence[RecordSearchCandidate]
     ) -> list[RecordSearchCandidate]:
@@ -1485,6 +1546,24 @@ def _normalize_hits(
     if sort:
         normalized.sort(key=lambda hit: (-hit.score, hit.storage_key))
     return normalized
+
+
+async def _resolve_parent_identity(
+    expander: ParentRecordExpander | ParentIdentityResolver,
+    identity: RecordIdentity,
+) -> RecordIdentity | None:
+    resolver = getattr(expander, "parent_identity", None)
+    if callable(resolver):
+        parent_identity = await _call_async(resolver, identity)
+    elif callable(expander):
+        parent_identity = await _call_async(expander, identity)
+    else:
+        raise TypeError("parent_expander must resolve canonical record identities")
+    if parent_identity is not None and not isinstance(
+        parent_identity, RecordIdentity
+    ):
+        raise TypeError("parent_expander returned a non-canonical identity")
+    return parent_identity
 
 
 def _read_lane_epoch(store: object | None, lane: str) -> int | None:

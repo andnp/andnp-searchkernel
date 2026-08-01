@@ -228,6 +228,41 @@ async def test_candidate_filter_runs_before_graph_expansion() -> None:
     assert "graph" in outcome.results[-1].provenance.strategies
 
 
+async def test_parent_expansion_preserves_canonical_identity_and_first_rank() -> None:
+    records = {
+        record_id: _record(record_id)
+        for record_id in ("child-a", "child-b", "parent")
+    }
+    child_a = RecordIdentity(None, "fake", "child-a")
+    child_b = RecordIdentity(None, "fake", "child-b")
+    parent = RecordIdentity(None, "fake", "parent")
+
+    class ParentExpander:
+        def parent_identity(self, identity: RecordIdentity) -> RecordIdentity | None:
+            if identity.source_id in {"child-a", "child-b"}:
+                return parent
+            return None
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore(
+            [
+                RecordHit(child_b, 1.0),
+                RecordHit(child_a, 0.9),
+            ]
+        ),
+        hydrator=_hydrator(records),
+        policy=RecordSearchPolicy(parent_expander=ParentExpander()),
+    )
+
+    outcome = await pipeline.async_search("query", limit=2)
+
+    assert [result.record_id for result in outcome.results] == ["parent"]
+    provenance = outcome.results[0].provenance
+    assert provenance.record_identity == parent
+    assert provenance.parent_expanded_from == "child-b"
+    assert provenance.parent_expanded_from_identity == child_b
+
+
 async def test_policy_can_adjust_scores_reject_results_and_post_process() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b")}
     pipeline = RecordSearchPipeline(
