@@ -33,6 +33,9 @@ class VectorStore(Protocol):
             dim: Dimensionality of the embeddings.
 
         Per-model embedding isolation ensures safe migration between models.
+        Implementations must reject a second dimension for an existing
+        ``model_name`` rather than creating a mixed-dimension namespace.
+        They should raise ``ModelDimensionMismatchError`` for that violation.
         """
         ...
 

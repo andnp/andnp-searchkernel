@@ -26,8 +26,20 @@ from searchkernel.domain.models import (
     Vector,
     canonical_storage_key,
 )
+from searchkernel.domain.reindex import (
+    ActiveModelMetadata,
+    BackupMetadata,
+    MigrationPhase,
+    MigrationState,
+    ModelDimensionMismatchError,
+    ModelNamespace,
+    RollbackMetadata,
+    ValidationResult,
+)
 
 __all__ = [
+    "ActiveModelMetadata",
+    "BackupMetadata",
     "ChangeSignal",
     "Chunk",
     "ChunkResult",
@@ -36,16 +48,22 @@ __all__ = [
     "Filters",
     "GraphEdge",
     "GraphNeighbor",
+    "MigrationPhase",
+    "MigrationState",
+    "ModelDimensionMismatchError",
+    "ModelNamespace",
     "Record",
     "RecordHit",
     "RecordIdentity",
     "RecordStatus",
+    "RollbackMetadata",
     "ScoredRef",
     "SearchResult",
     "SearchResultProvenance",
     "SearchStrategyStats",
     "StrategyContribution",
     "Tier",
+    "ValidationResult",
     "Vector",
     "canonical_storage_key",
 ]

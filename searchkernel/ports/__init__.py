@@ -40,6 +40,13 @@ from searchkernel.ports.record_search import (
     BatchRecordHydrator,
     ParentRecordExpander,
 )
+from searchkernel.ports.reindex import (
+    ActiveModelStore,
+    ModelBackupStore,
+    ModelLifecycleStore,
+    ModelNamespaceStore,
+    ModelValidationStore,
+)
 from searchkernel.ports.rerank import Reranker
 from searchkernel.ports.retrieval import (
     RetrievalFieldExtractor,
@@ -60,6 +67,7 @@ from searchkernel.ports.stores import (
 )
 
 __all__ = [
+    "ActiveModelStore",
     "AsyncEmbeddingProvider",
     "AsyncGraphStore",
     "AsyncKeywordStore",
@@ -86,6 +94,10 @@ __all__ = [
     "KeywordIndexPort",
     "KeywordStore",
     "LLMProvider",
+    "ModelBackupStore",
+    "ModelLifecycleStore",
+    "ModelNamespaceStore",
+    "ModelValidationStore",
     "OrchestratorConfig",
     "ParentRecordExpander",
     "RecordIngestionResult",

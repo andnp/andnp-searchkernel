@@ -9,16 +9,29 @@ remains exported for compatibility with legacy chunk-oriented callers.
 """
 
 from searchkernel.domain import (
+    ActiveModelMetadata,
+    BackupMetadata,
     Chunk,
+    MigrationPhase,
+    MigrationState,
+    ModelDimensionMismatchError,
+    ModelNamespace,
     Record,
+    RollbackMetadata,
     ScoredRef,
     SearchResult,
+    ValidationResult,
     canonical_storage_key,
 )
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
+    ActiveModelStore,
     ContentSource,
     EmbeddingProvider,
+    ModelBackupStore,
+    ModelLifecycleStore,
+    ModelNamespaceStore,
+    ModelValidationStore,
     RecordIngestor,
     SearchableSource,
     SearchAPI,
@@ -48,9 +61,20 @@ from searchkernel.search.utils import classify_query_type, truncate_content
 __version__ = "0.1.0"
 
 __all__ = [
+    "ActiveModelMetadata",
+    "ActiveModelStore",
+    "BackupMetadata",
     "Chunk",
     "ContentSource",
     "EmbeddingProvider",
+    "MigrationPhase",
+    "MigrationState",
+    "ModelBackupStore",
+    "ModelDimensionMismatchError",
+    "ModelLifecycleStore",
+    "ModelNamespace",
+    "ModelNamespaceStore",
+    "ModelValidationStore",
     "QueryEmbeddingProvider",
     "QueryPlan",
     "QueryRouter",
@@ -66,6 +90,7 @@ __all__ = [
     "RecordSearchPipeline",
     "RecordSearchPolicy",
     "RecordSearchResult",
+    "RollbackMetadata",
     "ScoredRef",
     "SearchAPI",
     "SearchKernel",
@@ -73,6 +98,7 @@ __all__ = [
     "SearchPipelineConfig",
     "SearchResult",
     "SearchableSource",
+    "ValidationResult",
     "canonical_storage_key",
     "classify_query_type",
     "route_query",

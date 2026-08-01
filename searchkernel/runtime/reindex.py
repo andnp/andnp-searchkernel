@@ -13,8 +13,44 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 from searchkernel.domain import Record
+from searchkernel.domain.reindex import (
+    ActiveModelMetadata,
+    BackupMetadata,
+    MigrationPhase,
+    MigrationState,
+    ModelDimensionMismatchError,
+    ModelNamespace,
+    RollbackMetadata,
+    ValidationResult,
+)
 from searchkernel.ports.embedding import EmbeddingProvider
+from searchkernel.ports.reindex import (
+    ActiveModelStore,
+    ModelBackupStore,
+    ModelLifecycleStore,
+    ModelNamespaceStore,
+    ModelValidationStore,
+)
 from searchkernel.ports.stores import VectorStore
+
+__all__ = [
+    "ActiveModelMetadata",
+    "ActiveModelStore",
+    "BackupMetadata",
+    "MigrationPhase",
+    "MigrationState",
+    "ModelBackupStore",
+    "ModelDimensionMismatchError",
+    "ModelLifecycleStore",
+    "ModelNamespace",
+    "ModelNamespaceStore",
+    "ModelValidationStore",
+    "ReindexError",
+    "ReindexProgress",
+    "ReindexRoutine",
+    "RollbackMetadata",
+    "ValidationResult",
+]
 
 
 class ReindexError(Exception):
