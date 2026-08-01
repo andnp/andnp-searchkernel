@@ -13,6 +13,7 @@ from searchkernel.ports import (
     search,
     stores,
 )
+from searchkernel.runtime import reindex
 from searchkernel.search import orchestrator, query_plan
 from searchkernel.storage import db
 from searchkernel.utils import similarity
@@ -24,6 +25,9 @@ API_EXPORTS = {
     "EmbeddingProvider": embedding.EmbeddingProvider,
     "QueryPlan": query_plan.QueryPlan,
     "Record": models.Record,
+    "ReindexError": reindex.ReindexError,
+    "ReindexProgress": reindex.ReindexProgress,
+    "ReindexRoutine": reindex.ReindexRoutine,
     "SearchKernel": SearchKernel,
     "SearchAvailability": SearchAvailability,
     "SearchOrchestrator": orchestrator.SearchOrchestrator,

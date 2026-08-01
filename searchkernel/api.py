@@ -199,6 +199,11 @@ from searchkernel.ports import (
     extract_retrieval_fields,
 )
 from searchkernel.ports.live_indices import LiveSearchResult
+from searchkernel.runtime.reindex import (
+    ReindexError,
+    ReindexProgress,
+    ReindexRoutine,
+)
 from searchkernel.search import (
     DiversityDiagnostic,
     HierarchicalRetrievalConfig,
@@ -349,6 +354,9 @@ __all__ = [
     "RecordSearchPolicy",
     "RecordSearchResult",
     "RecordStatus",
+    "ReindexError",
+    "ReindexProgress",
+    "ReindexRoutine",
     "Reranker",
     "ResumableSemanticCoordinator",
     "RetrievalFieldExtractor",
