@@ -26,6 +26,7 @@ from searchkernel.domain import (
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
     ActiveModelStore,
+    BatchContentSource,
     ContentSource,
     EmbeddingProvider,
     ModelBackupStore,
@@ -35,6 +36,7 @@ from searchkernel.ports import (
     RecordIngestor,
     SearchableSource,
     SearchAPI,
+    SourceBatch,
 )
 from searchkernel.search.orchestrator import SearchOrchestrator
 from searchkernel.search.pipeline import SearchPipelineConfig
@@ -64,6 +66,7 @@ __all__ = [
     "ActiveModelMetadata",
     "ActiveModelStore",
     "BackupMetadata",
+    "BatchContentSource",
     "Chunk",
     "ContentSource",
     "EmbeddingProvider",
@@ -98,6 +101,7 @@ __all__ = [
     "SearchPipelineConfig",
     "SearchResult",
     "SearchableSource",
+    "SourceBatch",
     "ValidationResult",
     "canonical_storage_key",
     "classify_query_type",

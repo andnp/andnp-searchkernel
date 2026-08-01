@@ -68,6 +68,14 @@ IngestionResult = IngestionReceipt
 IngestionBatchResult = IngestionReceipt
 
 
+@dataclass(frozen=True, slots=True)
+class SourceBatch:
+    """Records emitted together with the source cursor at batch termination."""
+
+    records: tuple[Record, ...]
+    terminal_cursor: Cursor = None
+
+
 class IngestionError(RuntimeError):
     """Raised when strict ingestion cannot commit a complete batch."""
 
@@ -95,6 +103,19 @@ class ContentSource(Protocol):
 
     def cursor_for(self, record: Record) -> Cursor:
         """Return the source-owned cursor represented by a record."""
+        ...
+
+
+@runtime_checkable
+class BatchContentSource(Protocol):
+    """Optional source contract for batches with terminal cursors."""
+
+    source_kind: str
+
+    def iter_batches(
+        self, since: Cursor | None = None
+    ) -> AsyncIterator[SourceBatch]:
+        """Yield source batches after the supplied source-owned cursor."""
         ...
 
 
@@ -170,6 +191,7 @@ class HierarchicalSearchableSource(Protocol):
 
 __all__ = [
     "AsyncRecordIngestor",
+    "BatchContentSource",
     "CheckpointStore",
     "ContentSource",
     "HierarchicalSearchableSource",
@@ -182,4 +204,5 @@ __all__ = [
     "RecordIngestionStatus",
     "RecordIngestor",
     "SearchableSource",
+    "SourceBatch",
 ]

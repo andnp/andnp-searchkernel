@@ -10,6 +10,7 @@ from searchkernel.ports.candidate_filter import CandidateFilterSupport
 from searchkernel.ports.chunking_config import ChunkTuningConfig
 from searchkernel.ports.content_source import (
     AsyncRecordIngestor,
+    BatchContentSource,
     CheckpointStore,
     ContentSource,
     HierarchicalSearchableSource,
@@ -20,6 +21,7 @@ from searchkernel.ports.content_source import (
     RecordIngestionStatus,
     RecordIngestor,
     SearchableSource,
+    SourceBatch,
 )
 from searchkernel.ports.embedding import (
     AsyncEmbeddingProvider,
@@ -74,6 +76,7 @@ __all__ = [
     "AsyncRecordHydrator",
     "AsyncRecordIngestor",
     "AsyncVectorStore",
+    "BatchContentSource",
     "BatchGraphStore",
     "BatchRecordHydrator",
     "CacheStore",
@@ -108,6 +111,7 @@ __all__ = [
     "RetrievalFields",
     "SearchAPI",
     "SearchableSource",
+    "SourceBatch",
     "SourceCapabilities",
     "VectorIndexPort",
     "VectorStore",
