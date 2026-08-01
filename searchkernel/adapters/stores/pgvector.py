@@ -14,7 +14,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 import psycopg2
 import psycopg2.extras
@@ -471,6 +471,20 @@ def _migrate_graph_schema(cursor) -> None:
     )
 
 
+class _PostgresSession(Protocol):
+    def cursor(self) -> Any: ...
+
+    def commit(self) -> None: ...
+
+    def rollback(self) -> None: ...
+
+
+class _PostgresConnectionLike(Protocol):
+    def get_connection(self) -> _PostgresSession: ...
+
+    def put_connection(self, conn: _PostgresSession) -> None: ...
+
+
 class PostgresConnection:
     """Thread-safe Postgres connection pool."""
 
@@ -683,7 +697,7 @@ def _bump_epochs(
     )
 
 
-def _read_epochs(conn_pool: PostgresConnection) -> dict[str, int]:
+def _read_epochs(conn_pool: _PostgresConnectionLike) -> dict[str, int]:
     conn = conn_pool.get_connection()
     cursor = None
     try:
@@ -722,7 +736,7 @@ class PGVectorStore:
 
     def __init__(
         self,
-        conn_pool: PostgresConnection,
+        conn_pool: _PostgresConnectionLike,
         hnsw_ef_search: int = DEFAULT_HNSW_EF_SEARCH,
         *,
         hnsw_iterative_scan: str = DEFAULT_HNSW_ITERATIVE_SCAN,

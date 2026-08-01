@@ -97,6 +97,12 @@ class FakeGraphStore:
     ) -> None:
         pass
 
+    def delete_edges(
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+    ) -> None:
+        pass
+
     def neighbors(
         self,
         record_id: RecordIdentity | str,
@@ -317,6 +323,12 @@ async def test_graph_expansion_reads_only_bounded_seed_neighbors() -> None:
         ) -> None:
             pass
 
+        def delete_edges(
+            self,
+            edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        ) -> None:
+            pass
+
         def neighbors(
             self,
             record_id: RecordIdentity | str,
@@ -492,6 +504,12 @@ async def test_graph_neighbors_preserve_canonical_identity() -> None:
 
     class Graph:
         def upsert_edges(
+            self,
+            edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        ) -> None:
+            pass
+
+        def delete_edges(
             self,
             edges: Sequence[GraphEdge | tuple[str, str, str, float]],
         ) -> None:
@@ -922,6 +940,8 @@ async def test_trace_is_redacted_and_contains_routing_diagnostics() -> None:
 
 async def test_rerank_runs_once_with_a_bounded_candidate_set() -> None:
     class Reranker:
+        model_name = "fake-reranker"
+
         def __init__(self) -> None:
             self.calls: list[list[str]] = []
 
@@ -948,6 +968,8 @@ async def test_rerank_runs_once_with_a_bounded_candidate_set() -> None:
 
 async def test_rerank_failure_falls_back_deterministically_in_lenient_mode() -> None:
     class FailingReranker:
+        model_name = "failing-reranker"
+
         def rerank(self, query: str, documents: list[str]) -> list[float]:
             raise RuntimeError("reranker unavailable")
 
@@ -1004,6 +1026,12 @@ async def test_batch_graph_and_hydration_use_canonical_keys_once() -> None:
 
     class Graph:
         def upsert_edges(
+            self,
+            edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        ) -> None:
+            pass
+
+        def delete_edges(
             self,
             edges: Sequence[GraphEdge | tuple[str, str, str, float]],
         ) -> None:
@@ -1138,6 +1166,12 @@ async def test_scalar_graph_fallback_is_bounded() -> None:
         ) -> None:
             pass
 
+        def delete_edges(
+            self,
+            edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        ) -> None:
+            pass
+
         def neighbors(
             self,
             record_id: RecordIdentity | str,
@@ -1170,6 +1204,12 @@ async def test_scalar_graph_fallback_is_bounded() -> None:
 async def test_batch_graph_failures_keep_strict_and_lenient_modes() -> None:
     class BrokenGraph:
         def upsert_edges(
+            self,
+            edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        ) -> None:
+            pass
+
+        def delete_edges(
             self,
             edges: Sequence[GraphEdge | tuple[str, str, str, float]],
         ) -> None:

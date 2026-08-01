@@ -1,4 +1,6 @@
+from searchkernel.adapters.stores.pgvector import PGVectorStore
 from searchkernel.adapters.stores.pgvector_index import PGVectorIndex
+from searchkernel.domain import RecordHit, Vector
 from searchkernel.runtime import QueryEmbeddingCache
 
 
@@ -9,16 +11,27 @@ class _Embedder:
     def __init__(self) -> None:
         self.calls = 0
 
-    def embed_query(self, _query: str) -> list[float]:
+    def embed(self, texts: list[str]) -> list[Vector]:
+        return [[1.0, 0.0]]
+
+    def embed_query(self, text: str) -> list[float]:
         self.calls += 1
         return [1.0, 0.0]
 
 
-class _Store:
+class _Store(PGVectorStore):
     def __init__(self) -> None:
         self.calls = 0
 
-    def search(self, *args, **kwargs):
+    def search(
+        self,
+        query_vector: Vector,
+        k: int,
+        *,
+        model_name: str,
+        dim: int,
+        filters: dict[str, object] | None = None,
+    ) -> list[RecordHit]:
         self.calls += 1
         return []
 

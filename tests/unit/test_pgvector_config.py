@@ -13,7 +13,7 @@ class _Cursor:
         self.statements: list[str] = []
         self.params: list[object] = []
 
-    def execute(self, statement: str, params=None) -> None:
+    def execute(self, statement: object, params: object = None) -> None:
         self.statements.append(str(statement))
         self.params.append(params)
 
@@ -47,10 +47,10 @@ class _Pool:
     def __init__(self, cursor: _Cursor):
         self.connection = _Connection(cursor)
 
-    def get_connection(self):
+    def get_connection(self) -> _Connection:
         return self.connection
 
-    def put_connection(self, _connection) -> None:
+    def put_connection(self, conn: object) -> None:
         pass
 
 
@@ -139,4 +139,4 @@ def test_filtered_search_reports_bounded_under_returning() -> None:
 )
 def test_hnsw_settings_validate_bounds(kwargs) -> None:
     with pytest.raises(ValueError):
-        PGVectorStore(object(), **kwargs)
+        PGVectorStore(_Pool(_Cursor(None)), **kwargs)
