@@ -72,6 +72,26 @@ def _hybrid_case() -> _ParityCase:
     )
 
 
+def _collision_case() -> _ParityCase:
+    note = _record("shared", "note body", source_kind="note", workspace_id="alpha")
+    commit = _record(
+        "shared",
+        "commit body",
+        source_kind="commit",
+        workspace_id="beta",
+    )
+    records = {
+        note.storage_key: note,
+        commit.storage_key: commit,
+    }
+    return _ParityCase(
+        records=records,
+        keyword=[(note.storage_key, 1.0), (commit.storage_key, 0.9)],
+        vector=[],
+        graph={},
+    )
+
+
 class _KeywordStore:
     def __init__(self, case: _ParityCase) -> None:
         self._case = case
@@ -93,11 +113,11 @@ class _KeywordStore:
         del records
 
     def _identity(self, source_id: str) -> RecordIdentity:
-        record = self._case.records[source_id]
+        record = _record_for(self._case, source_id)
         return RecordIdentity(record.workspace_id, record.source_kind, record.source_id)
 
     def _eligible(self, source_id: str, filters: dict[str, object] | None) -> bool:
-        return _eligible(self._case.records[source_id], filters)
+        return _eligible(_record_for(self._case, source_id), filters)
 
 
 class _VectorStore:
@@ -118,7 +138,7 @@ class _VectorStore:
         return [
             RecordHit(self._identity(source_id), score)
             for source_id, score in self._case.vector
-            if _eligible(self._case.records[source_id], filters)
+            if _eligible(_record_for(self._case, source_id), filters)
         ][:k]
 
     def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
@@ -131,7 +151,7 @@ class _VectorStore:
         return 0
 
     def _identity(self, source_id: str) -> RecordIdentity:
-        record = self._case.records[source_id]
+        record = _record_for(self._case, source_id)
         return RecordIdentity(record.workspace_id, record.source_kind, record.source_id)
 
 
@@ -153,7 +173,7 @@ class _GraphStore:
         )
         return [
             GraphNeighbor(
-                _identity(self._case.records[target]),
+                _identity(_record_for(self._case, target)),
                 edge_type,
                 weight,
             )
@@ -198,10 +218,30 @@ def _identity(record: Record) -> RecordIdentity:
     return RecordIdentity(record.workspace_id, record.source_kind, record.source_id)
 
 
+def _record_for(case: _ParityCase, key: str | RecordIdentity) -> Record:
+    source_id = key.source_id if isinstance(key, RecordIdentity) else key
+    storage_key = key.storage_key if isinstance(key, RecordIdentity) else key
+    record = case.records.get(storage_key)
+    if record is not None:
+        return record
+    matches = [record for record in case.records.values() if record.source_id == source_id]
+    assert len(matches) == 1, f"ambiguous legacy source_id lookup: {source_id!r}"
+    return matches[0]
+
+
+class _HydratorAdapter:
+    def __init__(self, case: _ParityCase) -> None:
+        self._case = case
+
+    def hydrate_record(self, identity: RecordIdentity) -> Record:
+        return _record_for(self._case, identity)
+
+    def __call__(self, identity: RecordIdentity | str) -> Record:
+        return _record_for(self._case, identity)
+
+
 def _hydrator(case: _ParityCase):
-    return lambda identity: case.records.get(
-        identity.source_id if isinstance(identity, RecordIdentity) else identity
-    )
+    return _HydratorAdapter(case)
 
 
 def _canonical_pipeline(
@@ -256,6 +296,53 @@ async def test_hybrid_fixture_preserves_identity_and_provenance() -> None:
         result.record_id for result in direct.results
     ]
     assert public[0].metadata["provenance"] == direct.results[0].provenance.to_dict()
+
+
+@pytest.mark.asyncio
+async def test_composite_identity_collision_preserves_parity() -> None:
+    case = _collision_case()
+    expected = [case.records[key] for key, _score in case.keyword]
+
+    direct = await _canonical_pipeline(case).async_search("shared", limit=2)
+    public = await _public_kernel(case).search_anything("shared", k=2)
+
+    assert [
+        (
+            result.storage_key,
+            result.record.workspace_id,
+            result.record.source_kind,
+            result.provenance.record_identity,
+        )
+        for result in direct.results
+    ] == [
+        (record.storage_key, record.workspace_id, record.source_kind, _identity(record))
+        for record in expected
+    ]
+    assert [
+        (
+            RecordIdentity(
+                result.workspace_id,
+                result.source_kind,
+                result.record_id,
+            ).storage_key,
+            result.workspace_id,
+            result.source_kind,
+            result.metadata["provenance"]["record_identity"],
+        )
+        for result in public
+    ] == [
+        (
+            record.storage_key,
+            record.workspace_id,
+            record.source_kind,
+            {
+                "workspace_id": record.workspace_id,
+                "source_kind": record.source_kind,
+                "source_id": record.source_id,
+            },
+        )
+        for record in expected
+    ]
 
 
 @pytest.mark.asyncio
