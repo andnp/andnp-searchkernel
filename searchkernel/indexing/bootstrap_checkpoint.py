@@ -4,10 +4,11 @@ import hashlib
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from searchkernel.indexing.manifest import IndexManifest
+from searchkernel.indexing.runtime_readiness import SearchAvailability
 from searchkernel.utils.atomic_io import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ class BootstrapCheckpoint:
     completed: dict[str, BootstrapFileStamp]
     semantic_encoder_namespace: str | None = None
     semantic_completed: dict[str, bool] = field(default_factory=dict)
+    availability: SearchAvailability | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -78,6 +80,11 @@ class BootstrapCheckpoint:
                 key: self.semantic_completed[key]
                 for key in sorted(self.semantic_completed)
             },
+            "availability": (
+                self.availability.to_dict()
+                if self.availability is not None
+                else None
+            ),
         }
 
 
@@ -182,6 +189,7 @@ def load_bootstrap_checkpoint(index_path: Path) -> BootstrapCheckpoint | None:
         completed = _load_stamp_entries(data.get("completed", []))
         semantic_encoder_namespace = data.get("semantic_encoder_namespace")
         semantic_completed = data.get("semantic_completed", {})
+        availability_data = data.get("availability")
         if not isinstance(schema_version, str):
             raise KeyError("schema_version")
         if not isinstance(generation, str):
@@ -190,6 +198,11 @@ def load_bootstrap_checkpoint(index_path: Path) -> BootstrapCheckpoint | None:
             raise KeyError("complete")
         if not isinstance(semantic_completed, dict):
             semantic_completed = {}
+        availability = (
+            SearchAvailability.from_dict(availability_data)
+            if isinstance(availability_data, dict)
+            else None
+        )
         return BootstrapCheckpoint(
             schema_version=schema_version,
             generation=generation,
@@ -198,8 +211,9 @@ def load_bootstrap_checkpoint(index_path: Path) -> BootstrapCheckpoint | None:
             completed=completed,
             semantic_encoder_namespace=semantic_encoder_namespace,
             semantic_completed=semantic_completed,
+            availability=availability,
         )
-    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
         logger.warning(
             "Bootstrap checkpoint is missing or corrupted at %s; ignoring it",
             path,
@@ -236,6 +250,7 @@ def prepare_bootstrap_checkpoint(
             completed={},
             semantic_encoder_namespace=None,
             semantic_completed={},
+            availability=None,
         )
         save_bootstrap_checkpoint(index_path, checkpoint)
         return checkpoint
@@ -253,6 +268,7 @@ def prepare_bootstrap_checkpoint(
         completed=valid_completed,
         semantic_encoder_namespace=checkpoint.semantic_encoder_namespace,
         semantic_completed=dict(checkpoint.semantic_completed),
+        availability=checkpoint.availability,
     )
     if updated_checkpoint != checkpoint:
         save_bootstrap_checkpoint(index_path, updated_checkpoint)
@@ -286,6 +302,9 @@ def mark_bootstrap_file_completed(
         complete=len(updated_completed) == len(updated_targets),
         targets=updated_targets,
         completed=updated_completed,
+        semantic_encoder_namespace=checkpoint.semantic_encoder_namespace,
+        semantic_completed=dict(checkpoint.semantic_completed),
+        availability=checkpoint.availability,
     )
     if updated_checkpoint == checkpoint:
         return False
@@ -330,6 +349,9 @@ def mark_bootstrap_files_completed(
         complete=len(updated_completed) == len(updated_targets),
         targets=updated_targets,
         completed=updated_completed,
+        semantic_encoder_namespace=checkpoint.semantic_encoder_namespace,
+        semantic_completed=dict(checkpoint.semantic_completed),
+        availability=checkpoint.availability,
     )
     save_bootstrap_checkpoint(index_path, updated_checkpoint)
     return changed
@@ -340,6 +362,28 @@ def has_incomplete_bootstrap_checkpoint(index_path: Path) -> bool:
     if checkpoint is None:
         return False
     return not checkpoint.complete and bool(checkpoint.targets)
+
+
+def publish_bootstrap_availability(
+    index_path: Path,
+    availability: SearchAvailability,
+) -> bool:
+    """Persist the latest independent stage availability snapshot."""
+    checkpoint = load_bootstrap_checkpoint(index_path)
+    if checkpoint is None or checkpoint.availability == availability:
+        return False
+
+    save_bootstrap_checkpoint(
+        index_path,
+        replace(checkpoint, availability=availability),
+    )
+    return True
+
+
+def get_bootstrap_availability(index_path: Path) -> SearchAvailability | None:
+    """Load the latest persisted stage availability snapshot."""
+    checkpoint = load_bootstrap_checkpoint(index_path)
+    return checkpoint.availability if checkpoint is not None else None
 
 
 def mark_semantic_work_completed(
@@ -368,6 +412,7 @@ def mark_semantic_work_completed(
             completed=checkpoint.completed,
             semantic_encoder_namespace=encoder_namespace,
             semantic_completed={relative_path: True},
+            availability=checkpoint.availability,
         )
         save_bootstrap_checkpoint(index_path, updated_checkpoint)
         return True
@@ -386,6 +431,7 @@ def mark_semantic_work_completed(
         completed=checkpoint.completed,
         semantic_encoder_namespace=encoder_namespace,
         semantic_completed=updated_completed,
+        availability=checkpoint.availability,
     )
     if updated_checkpoint == checkpoint:
         return False
@@ -407,3 +453,24 @@ def get_semantic_completion_status(
         return {}
 
     return dict(checkpoint.semantic_completed)
+
+
+__all__ = [
+    "BOOTSTRAP_CHECKPOINT_FILE_NAME",
+    "CURRENT_BOOTSTRAP_CHECKPOINT_SCHEMA_VERSION",
+    "BootstrapCheckpoint",
+    "BootstrapFileStamp",
+    "build_file_stamps",
+    "checkpoint_path",
+    "compute_bootstrap_generation",
+    "get_bootstrap_availability",
+    "get_semantic_completion_status",
+    "has_incomplete_bootstrap_checkpoint",
+    "load_bootstrap_checkpoint",
+    "mark_bootstrap_file_completed",
+    "mark_bootstrap_files_completed",
+    "mark_semantic_work_completed",
+    "prepare_bootstrap_checkpoint",
+    "publish_bootstrap_availability",
+    "save_bootstrap_checkpoint",
+]

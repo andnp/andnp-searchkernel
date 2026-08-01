@@ -28,6 +28,7 @@ from searchkernel.indexing.coordinator import (
     CoordinatorReceipt,
     ResumableSemanticCoordinator,
 )
+from searchkernel.indexing.runtime_readiness import SearchAvailability
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
     ActiveModelStore,
@@ -103,6 +104,7 @@ __all__ = [
     "RollbackMetadata",
     "ScoredRef",
     "SearchAPI",
+    "SearchAvailability",
     "SearchKernel",
     "SearchOrchestrator",
     "SearchResult",

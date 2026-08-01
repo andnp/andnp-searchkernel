@@ -1,4 +1,5 @@
 from searchkernel.indexing.runtime_readiness import (
+    SearchAvailability,
     can_refresh_loaded_indices,
     can_serve_queries,
     is_fully_ready,
@@ -26,7 +27,7 @@ def test_can_serve_queries_blocks_virgin_startup_before_ready_event():
 def test_can_serve_queries_allows_loaded_nonvirgin_startup_before_ready_event():
     assert can_serve_queries(
         init_error=None,
-        ready_event_set=False,
+        ready_event_set=True,
         is_virgin_startup=False,
         indices_queryable=True,
     ) is True
@@ -81,3 +82,57 @@ def test_can_refresh_loaded_indices_requires_completed_nonfailed_startup():
         ready_event_set=True,
         init_error=RuntimeError("boom"),
     ) is False
+
+
+def test_availability_serves_lexical_graph_while_semantic_work_backfills():
+    availability = SearchAvailability(
+        lexical="complete",
+        graph="available",
+        semantic_coarse="backfilling",
+        semantic_fine="unavailable",
+    )
+
+    assert availability.can_serve_queries() is True
+    assert availability.is_fully_ready() is False
+    assert can_serve_queries(
+        init_error=None,
+        ready_event_set=True,
+        is_virgin_startup=True,
+        indices_queryable=True,
+        availability=availability,
+    ) is True
+
+
+def test_availability_round_trips_as_a_durable_snapshot():
+    availability = SearchAvailability(
+        lexical="complete",
+        graph="complete",
+        semantic_coarse="available",
+        semantic_fine="complete",
+    )
+
+    assert SearchAvailability.from_dict(availability.to_dict()) == availability
+
+
+def test_unavailable_required_semantic_stage_is_not_fully_ready():
+    availability = SearchAvailability(
+        lexical="available",
+        graph="available",
+        semantic_coarse="unavailable",
+        semantic_fine="complete",
+    )
+
+    assert availability.can_serve_queries() is True
+    assert availability.is_fully_ready() is False
+
+
+def test_backfilling_lexical_stage_is_serving_but_not_fully_ready():
+    availability = SearchAvailability(
+        lexical="backfilling",
+        graph="complete",
+        semantic_coarse="complete",
+        semantic_fine="complete",
+    )
+
+    assert availability.can_serve_queries() is True
+    assert availability.is_fully_ready() is False

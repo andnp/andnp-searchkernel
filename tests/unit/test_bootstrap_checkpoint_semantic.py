@@ -7,11 +7,14 @@ from searchkernel.indexing.bootstrap_checkpoint import (
     CURRENT_BOOTSTRAP_CHECKPOINT_SCHEMA_VERSION,
     BootstrapCheckpoint,
     BootstrapFileStamp,
+    get_bootstrap_availability,
     get_semantic_completion_status,
     load_bootstrap_checkpoint,
     mark_semantic_work_completed,
+    publish_bootstrap_availability,
     save_bootstrap_checkpoint,
 )
+from searchkernel.indexing.runtime_readiness import SearchAvailability
 
 
 class TestBootstrapCheckpointSemantic:
@@ -74,6 +77,31 @@ class TestBootstrapCheckpointSemantic:
         assert checkpoint.semantic_encoder_namespace is None
         assert checkpoint.semantic_completed == {}
 
+    def test_checkpoint_round_trips_availability(self) -> None:
+        availability = SearchAvailability(
+            lexical="complete",
+            graph="available",
+            semantic_coarse="backfilling",
+            semantic_fine="unavailable",
+        )
+        checkpoint = BootstrapCheckpoint(
+            schema_version=CURRENT_BOOTSTRAP_CHECKPOINT_SCHEMA_VERSION,
+            generation="gen-1",
+            complete=False,
+            targets={},
+            completed={},
+            availability=availability,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_path = Path(tmpdir)
+            save_bootstrap_checkpoint(index_path, checkpoint)
+
+            loaded = load_bootstrap_checkpoint(index_path)
+
+        assert loaded is not None
+        assert loaded.availability == availability
+
 
 class TestMarkSemanticWorkCompleted:
     """Test semantic work completion tracking."""
@@ -106,6 +134,30 @@ class TestMarkSemanticWorkCompleted:
             assert updated is not None
             assert updated.semantic_encoder_namespace == "encoder-v1"
             assert updated.semantic_completed["file-1"] is True
+
+    def test_publish_and_query_availability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_path = Path(tmpdir)
+            save_bootstrap_checkpoint(
+                index_path,
+                BootstrapCheckpoint(
+                    schema_version=CURRENT_BOOTSTRAP_CHECKPOINT_SCHEMA_VERSION,
+                    generation="gen-1",
+                    complete=False,
+                    targets={},
+                    completed={},
+                ),
+            )
+            availability = SearchAvailability(
+                lexical="available",
+                graph="available",
+                semantic_coarse="backfilling",
+                semantic_fine="available",
+            )
+
+            assert publish_bootstrap_availability(index_path, availability) is True
+            assert publish_bootstrap_availability(index_path, availability) is False
+            assert get_bootstrap_availability(index_path) == availability
 
     def test_mark_semantic_work_returns_false_if_no_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

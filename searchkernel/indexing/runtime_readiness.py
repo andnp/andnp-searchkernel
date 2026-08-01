@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Literal
+from typing import Literal, cast
 
 type IndexStatus = Literal["uninitialized", "indexing", "partial", "ready", "failed"]
 
-IndexAvailability = Literal["available", "unavailable"]
-SemanticAvailability = Literal["available", "backfilling", "complete"]
+type ReadinessStage = Literal[
+    "unavailable", "available", "backfilling", "complete"
+]
 
-_INDEX_AVAILABILITIES = frozenset(("available", "unavailable"))
-_SEMANTIC_AVAILABILITIES = frozenset(("available", "backfilling", "complete"))
+IndexAvailability = ReadinessStage
+SemanticAvailability = ReadinessStage
+
+_READINESS_STAGES = frozenset(
+    ("available", "unavailable", "backfilling", "complete")
+)
+_SERVING_STAGES = frozenset(("available", "backfilling", "complete"))
+_READY_STAGES = frozenset(("available", "complete"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,39 +37,60 @@ class SearchAvailability:
     semantic_fine: SemanticAvailability
 
     def __post_init__(self) -> None:
-        if self.lexical not in _INDEX_AVAILABILITIES:
+        if self.lexical not in _READINESS_STAGES:
             raise ValueError(f"invalid lexical availability: {self.lexical!r}")
-        if self.graph not in _INDEX_AVAILABILITIES:
+        if self.graph not in _READINESS_STAGES:
             raise ValueError(f"invalid graph availability: {self.graph!r}")
-        if self.semantic_coarse not in _SEMANTIC_AVAILABILITIES:
+        if self.semantic_coarse not in _READINESS_STAGES:
             raise ValueError(
                 f"invalid semantic_coarse availability: {self.semantic_coarse!r}"
             )
-        if self.semantic_fine not in _SEMANTIC_AVAILABILITIES:
+        if self.semantic_fine not in _READINESS_STAGES:
             raise ValueError(
                 f"invalid semantic_fine availability: {self.semantic_fine!r}"
             )
 
     def can_serve_queries(self) -> bool:
-        """Return whether the minimum lexical/graph search contract is met."""
-        return self.lexical == "available" and self.graph == "available"
+        """Return whether lexical and graph search can serve partial results."""
+        return (
+            self.lexical in _SERVING_STAGES
+            and self.graph in _SERVING_STAGES
+        )
 
     def is_fully_ready(self) -> bool:
-        """Return whether lexical/graph are ready and no semantic work is outstanding.
+        """Return whether all required search stages are ready.
 
-        "available" means no semantic work is pending (e.g. an empty corpus)
-        and counts as satisfied, same as "complete"; only "backfilling" (work
-        actively outstanding) blocks full readiness.
+        ``available`` means a stage has no work pending (for example, an empty
+        corpus). ``backfilling`` and ``unavailable`` both keep full readiness
+        false, while allowing lexical/graph serving when those stages exist.
         """
         return (
-            self.can_serve_queries()
-            and self.semantic_coarse != "backfilling"
-            and self.semantic_fine != "backfilling"
+            self.lexical in _READY_STAGES
+            and self.graph in _READY_STAGES
+            and self.semantic_coarse in _READY_STAGES
+            and self.semantic_fine in _READY_STAGES
         )
 
     def to_dict(self) -> dict[str, str]:
         """Return a JSON-compatible representation of the capabilities."""
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> SearchAvailability:
+        """Restore a durable availability snapshot."""
+        return cls(
+            lexical=_readiness_stage(data, "lexical"),
+            graph=_readiness_stage(data, "graph"),
+            semantic_coarse=_readiness_stage(data, "semantic_coarse"),
+            semantic_fine=_readiness_stage(data, "semantic_fine"),
+        )
+
+
+def _readiness_stage(data: Mapping[str, object], key: str) -> ReadinessStage:
+    value = data[key]
+    if not isinstance(value, str) or value not in _READINESS_STAGES:
+        raise ValueError(f"invalid {key} availability: {value!r}")
+    return cast(ReadinessStage, value)
 
 
 def can_serve_queries(
@@ -132,3 +161,16 @@ def semantic_tier_from_progress(
         return "complete"
     # 0 < indexed_count < total_count: still indexing
     return "backfilling"
+
+
+__all__ = [
+    "IndexAvailability",
+    "IndexStatus",
+    "ReadinessStage",
+    "SearchAvailability",
+    "SemanticAvailability",
+    "can_refresh_loaded_indices",
+    "can_serve_queries",
+    "is_fully_ready",
+    "semantic_tier_from_progress",
+]

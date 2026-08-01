@@ -3,6 +3,7 @@ import pytest
 from searchkernel import api, ports
 from searchkernel.domain import models
 from searchkernel.indexing import async_ingestion, semantic
+from searchkernel.indexing.runtime_readiness import SearchAvailability
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
     content_source,
@@ -24,6 +25,7 @@ API_EXPORTS = {
     "QueryPlan": query_plan.QueryPlan,
     "Record": models.Record,
     "SearchKernel": SearchKernel,
+    "SearchAvailability": SearchAvailability,
     "SearchOrchestrator": orchestrator.SearchOrchestrator,
     "SearchResult": models.SearchResult,
     "SemanticInput": semantic.SemanticInput,

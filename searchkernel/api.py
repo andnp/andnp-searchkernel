@@ -41,6 +41,7 @@ from searchkernel.indexing.coordinator import (
     CoordinatorReceipt,
     ResumableSemanticCoordinator,
 )
+from searchkernel.indexing.runtime_readiness import SearchAvailability
 from searchkernel.indexing.semantic import (
     EncoderFingerprint,
     SemanticInput,
@@ -217,6 +218,7 @@ __all__ = [
     "SQLiteTuning",
     "ScoredRef",
     "SearchAPI",
+    "SearchAvailability",
     "SearchKernel",
     "SearchOrchestrator",
     "SearchResult",

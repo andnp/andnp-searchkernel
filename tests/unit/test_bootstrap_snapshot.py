@@ -14,6 +14,7 @@ from searchkernel.indexing.bootstrap_snapshot import (
     derive_loaded_index_state_snapshot,
 )
 from searchkernel.indexing.manifest import CURRENT_MANIFEST_SPEC_VERSION, IndexManifest
+from searchkernel.indexing.runtime_readiness import SearchAvailability
 
 
 def _stamp(file_path: Path) -> BootstrapFileStamp:
@@ -169,3 +170,30 @@ def test_derive_bootstrap_readiness_snapshot_requires_loaded_docs_for_nonempty_t
     )
 
     assert snapshot is None
+
+
+def test_bootstrap_readiness_snapshot_round_trips_explicit_availability(
+    tmp_path: Path,
+):
+    doc = tmp_path / "doc.md"
+    doc.write_text("# Doc")
+    availability = SearchAvailability(
+        lexical="complete",
+        graph="available",
+        semantic_coarse="backfilling",
+        semantic_fine="unavailable",
+    )
+
+    snapshot = derive_bootstrap_readiness_snapshot(
+        checkpoint=None,
+        saved_manifest=_manifest({"doc": "doc.md"}),
+        target_stamps={"doc.md": _stamp(doc)},
+        loaded_indexed_count=1,
+        queryable=True,
+        rebuild_pending=True,
+        availability=availability,
+    )
+
+    assert snapshot is not None
+    restored = BootstrapReadinessSnapshot.from_dict(snapshot.to_dict())
+    assert restored == snapshot
