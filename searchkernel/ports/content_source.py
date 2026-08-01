@@ -72,7 +72,7 @@ IngestionBatchResult = IngestionReceipt
 class SourceBatch:
     """Records emitted together with the source cursor at batch termination."""
 
-    records: tuple[Record, ...]
+    records: Sequence[Record]
     terminal_cursor: Cursor = None
 
 
