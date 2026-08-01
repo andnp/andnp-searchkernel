@@ -298,6 +298,9 @@ class Record:
     workspace_id: str | None = None
     """Optional workspace/tenant scope for the source identity."""
 
+    indexed_text: str | None = None
+    """Optional text override used for indexing while retaining ``body``."""
+
     def __post_init__(self) -> None:
         """Keep persisted timestamps comparable across source adapters."""
         self.created_at = _as_utc(self.created_at)
@@ -323,6 +326,7 @@ class Record:
             "status": self.status.value,
             "embedding": self.embedding,
             "embedding_model": self.embedding_model,
+            "indexed_text": self.indexed_text,
         }
 
     @classmethod
@@ -357,6 +361,7 @@ class Record:
             status=status,
             embedding=data.get("embedding"),
             embedding_model=data.get("embedding_model"),
+            indexed_text=data.get("indexed_text"),
         )
 
 
