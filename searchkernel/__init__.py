@@ -23,6 +23,11 @@ from searchkernel.domain import (
     ValidationResult,
     canonical_storage_key,
 )
+from searchkernel.indexing.coordinator import (
+    CoordinatorProgress,
+    CoordinatorReceipt,
+    ResumableSemanticCoordinator,
+)
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
     ActiveModelStore,
@@ -68,6 +73,8 @@ __all__ = [
     "BatchContentSource",
     "Chunk",
     "ContentSource",
+    "CoordinatorProgress",
+    "CoordinatorReceipt",
     "EmbeddingProvider",
     "MigrationPhase",
     "MigrationState",
@@ -92,6 +99,7 @@ __all__ = [
     "RecordSearchPipeline",
     "RecordSearchPolicy",
     "RecordSearchResult",
+    "ResumableSemanticCoordinator",
     "RollbackMetadata",
     "ScoredRef",
     "SearchAPI",

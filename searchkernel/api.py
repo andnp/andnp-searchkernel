@@ -36,6 +36,11 @@ from searchkernel.domain import (
     canonical_storage_key,
 )
 from searchkernel.indexing.async_ingestion import AsyncIndexIngestor
+from searchkernel.indexing.coordinator import (
+    CoordinatorProgress,
+    CoordinatorReceipt,
+    ResumableSemanticCoordinator,
+)
 from searchkernel.indexing.semantic import (
     EncoderFingerprint,
     SemanticInput,
@@ -152,6 +157,8 @@ __all__ = [
     "ChunkTuningConfig",
     "CompressionStats",
     "ContentSource",
+    "CoordinatorProgress",
+    "CoordinatorReceipt",
     "Cursor",
     "DatabaseManager",
     "DiversityDiagnostic",
@@ -203,6 +210,7 @@ __all__ = [
     "RecordSearchResult",
     "RecordStatus",
     "Reranker",
+    "ResumableSemanticCoordinator",
     "RetrievalFieldExtractor",
     "RetrievalFields",
     "RollbackMetadata",
