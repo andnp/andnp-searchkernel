@@ -1,10 +1,18 @@
 """Stable application-facing imports for the search kernel.
 
-This facade contains domain models, ports, and reusable pipeline contracts.
-Concrete backends and app-specific indexing orchestration remain in their
-implementation modules.
+``searchkernel.api`` is the integration boundary for applications that own
+source discovery and lifecycle orchestration. It groups the shared domain
+values, ports, indexing contracts, persistence helpers, and search
+configuration needed to compose those applications.
+
+Application managers, watchers, source adapters, and private implementation
+helpers remain outside this facade. Concrete local indexing adapters are
+exposed only where they are reusable parts of the indexing seam; optional
+backend providers remain in their adapter modules.
 """
 
+from searchkernel.chunking import ChunkingStrategy, HeaderBasedChunker, get_chunker
+from searchkernel.compression import truncate_delta
 from searchkernel.domain import (
     ActiveModelMetadata,
     BackupMetadata,
@@ -35,15 +43,96 @@ from searchkernel.domain import (
     Vector,
     canonical_storage_key,
 )
-from searchkernel.indexing.async_ingestion import AsyncIndexIngestor
+from searchkernel.embeddings import (
+    TEST_FAKE_EMBEDDING_MODEL_NAME,
+    TEST_FAKE_EMBEDDINGS_ENV_VAR,
+    should_use_test_fake_embeddings,
+)
+from searchkernel.indexing.async_ingestion import (
+    AsyncIndexIngestor,
+    BlockingRecordIndexer,
+)
+from searchkernel.indexing.bootstrap_checkpoint import (
+    BOOTSTRAP_CHECKPOINT_FILE_NAME,
+    CURRENT_BOOTSTRAP_CHECKPOINT_SCHEMA_VERSION,
+    BootstrapCheckpoint,
+    BootstrapFileStamp,
+    build_file_stamps,
+    checkpoint_path,
+    compute_bootstrap_generation,
+    get_bootstrap_availability,
+    get_semantic_completion_status,
+    has_incomplete_bootstrap_checkpoint,
+    load_bootstrap_checkpoint,
+    mark_bootstrap_file_completed,
+    mark_bootstrap_files_completed,
+    mark_semantic_work_completed,
+    prepare_bootstrap_checkpoint,
+    publish_bootstrap_availability,
+    save_bootstrap_checkpoint,
+)
+from searchkernel.indexing.bootstrap_snapshot import (
+    BootstrapReadinessSnapshot,
+    PublicIndexStateSnapshot,
+    compute_bootstrap_completed_paths,
+    derive_bootstrap_readiness_snapshot,
+    derive_loaded_index_state_snapshot,
+)
+from searchkernel.indexing.checkpoints import JsonCheckpointStore, MemoryCheckpointStore
 from searchkernel.indexing.coordinator import (
     CoordinatorProgress,
     CoordinatorReceipt,
     ResumableSemanticCoordinator,
 )
-from searchkernel.indexing.runtime_readiness import SearchAvailability
+from searchkernel.indexing.core import IndexCore
+from searchkernel.indexing.discovery import (
+    PARSER_SUFFIXES,
+    discover_files,
+    discover_files_multi_root,
+    get_parser_suffixes,
+    is_excluded_dir,
+    walk_dirs_with_files,
+    walk_included_dirs,
+)
+from searchkernel.indexing.embedding_cache import (
+    EmbeddingCacheMetrics,
+    SQLiteEmbeddingCache,
+)
+from searchkernel.indexing.git_ingestion import (
+    GitIndexManager,
+    IngestibleSource,
+    ingest_git_source,
+)
+from searchkernel.indexing.implicit_graph import ImplicitGraphBuilder
+from searchkernel.indexing.manifest import (
+    CURRENT_MANIFEST_SPEC_VERSION,
+    IndexManifest,
+    load_manifest,
+    save_manifest,
+    should_rebuild,
+)
+from searchkernel.indexing.migration import detect_and_migrate_legacy_index
+from searchkernel.indexing.reconciler import (
+    build_indexed_files_map,
+    find_excluded_indexed_files,
+    reconcile_indices,
+)
+from searchkernel.indexing.runtime_readiness import (
+    IndexAvailability,
+    IndexStatus,
+    ReadinessStage,
+    SearchAvailability,
+    SemanticAvailability,
+    can_refresh_loaded_indices,
+    can_serve_queries,
+    is_fully_ready,
+    semantic_tier_from_progress,
+)
 from searchkernel.indexing.semantic import (
+    EmbeddingCache,
+    EmbeddingEncoder,
     EncoderFingerprint,
+    LlamaIndexEmbeddingCacheAdapter,
     SemanticInput,
     SemanticTier,
     build_embedding_text,
@@ -51,6 +140,14 @@ from searchkernel.indexing.semantic import (
     semantic_input_for_chunk,
     semantic_input_for_record,
 )
+from searchkernel.indexing.submission import (
+    TaskBatchSubmissionResult,
+    TaskSubmissionResult,
+)
+from searchkernel.indices.graph import GraphStore as GraphIndex
+from searchkernel.indices.hash_store import ChunkHashStore
+from searchkernel.indices.keyword import KeywordIndex
+from searchkernel.indices.vector import VectorIndex
 from searchkernel.ingestion.records import SemanticRecordIngestor
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
@@ -101,6 +198,7 @@ from searchkernel.ports import (
     VectorStore,
     extract_retrieval_fields,
 )
+from searchkernel.ports.live_indices import LiveSearchResult
 from searchkernel.search import (
     DiversityDiagnostic,
     HierarchicalRetrievalConfig,
@@ -113,6 +211,16 @@ from searchkernel.search import (
     apply_source_diversity,
     route_query,
     search_hierarchical,
+)
+from searchkernel.search.edge_types import infer_edge_type
+from searchkernel.search.path_utils import (
+    compute_doc_id,
+    compute_doc_id_multi_root,
+    extract_doc_id_from_chunk_id,
+    matches_any_excluded,
+    normalize_path,
+    resolve_doc_path,
+    resolve_doc_path_multi_root,
 )
 from searchkernel.search.record_pipeline import (
     QueryEmbeddingProvider,
@@ -136,6 +244,12 @@ from searchkernel.utils import (
 from searchkernel.utils.atomic_io import atomic_write_json
 
 __all__ = [
+    "BOOTSTRAP_CHECKPOINT_FILE_NAME",
+    "CURRENT_BOOTSTRAP_CHECKPOINT_SCHEMA_VERSION",
+    "CURRENT_MANIFEST_SPEC_VERSION",
+    "PARSER_SUFFIXES",
+    "TEST_FAKE_EMBEDDINGS_ENV_VAR",
+    "TEST_FAKE_EMBEDDING_MODEL_NAME",
     "ActiveModelMetadata",
     "ActiveModelStore",
     "AsyncEmbeddingProvider",
@@ -149,13 +263,19 @@ __all__ = [
     "BatchContentSource",
     "BatchGraphStore",
     "BatchRecordHydrator",
+    "BlockingRecordIndexer",
+    "BootstrapCheckpoint",
+    "BootstrapFileStamp",
+    "BootstrapReadinessSnapshot",
     "CacheStore",
     "CandidateFilterSupport",
     "ChangeSignal",
     "CheckpointStore",
     "Chunk",
+    "ChunkHashStore",
     "ChunkResult",
     "ChunkTuningConfig",
+    "ChunkingStrategy",
     "CompressionStats",
     "ContentSource",
     "CoordinatorProgress",
@@ -164,23 +284,40 @@ __all__ = [
     "DatabaseManager",
     "DiversityDiagnostic",
     "EmbeddingBatchProvider",
+    "EmbeddingCache",
+    "EmbeddingCacheMetrics",
+    "EmbeddingEncoder",
     "EmbeddingProvider",
     "EmbeddingSink",
     "EncoderFingerprint",
     "Filters",
+    "GitIndexManager",
     "GraphEdge",
+    "GraphIndex",
     "GraphIndexPort",
     "GraphNeighbor",
     "GraphStore",
+    "HeaderBasedChunker",
     "HierarchicalRetrievalConfig",
     "HierarchicalSearchableSource",
+    "ImplicitGraphBuilder",
+    "IndexAvailability",
+    "IndexCore",
     "IndexManagerPort",
+    "IndexManifest",
+    "IndexStatus",
+    "IngestibleSource",
     "IngestionError",
     "IngestionFailureMode",
     "IngestionReceipt",
+    "JsonCheckpointStore",
+    "KeywordIndex",
     "KeywordIndexPort",
     "KeywordStore",
     "LLMProvider",
+    "LiveSearchResult",
+    "LlamaIndexEmbeddingCacheAdapter",
+    "MemoryCheckpointStore",
     "MigrationPhase",
     "MigrationState",
     "ModelBackupStore",
@@ -190,10 +327,12 @@ __all__ = [
     "ModelNamespaceStore",
     "ModelValidationStore",
     "OrchestratorConfig",
+    "PublicIndexStateSnapshot",
     "QueryEmbeddingProvider",
     "QueryPlan",
     "QueryRouter",
     "QueryRouterConfig",
+    "ReadinessStage",
     "Record",
     "RecordHit",
     "RecordHydrator",
@@ -215,6 +354,7 @@ __all__ = [
     "RetrievalFieldExtractor",
     "RetrievalFields",
     "RollbackMetadata",
+    "SQLiteEmbeddingCache",
     "SQLiteTuning",
     "ScoredRef",
     "SearchAPI",
@@ -226,6 +366,7 @@ __all__ = [
     "SearchResultProvenance",
     "SearchStrategyStats",
     "SearchableSource",
+    "SemanticAvailability",
     "SemanticInput",
     "SemanticRecordIngestor",
     "SemanticTier",
@@ -233,24 +374,72 @@ __all__ = [
     "SourceCapabilities",
     "SourceDiversityPolicy",
     "StrategyContribution",
+    "TaskBatchSubmissionResult",
+    "TaskSubmissionResult",
     "Tier",
     "ValidationResult",
     "Vector",
+    "VectorIndex",
     "VectorIndexPort",
     "VectorStore",
     "apply_source_diversity",
     "atomic_write_json",
     "build_embedding_text",
+    "build_file_stamps",
+    "build_indexed_files_map",
+    "can_refresh_loaded_indices",
+    "can_serve_queries",
     "canonical_storage_key",
+    "checkpoint_path",
     "classify_query_type",
+    "compute_bootstrap_completed_paths",
+    "compute_bootstrap_generation",
+    "compute_doc_id",
+    "compute_doc_id_multi_root",
     "cosine_similarity",
     "cosine_similarity_lists",
+    "derive_bootstrap_readiness_snapshot",
+    "derive_loaded_index_state_snapshot",
+    "detect_and_migrate_legacy_index",
+    "discover_files",
+    "discover_files_multi_root",
     "embedding_identity",
+    "extract_doc_id_from_chunk_id",
     "extract_retrieval_fields",
+    "find_excluded_indexed_files",
+    "get_bootstrap_availability",
+    "get_chunker",
+    "get_parser_suffixes",
+    "get_semantic_completion_status",
+    "has_incomplete_bootstrap_checkpoint",
+    "infer_edge_type",
+    "ingest_git_source",
+    "is_excluded_dir",
+    "is_fully_ready",
+    "load_bootstrap_checkpoint",
+    "load_manifest",
+    "mark_bootstrap_file_completed",
+    "mark_bootstrap_files_completed",
+    "mark_semantic_work_completed",
+    "matches_any_excluded",
+    "normalize_path",
+    "prepare_bootstrap_checkpoint",
+    "publish_bootstrap_availability",
+    "reconcile_indices",
+    "resolve_doc_path",
+    "resolve_doc_path_multi_root",
     "route_query",
+    "save_bootstrap_checkpoint",
+    "save_manifest",
     "search_hierarchical",
     "semantic_input_for_chunk",
     "semantic_input_for_record",
+    "semantic_tier_from_progress",
     "should_include_file",
+    "should_rebuild",
+    "should_use_test_fake_embeddings",
     "truncate_content",
+    "truncate_delta",
+    "walk_dirs_with_files",
+    "walk_included_dirs",
 ]
