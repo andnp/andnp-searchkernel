@@ -160,9 +160,9 @@ collected pytest suite with `--strict-markers -m "not slow and not
 real_embeddings"`. Pyrefly is the only type checker. The local baseline on
 2026-08-02 is:
 
-- Python 3.13.7 with the locked environment;
-- 1,199 passing tests;
-- 79% total line coverage;
+- Python 3.13.14 with the locked environment;
+- 992 passing tests;
+- 81.28% total line coverage;
 - `uv lock --check` passing;
 - the locked environment and the CI static checks passing.
 
