@@ -891,6 +891,9 @@ class RecordSearchPipeline:
                         ),
                         "rrf_k": self._config.rrf_k,
                         "weighted_rrf_enabled": self._config.weighted_rrf_enabled,
+                        "base_semantic_weight": self._config.base_semantic_weight,
+                        "base_keyword_weight": self._config.base_keyword_weight,
+                        "base_graph_weight": self._config.base_graph_weight,
                         "graph_fusion": self._config.graph_fusion,
                         "graph_enabled": self._config.graph_enabled,
                         "graph_depth": self._config.graph_depth,
@@ -902,6 +905,15 @@ class RecordSearchPipeline:
                         "score_ratio_floor": self._config.score_ratio_floor,
                         "minimum_score": self._config.minimum_score,
                         "maximum_score_gap": self._config.maximum_score_gap,
+                        "artifact_confidence_threshold": (
+                            self._config.artifact_confidence_threshold
+                        ),
+                        "expansion_enabled": self._config.expansion_enabled,
+                        "expansion_timeout_s": self._config.expansion_timeout_s,
+                        "expansion_top_k": self._config.expansion_top_k,
+                        "expansion_similarity_threshold": (
+                            self._config.expansion_similarity_threshold
+                        ),
                         "parent_expansion": (
                             self._policy.parent_expander is not None
                         ),

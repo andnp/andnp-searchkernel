@@ -22,6 +22,7 @@ from searchkernel.search.record_pipeline import (
     RecordSearchPolicy,
     RecordSearchQueryContext,
 )
+from searchkernel.runtime import CandidateResultCache
 
 pytestmark = pytest.mark.asyncio
 
@@ -251,6 +252,32 @@ async def test_missing_epoch_bypasses_candidate_cache() -> None:
     outcome = await pipeline.async_search("query")
 
     assert "candidate_cache:bypass:UnstableCacheKey" in outcome.cache_diagnostics
+
+
+async def test_candidate_cache_fingerprint_includes_routing_weights() -> None:
+    class EpochKeywordStore(FakeKeywordStore):
+        def keyword_epoch(self) -> int:
+            return 0
+
+    store = EpochKeywordStore([("a", 1.0)])
+    cache = CandidateResultCache()
+    first = RecordSearchPipeline(
+        keyword_store=store,
+        hydrator=_hydrator({"a": _record("a")}),
+        candidate_cache=cache,
+    )
+    second = RecordSearchPipeline(
+        keyword_store=store,
+        hydrator=_hydrator({"a": _record("a")}),
+        candidate_cache=cache,
+        config=RecordSearchConfig(base_keyword_weight=2.0),
+    )
+
+    first_outcome = await first.async_search("query")
+    second_outcome = await second.async_search("query")
+
+    assert "candidate_cache:miss" in first_outcome.cache_diagnostics
+    assert "candidate_cache:miss" in second_outcome.cache_diagnostics
 
 
 async def test_policy_can_order_vector_candidates_before_fusion() -> None:
