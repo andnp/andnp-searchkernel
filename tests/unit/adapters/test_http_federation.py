@@ -34,15 +34,12 @@ def _response(payload: object, *, status_code: int = 200) -> httpx.Response:
     )
 
 
-def _client(response: httpx.Response | None = None) -> tuple[mock.MagicMock, mock.AsyncMock]:
+def _client(response: httpx.Response | None = None) -> mock.AsyncMock:
     client = mock.AsyncMock()
     if response is not None:
         client.post.return_value = response
         client.get.return_value = response
-    context = mock.MagicMock()
-    context.__aenter__ = mock.AsyncMock(return_value=client)
-    context.__aexit__ = mock.AsyncMock(return_value=False)
-    return context, client
+    return client
 
 
 def _source(**kwargs: object) -> HttpSearchSource:
@@ -52,7 +49,7 @@ def _source(**kwargs: object) -> HttpSearchSource:
 @pytest.mark.asyncio
 async def test_search_posts_json_with_request_trace_and_caller_context() -> None:
     response = SearchResponse(source=IDENTITY)
-    context, client = _client(_response(response.to_dict()))
+    client = _client(_response(response.to_dict()))
     request = SearchRequest(
         "incident review",
         request_id="request-1",
@@ -64,7 +61,7 @@ async def test_search_posts_json_with_request_trace_and_caller_context() -> None
         ),
     )
 
-    with mock.patch("httpx.AsyncClient", return_value=context):
+    with mock.patch("httpx.AsyncClient", return_value=client):
         result = await _source().search(request)
 
     assert result == response
@@ -81,14 +78,14 @@ async def test_fetch_capabilities_and_health_validate_v1_payloads() -> None:
         supports_filters=False,
         max_top_k=25,
     )
-    context, client = _client()
+    client = _client()
     client.get.side_effect = [
         _response(capabilities.to_dict()),
         _response({"status": "ok", "contract_version": "v1"}),
     ]
     source = _source()
 
-    with mock.patch("httpx.AsyncClient", return_value=context):
+    with mock.patch("httpx.AsyncClient", return_value=client):
         assert await source.fetch_capabilities() == capabilities
         assert await source.health() == {
             "status": "ok",
@@ -104,7 +101,7 @@ async def test_fetch_capabilities_and_health_validate_v1_payloads() -> None:
 
 @pytest.mark.asyncio
 async def test_timeout_is_explicit_source_degradation() -> None:
-    context, client = _client()
+    client = _client()
 
     async def slow_post(*args: object, **kwargs: object) -> None:
         await asyncio.sleep(0.05)
@@ -113,7 +110,7 @@ async def test_timeout_is_explicit_source_degradation() -> None:
     source = _source(timeout_s=0.01)
 
     with (
-        mock.patch("httpx.AsyncClient", return_value=context),
+        mock.patch("httpx.AsyncClient", return_value=client),
         pytest.raises(SearchSourceTimeoutError),
     ):
         await source.search(SearchRequest("query"))
@@ -125,9 +122,9 @@ async def test_http_and_auth_failures_are_explicit() -> None:
         (401, SearchSourceAuthenticationError),
         (503, SearchSourceHTTPError),
     ):
-        context, _ = _client(_response({"error": "unavailable"}, status_code=status_code))
+        client = _client(_response({"error": "unavailable"}, status_code=status_code))
         with (
-            mock.patch("httpx.AsyncClient", return_value=context),
+            mock.patch("httpx.AsyncClient", return_value=client),
             pytest.raises(error),
         ):
             await _source().search(SearchRequest("query"))
@@ -135,10 +132,10 @@ async def test_http_and_auth_failures_are_explicit() -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_schema_is_not_an_empty_success() -> None:
-    context, _ = _client(_response({"contract_version": "v1", "hits": []}))
+    client = _client(_response({"contract_version": "v1", "hits": []}))
 
     with (
-        mock.patch("httpx.AsyncClient", return_value=context),
+        mock.patch("httpx.AsyncClient", return_value=client),
         pytest.raises(SearchSourceSchemaError, match="invalid search response"),
     ):
         await _source().search(SearchRequest("query"))
@@ -151,10 +148,10 @@ async def test_response_size_is_bounded_before_json_decoding() -> None:
         content=b"x" * 11,
         request=httpx.Request("POST", "https://source.example/v1/search"),
     )
-    context, _ = _client(response)
+    client = _client(response)
 
     with (
-        mock.patch("httpx.AsyncClient", return_value=context),
+        mock.patch("httpx.AsyncClient", return_value=client),
         pytest.raises(SearchSourcePayloadTooLargeError),
     ):
         await _source(max_response_bytes=10).search(SearchRequest("query"))
@@ -162,24 +159,24 @@ async def test_response_size_is_bounded_before_json_decoding() -> None:
 
 @pytest.mark.asyncio
 async def test_request_size_and_caller_deadline_are_bounded() -> None:
-    context, client = _client(_response(SearchResponse(source=IDENTITY).to_dict()))
+    client = _client(_response(SearchResponse(source=IDENTITY).to_dict()))
     source = _source(max_request_bytes=10)
 
     with (
-        mock.patch("httpx.AsyncClient", return_value=context),
+        mock.patch("httpx.AsyncClient", return_value=client),
         pytest.raises(SearchSourcePayloadTooLargeError),
     ):
         await source.search(SearchRequest("query"))
     client.post.assert_not_called()
 
-    context, client = _client()
+    client = _client()
     source = _source()
     request = SearchRequest(
         "query",
         deadline_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     with (
-        mock.patch("httpx.AsyncClient", return_value=context),
+        mock.patch("httpx.AsyncClient", return_value=client),
         pytest.raises(SearchSourceTimeoutError),
     ):
         await source.search(request)
@@ -188,3 +185,32 @@ async def test_request_size_and_caller_deadline_are_bounded() -> None:
 
 def test_http_source_implements_search_source_port() -> None:
     assert isinstance(_source(), SearchSource)
+
+
+@pytest.mark.asyncio
+async def test_source_reuses_client_and_closes_it() -> None:
+    client = _client()
+    client.get.side_effect = [
+        _response({"status": "ok"}),
+        _response({"status": "ok"}),
+    ]
+    source = _source()
+
+    with mock.patch("httpx.AsyncClient", return_value=client) as constructor:
+        await source.health()
+        await source.health()
+        await source.aclose()
+
+    constructor.assert_called_once_with(timeout=5.0)
+    client.aclose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_source_context_manager_closes_client() -> None:
+    client = _client(_response({"status": "ok"}))
+
+    with mock.patch("httpx.AsyncClient", return_value=client):
+        async with _source() as source:
+            await source.health()
+
+    client.aclose.assert_awaited_once_with()

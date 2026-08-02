@@ -10,7 +10,8 @@ This is an ADDITIVE port implementation; no other LLM adapters are modified.
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from typing import Any, Self
 
 from searchkernel.domain import Tier
 
@@ -33,6 +34,35 @@ class OllamaLLMProvider:
         self.model_name = model_name
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._client: Any | None = None
+        self._client_lock: asyncio.Lock | None = None
+        self._closed = False
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Close the shared HTTP client, if it has been created."""
+        self._closed = True
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def _get_client(self) -> Any:
+        if self._closed:
+            raise RuntimeError("Ollama LLM provider is closed")
+        if self._client is None:
+            if self._client_lock is None:
+                self._client_lock = asyncio.Lock()
+            async with self._client_lock:
+                if self._client is None:
+                    import httpx
+
+                    self._client = httpx.AsyncClient(timeout=self._timeout)
+        return self._client
 
     async def complete(
         self,
@@ -67,10 +97,8 @@ class OllamaLLMProvider:
             payload["format"] = response_format
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                response = await client.post(
-                    f"{self._base_url}/api/chat", json=payload
-                )
+            client = await self._get_client()
+            response = await client.post(f"{self._base_url}/api/chat", json=payload)
         except httpx.TimeoutException as e:
             raise RuntimeError(
                 f"ollama completion timed out after {self._timeout}s for model "

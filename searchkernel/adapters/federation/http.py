@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import Mapping, MutableMapping
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from searchkernel.ports.federation import (
     FEDERATION_CONTRACT_VERSION,
@@ -91,6 +91,35 @@ class HttpSearchSource:
         self._max_response_bytes = max_response_bytes
         self._headers = dict(headers or {})
         self._capabilities = SourceCapabilities()
+        self._client: Any | None = None
+        self._client_lock: asyncio.Lock | None = None
+        self._closed = False
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Close the shared HTTP client, if it has been created."""
+        self._closed = True
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def _get_client(self) -> Any:
+        if self._closed:
+            raise RuntimeError("HTTP search source is closed")
+        if self._client is None:
+            if self._client_lock is None:
+                self._client_lock = asyncio.Lock()
+            async with self._client_lock:
+                if self._client is None:
+                    import httpx
+
+                    self._client = httpx.AsyncClient(timeout=self._timeout_s)
+        return self._client
 
     def capabilities(self) -> SourceCapabilities:
         """Return the last validated capabilities advertised by the source."""
@@ -176,13 +205,13 @@ class HttpSearchSource:
 
         url = f"{self._base_url}{path}"
         try:
-            async with httpx.AsyncClient(timeout=timeout_s) as client:
-                operation = (
-                    client.get(url, headers=headers)
-                    if method == "GET"
-                    else client.post(url, content=body, headers=headers)
-                )
-                response = await asyncio.wait_for(operation, timeout=timeout_s)
+            client = await self._get_client()
+            operation = (
+                client.get(url, headers=headers)
+                if method == "GET"
+                else client.post(url, content=body, headers=headers)
+            )
+            response = await asyncio.wait_for(operation, timeout=timeout_s)
         except asyncio.CancelledError:
             raise
         except (TimeoutError, httpx.TimeoutException) as error:
