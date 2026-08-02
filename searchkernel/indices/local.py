@@ -29,6 +29,7 @@ from searchkernel.domain import (
     RecordHit,
     RecordIdentity,
     RecordStatus,
+    SearchFilters,
     Vector,
 )
 from searchkernel.domain.vector_filters import (
@@ -883,7 +884,7 @@ class LocalRecordBackend:
                 raise
 
     @staticmethod
-    def _status_values(filters: dict[str, Any] | None) -> set[str]:
+    def _status_values(filters: SearchFilters | None) -> set[str]:
         if filters and filters.get("include_inactive"):
             return {"active", "stale", "archived"}
         if filters and filters.get("status") is not None:
@@ -907,7 +908,7 @@ class LocalRecordBackend:
     def _matches(
         cls,
         row: sqlite3.Row,
-        filters: dict[str, Any] | None,
+        filters: SearchFilters | None,
     ) -> bool:
         return record_matches_vector_filters(
             storage_key=row["storage_key"],
@@ -929,7 +930,7 @@ class LocalRecordBackend:
         self,
         query: str,
         k: int,
-        filters: dict[str, Any] | None = None,
+        filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
         if k < 1 or not query.strip():
             return []
@@ -939,7 +940,7 @@ class LocalRecordBackend:
 
     @staticmethod
     def _keyword_filter_sql(
-        filters: dict[str, Any] | None,
+        filters: SearchFilters | None,
     ) -> tuple[list[str], list[Any]]:
         filters = filters or {}
         statuses = sorted(LocalRecordBackend._status_values(filters))
@@ -982,7 +983,7 @@ class LocalRecordBackend:
         self,
         query: str,
         k: int,
-        filters: dict[str, Any] | None,
+        filters: SearchFilters | None,
     ) -> list[RecordHit]:
         match_query = _keyword_scoring.sanitize_fts_query(query)
         if match_query == '""':
@@ -1056,7 +1057,7 @@ class LocalRecordBackend:
         self,
         query: str,
         k: int,
-        filters: dict[str, Any] | None,
+        filters: SearchFilters | None,
     ) -> list[RecordHit]:
         terms = [term.lower() for term in _TOKEN_RE.findall(query)]
         if not terms:
@@ -1106,7 +1107,7 @@ class LocalRecordBackend:
         *,
         model_name: str,
         dim: int,
-        filters: dict[str, Any] | None = None,
+        filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
         if k < 1:
             return []
@@ -1156,7 +1157,7 @@ class LocalRecordBackend:
         *,
         model_name: str,
         dim: int,
-        filters: dict[str, Any] | None,
+        filters: SearchFilters | None,
     ) -> list[RecordHit]:
         best_keys: list[str] = []
         best_scores: list[float] = []
@@ -1966,7 +1967,7 @@ class LocalVectorStore:
         *,
         model_name: str,
         dim: int,
-        filters: dict[str, Any] | None = None,
+        filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
         faiss_store = self._selected_store(model_name, dim)
         if faiss_store is not None:
@@ -1988,7 +1989,7 @@ class LocalVectorStore:
         *,
         model_name: str,
         dim: int,
-        filters: dict[str, Any] | None = None,
+        filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
         return await asyncio.to_thread(
             self.search,
@@ -2029,7 +2030,7 @@ class LocalKeywordStore:
         self._backend.index(records)
 
     def search(
-        self, query: str, k: int, filters: dict[str, Any] | None = None
+        self, query: str, k: int, filters: SearchFilters | None = None
     ) -> list[RecordHit]:
         return self._backend.search_keyword(query, k, filters)
 
