@@ -2,8 +2,8 @@
 
 pytest.mark.xdist_group (used elsewhere in this suite for "serial" tests) only
 has an effect under `--dist loadgroup` -- it is a no-op under this repo's
-default `--dist worksteal` (see tests/integration/test_pgvector_index.py's
-docstring). So pgvector integration tests cannot rely on grouping to avoid
+default `--dist worksteal` (see the pgvector store integration tests'
+documentation). So pgvector integration tests cannot rely on grouping to avoid
 running concurrently with other workers against the shared Postgres
 container; they need real per-worker isolation instead.
 """
