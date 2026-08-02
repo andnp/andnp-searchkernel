@@ -18,10 +18,21 @@ from searchkernel.indices.local_vectors import (
     VECTOR_FORMAT_VERSION,
     PackedVectorCodec,
 )
+from searchkernel.domain.vector_filters import metadata_mapping, record_matches_vector_filters
 from searchkernel.utils.atomic_io import atomic_write_binary, atomic_write_json
 
 if TYPE_CHECKING:
     from searchkernel.indices.local import LocalRecordBackend
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateMetadata:
+    source_id: str
+    workspace_id: str | None
+    source_kind: str
+    status: str
+    metadata: dict[str, Any]
+    uri: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +44,7 @@ class _FAISSState:
     ids: tuple[int, ...]
     storage_keys: tuple[str, ...]
     id_to_storage_key: dict[int, str]
+    candidate_metadata: dict[str, _CandidateMetadata]
 
 
 class FAISSLocalVectorStore:
@@ -188,6 +200,7 @@ class FAISSLocalVectorStore:
         ids: list[int] = []
         storage_keys: list[str] = []
         id_to_storage_key: dict[int, str] = {}
+        candidate_metadata: dict[str, _CandidateMetadata] = {}
         for rows in self._backend._iter_vector_batches(model_name, dim):
             vectors = [
                 PackedVectorCodec.decode(
@@ -208,6 +221,19 @@ class FAISSLocalVectorStore:
             ids.extend(batch_ids)
             storage_keys.extend(batch_keys)
             id_to_storage_key.update(zip(batch_ids, batch_keys, strict=True))
+            candidate_metadata.update(
+                {
+                    row["storage_key"]: _CandidateMetadata(
+                        source_id=row["source_id"],
+                        workspace_id=row["workspace_id"],
+                        source_kind=row["source_kind"],
+                        status=row["status"],
+                        metadata=dict(metadata_mapping(row["metadata"])),
+                        uri=row["uri"],
+                    )
+                    for row in rows
+                }
+            )
         return _FAISSState(
             index=index,
             encoder_namespace=model_name,
@@ -216,6 +242,7 @@ class FAISSLocalVectorStore:
             ids=tuple(ids),
             storage_keys=tuple(storage_keys),
             id_to_storage_key=id_to_storage_key,
+            candidate_metadata=candidate_metadata,
         )
 
     def _search_state(
@@ -239,11 +266,24 @@ class FAISSLocalVectorStore:
                 )
             for score, faiss_id in zip(scores[0], ids[0], strict=True):
                 storage_key = state.id_to_storage_key.get(int(faiss_id))
-                if storage_key is None or not self._backend._vector_row_matches(
-                    storage_key,
-                    state.encoder_namespace,
-                    state.dim,
-                    filters,
+                metadata = (
+                    state.candidate_metadata.get(storage_key)
+                    if storage_key is not None
+                    else None
+                )
+                if (
+                    storage_key is None
+                    or metadata is None
+                    or not record_matches_vector_filters(
+                        storage_key=storage_key,
+                        source_id=metadata.source_id,
+                        workspace_id=metadata.workspace_id,
+                        source_kind=metadata.source_kind,
+                        status=metadata.status,
+                        metadata=metadata.metadata,
+                        uri=metadata.uri,
+                        filters=filters,
+                    )
                 ):
                     continue
                 if storage_key in hits:
@@ -293,6 +333,17 @@ class FAISSLocalVectorStore:
                     "epoch": state.epoch,
                     "ids": list(state.ids),
                     "storage_keys": list(state.storage_keys),
+                    "candidate_metadata": {
+                        storage_key: {
+                            "source_id": metadata.source_id,
+                            "workspace_id": metadata.workspace_id,
+                            "source_kind": metadata.source_kind,
+                            "status": metadata.status,
+                            "metadata": metadata.metadata,
+                            "uri": metadata.uri,
+                        }
+                        for storage_key, metadata in state.candidate_metadata.items()
+                    },
                     "tombstones": [],
                 },
             )
@@ -322,6 +373,19 @@ class FAISSLocalVectorStore:
             storage_keys = tuple(metadata["storage_keys"])
             if len(ids) != len(storage_keys) or len(set(ids)) != len(ids):
                 return None
+            candidate_metadata = {
+                storage_key: _CandidateMetadata(
+                    source_id=value["source_id"],
+                    workspace_id=value["workspace_id"],
+                    source_kind=value["source_kind"],
+                    status=value["status"],
+                    metadata=dict(metadata_mapping(value["metadata"])),
+                    uri=value["uri"],
+                )
+                for storage_key, value in metadata["candidate_metadata"].items()
+            }
+            if set(candidate_metadata) != set(storage_keys):
+                return None
             index = faiss.deserialize_index(np.frombuffer(index_path.read_bytes(), dtype=np.uint8))
             if index.d != dim or index.ntotal != len(ids):
                 return None
@@ -333,6 +397,7 @@ class FAISSLocalVectorStore:
                 ids=ids,
                 storage_keys=storage_keys,
                 id_to_storage_key=dict(zip(ids, storage_keys, strict=True)),
+                candidate_metadata=candidate_metadata,
             )
         except Exception:  # noqa: BLE001 - stale or corrupt indexes use exact fallback
             return None
