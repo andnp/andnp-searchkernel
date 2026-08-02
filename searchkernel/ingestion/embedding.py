@@ -54,19 +54,17 @@ def embed_and_upsert(
     if not inputs:
         return EmbeddingBatchResult(attempted=0, stored=0, rejected=0, batches=0)
 
-    embedded_batches = list(
-        iter_embed_batches(
-            [item.text for item in inputs],
-            provider=provider,
-            batch_size=batch_size,
-        )
+    embedded_batches = iter_embed_batches(
+        (item.text for item in inputs),
+        provider=provider,
+        batch_size=batch_size,
     )
-    input_batches = _batches(inputs, batch_size)
     batch_sink = sink if isinstance(sink, EmbeddingBatchSink) else None
     stored = 0
     rejected = 0
+    batches = 0
     for input_batch, embedding_batch in zip(
-        input_batches, embedded_batches, strict=True
+        _batches(inputs, batch_size), embedded_batches, strict=True
     ):
         writes = [
             EmbeddingWrite(
@@ -100,12 +98,13 @@ def embed_and_upsert(
             )
         rejected += sum(accepted is False for accepted in accepted_batch)
         stored += sum(accepted is not False for accepted in accepted_batch)
+        batches += 1
 
     return EmbeddingBatchResult(
         attempted=len(inputs),
         stored=stored,
         rejected=rejected,
-        batches=len(embedded_batches),
+        batches=batches,
     )
 
 

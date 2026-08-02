@@ -161,10 +161,17 @@ async def _call_async[T](
     *args: Any,
     **kwargs: Any,
 ) -> T:
-    if inspect.iscoroutinefunction(function):
+    if _is_async_callable(function):
         value = function(*args, **kwargs)
     else:
         value = await asyncio.to_thread(function, *args, **kwargs)
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+def _is_async_callable(function: Callable[..., Any]) -> bool:
+    """Return whether a callable invokes an async function directly."""
+    return inspect.iscoroutinefunction(function) or inspect.iscoroutinefunction(
+        type(function).__call__
+    )

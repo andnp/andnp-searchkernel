@@ -136,7 +136,7 @@ def test_embed_and_upsert_rejects_provider_count_mismatch_before_writes() -> Non
     assert sink.rows == []
 
 
-def test_embed_and_upsert_rejects_late_provider_count_mismatch_before_writes() -> None:
+def test_embed_and_upsert_rejects_late_provider_count_mismatch_after_prior_writes() -> None:
     class _LateShortProvider(_Provider):
         def embed(self, texts: list[str]) -> list[list[float]]:
             self.calls.append(texts)
@@ -152,4 +152,4 @@ def test_embed_and_upsert_rejects_late_provider_count_mismatch_before_writes() -
             sink=sink,
             batch_size=2,
         )
-    assert sink.rows == []
+    assert [row["source_id"] for row in sink.rows] == ["memory-0", "memory-1"]

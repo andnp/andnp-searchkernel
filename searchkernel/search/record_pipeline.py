@@ -52,7 +52,10 @@ from searchkernel.search.bounded_graph import (
     expand_bounded_typed_graph,
 )
 from searchkernel.search.fusion import fuse_reciprocal_rank
-from searchkernel.search.pipeline_candidate_acquisition import CandidateAcquirer
+from searchkernel.search.pipeline_candidate_acquisition import (
+    CandidateAcquirer,
+    _is_async_callable,
+)
 from searchkernel.search.pipeline_candidate_cache import CandidateCachePolicy
 from searchkernel.search.query_plan import (
     QueryPlan,
@@ -1354,7 +1357,7 @@ async def _call_async[T](
     **kwargs: Any,
 ) -> T:
     """Run blocking adapter calls away from the async event loop."""
-    if inspect.iscoroutinefunction(function):
+    if _is_async_callable(function):
         value = function(*args, **kwargs)
     else:
         value = await asyncio.to_thread(function, *args, **kwargs)

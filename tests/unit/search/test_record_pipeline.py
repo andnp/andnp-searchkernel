@@ -555,6 +555,24 @@ async def test_callable_embedding_provider_accepts_explicit_vector_metadata() ->
     assert [result.record_id for result in outcome.results] == ["a"]
 
 
+async def test_async_callable_hydrator_runs_without_thread_hop() -> None:
+    event_loop_thread = threading.get_ident()
+
+    class AsyncHydrator:
+        async def __call__(self, record_id: RecordIdentity) -> Record:
+            assert threading.get_ident() == event_loop_thread
+            return _record(record_id.source_id)
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        hydrator=AsyncHydrator(),
+    )
+
+    outcome = await pipeline.async_search("query")
+
+    assert [result.record_id for result in outcome.results] == ["a"]
+
+
 async def test_store_errors_raise_by_default() -> None:
     class BrokenKeywordStore(FakeKeywordStore):
         def search(
