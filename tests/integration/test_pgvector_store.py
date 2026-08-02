@@ -663,6 +663,48 @@ class TestKeywordStore:
         cursor.close()
         pg_conn.put_connection(conn)
 
+    def test_upsert_preserves_body_fallback_for_empty_indexed_text(self, pg_conn):
+        """Insert and conflict upsert both use body when indexed text is empty."""
+        timestamp = datetime.now(UTC)
+
+        def make_record(
+            source_id: str, body: str, indexed_text: str
+        ) -> Record:
+            return Record(
+                source_kind="test",
+                source_id=source_id,
+                title=f"Record {source_id}",
+                body=body,
+                indexed_text=indexed_text,
+                created_at=timestamp,
+                updated_at=timestamp,
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            )
+
+        initial = [
+            make_record("empty", "fallback alpha", ""),
+            make_record("override", "raw beta", "indexed gamma"),
+        ]
+        updated = [
+            make_record("empty", "fallback delta", ""),
+            make_record("override", "raw epsilon", "indexed zeta"),
+        ]
+        vector_store = PGVectorStore(pg_conn)
+        keyword_store = PGKeywordStore(pg_conn)
+
+        vector_store.upsert(initial, model_name="test-model", dim=4)
+        matching = lambda query: {
+            hit.source_id for hit in keyword_store.search(query, 10)
+        }
+        assert matching("alpha") == {"empty"}
+        assert matching("beta") == set()
+        assert matching("gamma") == {"override"}
+
+        vector_store.upsert(updated, model_name="test-model", dim=4)
+        assert matching("delta") == {"empty"}
+        assert matching("epsilon") == set()
+        assert matching("zeta") == {"override"}
+
     def test_keyword_search_with_filters(self, pg_conn, fixture_records):
         """Test keyword search with source_kind filter."""
         vector_store = PGVectorStore(pg_conn)
