@@ -70,7 +70,7 @@ def build_local_record_kernel(
     keyword_store = LocalKeywordStore(backend)
     graph_store = LocalGraphStore(backend)
     pipeline = RecordSearchPipeline(
-        hydrator=backend.hydrate_record,
+        hydrator=backend,
         keyword_store=keyword_store,
         vector_store=vector_store,
         graph_store=graph_store,

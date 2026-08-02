@@ -14,7 +14,9 @@ class _FakeEmbeddingProvider:
 
 
 @pytest.mark.asyncio
-async def test_public_local_composition_indexes_and_searches_records(tmp_path) -> None:
+async def test_public_local_composition_indexes_and_searches_records(
+    tmp_path, monkeypatch
+) -> None:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
     record = Record(
         workspace_id="workspace",
@@ -31,6 +33,14 @@ async def test_public_local_composition_indexes_and_searches_records(tmp_path) -
     )
 
     composition.keyword_store.index([record])
+    batch_calls = []
+    hydrate_records = composition.backend.hydrate_records
+
+    def tracked_hydrate_records(identities):
+        batch_calls.append(list(identities))
+        return hydrate_records(identities)
+
+    monkeypatch.setattr(composition.backend, "hydrate_records", tracked_hydrate_records)
 
     outcome = await composition.kernel.search("canonical", limit=1)
 
@@ -39,6 +49,7 @@ async def test_public_local_composition_indexes_and_searches_records(tmp_path) -
         record.storage_key
     ]
     assert outcome.results[0].record.body == record.body
+    assert batch_calls == [[record.identity]]
     hydrated = composition.backend.hydrate_record(record.storage_key)
     assert hydrated is not None
     assert hydrated.storage_key == record.storage_key
