@@ -239,7 +239,7 @@ class DatabaseManager:
         except sqlite3.OperationalError as exc:
             if "fts5" not in str(exc).lower():
                 raise
-            logger.info("SQLite FTS5 is unavailable; legacy keyword index is disabled")
+            logger.info("SQLite FTS5 is unavailable; keyword index is disabled")
         conn.commit()
 
     def initialize_schema(self) -> None:

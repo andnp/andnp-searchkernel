@@ -102,7 +102,7 @@ class PackedVectorCodec:
         payload: Any,
         dim: int,
         *,
-        context: str = "legacy embedding",
+        context: str = "embedding",
     ) -> bytes:
         if not isinstance(payload, str):
             raise ValueError(f"{context} must be a JSON array")  # noqa: TRY004

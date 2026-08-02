@@ -63,7 +63,7 @@ def calculate_time_score(
         reference_time = datetime.now(UTC)
 
     if timestamp is None:
-        # No penalty for missing timestamps (backward compatibility with legacy memories)
+        # Missing timestamps receive no penalty.
         return 1.0
 
     if config is None:

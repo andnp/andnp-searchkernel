@@ -59,7 +59,7 @@ class QueryPlan:
 
 @dataclass(frozen=True, slots=True)
 class QueryRouterConfig:
-    """Measured, backwards-compatible routing bounds."""
+    """Measured routing bounds."""
 
     candidate_multiplier: int = 5
     minimum_candidate_limit: int = 1
