@@ -2,12 +2,16 @@
 
 import json
 
+import pytest
+
 from searchkernel.eval.golden import GoldenEntry, GoldenSet
 from searchkernel.eval.runner import (
     BenchmarkConfig,
     BenchmarkHooks,
+    MetricSnapshot,
     SearchExecution,
     _percentile,
+    _stage_latency_percentiles,
     ab_eval,
     run_benchmark,
     run_eval,
@@ -136,6 +140,60 @@ def test_percentile_uses_linear_interpolation_for_small_samples():
     assert _percentile([0.0, 10.0], 50) == 5.0
     assert _percentile([0.0, 10.0, 20.0], 50) == 10.0
     assert _percentile(list(map(float, range(100))), 95) == 94.05
+
+
+def test_stage_latency_percentiles_aggregate_only_measured_stage_samples():
+    """Stage distributions use type-7 percentiles and omit absent stages."""
+    metrics = [
+        MetricSnapshot(
+            query=f"q{index}",
+            recall_at_k=1.0,
+            ndcg_at_k=1.0,
+            mrr=1.0,
+            ap=1.0,
+            latency_ms=10.0,
+            stage_timings_ms={"retrieval": float(index), "reranking": 100.0},
+        )
+        for index in (0, 10, 20, 30)
+    ]
+
+    p50, p95, p99 = _stage_latency_percentiles(metrics)
+
+    assert p50 == {"reranking": 100.0, "retrieval": 15.0}
+    assert p95["retrieval"] == pytest.approx(28.5)
+    assert p99["retrieval"] == pytest.approx(29.7)
+    assert p95["reranking"] == 100.0
+
+
+def test_run_eval_reports_stage_latency_percentiles_and_keeps_warmups_out():
+    """Stage reports contain measured spans while warmups remain excluded."""
+    calls = 0
+    golden_set = GoldenSet(entries=[GoldenEntry(query="q", relevant_ids=["a"])])
+
+    def search(query: str, *, trace) -> SearchExecution:
+        nonlocal calls
+        calls += 1
+        with trace.span("retrieval"):
+            pass
+        with trace.span("hydration"):
+            pass
+        return SearchExecution(ids=("a",), trace=trace)
+
+    report = run_eval(
+        golden_set,
+        search,
+        config=BenchmarkConfig(
+            capture_trace=True,
+            warmup_count=2,
+            measured_repetitions=3,
+        ),
+    )
+
+    assert calls == 5
+    assert set(report.stage_latency_p50_ms) == {"hydration", "retrieval"}
+    assert set(report.stage_latency_p95_ms) == set(report.stage_latency_p50_ms)
+    assert set(report.stage_latency_p99_ms) == set(report.stage_latency_p50_ms)
+    assert report.to_dict()["stage_latency_p50_ms"] == report.stage_latency_p50_ms
 
 
 def test_run_eval_excludes_warmups_and_reports_repetitions():

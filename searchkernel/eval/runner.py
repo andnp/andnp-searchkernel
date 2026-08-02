@@ -143,6 +143,9 @@ class EvalReport:
     latency_mean_ms: float | None = None
     latency_min_ms: float | None = None
     latency_max_ms: float | None = None
+    stage_latency_p50_ms: dict[str, float] = field(default_factory=dict)
+    stage_latency_p95_ms: dict[str, float] = field(default_factory=dict)
+    stage_latency_p99_ms: dict[str, float] = field(default_factory=dict)
     qps: float | None = None
     empty_result_rate: float | None = None
     mean_source_coverage: float | None = None
@@ -175,6 +178,9 @@ class EvalReport:
             "latency_mean_ms": self.latency_mean_ms,
             "latency_min_ms": self.latency_min_ms,
             "latency_max_ms": self.latency_max_ms,
+            "stage_latency_p50_ms": self.stage_latency_p50_ms,
+            "stage_latency_p95_ms": self.stage_latency_p95_ms,
+            "stage_latency_p99_ms": self.stage_latency_p99_ms,
             "qps": self.qps,
             "empty_result_rate": self.empty_result_rate,
             "mean_source_coverage": self.mean_source_coverage,
@@ -484,10 +490,10 @@ def _run_warmups(
     queries = [entry.query for entry in golden_set for _ in range(config.warmup_count)]
     if config.concurrency == 1:
         for query in queries:
-            search_fn(query)
+            _run_warmup_one(search_fn, query, config)
         return
     with ThreadPoolExecutor(max_workers=config.concurrency) as executor:
-        list(executor.map(search_fn, queries))
+        list(executor.map(lambda query: _run_warmup_one(search_fn, query, config), queries))
 
 
 def _measure(
@@ -541,6 +547,38 @@ def _slice_report(metrics: list[MetricSnapshot]) -> SliceReport:
     )
 
 
+def _stage_latency_percentiles(
+    metrics: list[MetricSnapshot],
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """Aggregate measured per-stage timings using the existing percentile method."""
+    timings: dict[str, list[float]] = defaultdict(list)
+    for metric in metrics:
+        for stage, duration_ms in metric.stage_timings_ms.items():
+            timings[stage].append(duration_ms)
+    percentiles = [
+        {
+            stage: _percentile(durations, percentile)
+            for stage, durations in sorted(timings.items())
+        }
+        for percentile in (50, 95, 99)
+    ]
+    return percentiles[0], percentiles[1], percentiles[2]
+
+
+def _run_warmup_one(
+    search_fn: Callable[..., object],
+    query: str,
+    config: BenchmarkConfig,
+) -> None:
+    """Run one warmup while honoring the search callable's optional trace hook."""
+    if config.capture_trace and _search_accepts_trace(search_fn):
+        trace = QueryTrace(query)
+        search_fn(query, trace=trace)
+        trace.close()
+    else:
+        search_fn(query)
+
+
 def _build_report(
     golden_set: GoldenSet,
     measurements: list[_Measurement],
@@ -584,6 +622,11 @@ def _build_report(
         report.latency_mean_ms = sum(latencies) / len(latencies)
         report.latency_min_ms = min(latencies)
         report.latency_max_ms = max(latencies)
+    (
+        report.stage_latency_p50_ms,
+        report.stage_latency_p95_ms,
+        report.stage_latency_p99_ms,
+    ) = _stage_latency_percentiles(metrics)
     if wall_time_ms > 0:
         report.qps = len(metrics) / (wall_time_ms / 1000)
 
