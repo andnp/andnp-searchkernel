@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 class OllamaEmbeddingProvider:
     """EmbeddingProvider backed by the Ollama HTTP API.
 
-    Requires an Ollama daemon reachable at ``base_url`` with ``model_name``
-    already pulled (``ollama pull <model_name>``).
+    Requires an Ollama daemon reachable at ``base_url``. Missing models are
+    pulled automatically unless ``auto_pull`` is disabled.
     """
 
     def __init__(
@@ -33,12 +33,16 @@ class OllamaEmbeddingProvider:
         base_url: str = "http://localhost:11434",
         dim: int | None = None,
         timeout: float = 60.0,
+        auto_pull: bool = True,
+        pull_timeout: float = 600.0,
     ):
         import httpx
 
         self.model_name = model_name
         self._base_url = base_url.rstrip("/")
         self._client: httpx.Client = httpx.Client(timeout=timeout)
+        self._auto_pull = auto_pull
+        self._pull_timeout = pull_timeout
         try:
             self.dim = dim if dim is not None else self._resolve_dim()
         except Exception:
@@ -61,10 +65,7 @@ class OllamaEmbeddingProvider:
         Ollama reports it as ``"<family>.embedding_length"`` inside
         ``model_info``; the family prefix varies per model architecture.
         """
-        response = self._client.post(
-            f"{self._base_url}/api/show", json={"model": self.model_name}
-        )
-        response.raise_for_status()
+        response = self._post("/api/show", json={"model": self.model_name})
         model_info = response.json().get("model_info", {})
         for key, value in model_info.items():
             if key.endswith(".embedding_length"):
@@ -74,13 +75,34 @@ class OllamaEmbeddingProvider:
             f"'{self.model_name}' (no *.embedding_length in /api/show response)"
         )
 
-    def embed(self, texts: list[str]) -> list[Vector]:
-        """Return one embedding per input text, in input order."""
+    def _post(self, path: str, *, json: dict[str, object]) -> httpx.Response:
+        import httpx
+
+        try:
+            response = self._client.post(f"{self._base_url}{path}", json=json)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            if not self._auto_pull or error.response.status_code != 404:
+                raise
+            self._pull_model()
+            response = self._client.post(f"{self._base_url}{path}", json=json)
+            response.raise_for_status()
+        return response
+
+    def _pull_model(self) -> None:
         response = self._client.post(
-            f"{self._base_url}/api/embed",
-            json={"model": self.model_name, "input": texts},
+            f"{self._base_url}/api/pull",
+            json={"name": self.model_name, "stream": False},
+            timeout=self._pull_timeout,
         )
         response.raise_for_status()
+
+    def embed(self, texts: list[str]) -> list[Vector]:
+        """Return one embedding per input text, in input order."""
+        response = self._post(
+            "/api/embed",
+            json={"model": self.model_name, "input": texts},
+        )
         body = response.json()
         embeddings = body.get("embeddings") if isinstance(body, dict) else None
         if not isinstance(embeddings, list) or len(embeddings) != len(texts):
