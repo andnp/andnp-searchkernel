@@ -254,6 +254,25 @@ async def test_missing_epoch_bypasses_candidate_cache() -> None:
     assert "candidate_cache:bypass:UnstableCacheKey" in outcome.cache_diagnostics
 
 
+async def test_candidate_cache_hit_skips_source_acquisition() -> None:
+    class EpochKeywordStore(FakeKeywordStore):
+        def keyword_epoch(self) -> int:
+            return 0
+
+    store = EpochKeywordStore([("a", 1.0)])
+    pipeline = RecordSearchPipeline(
+        keyword_store=store,
+        hydrator=_hydrator({"a": _record("a")}),
+    )
+
+    first = await pipeline.async_search("query")
+    second = await pipeline.async_search("query")
+
+    assert "candidate_cache:miss" in first.cache_diagnostics
+    assert "candidate_cache:hit" in second.cache_diagnostics
+    assert len(store.queries) == 1
+
+
 async def test_candidate_cache_fingerprint_includes_routing_weights() -> None:
     class EpochKeywordStore(FakeKeywordStore):
         def keyword_epoch(self) -> int:

@@ -30,19 +30,14 @@ from searchkernel.ports import (
     GraphStore,
     KeywordStore,
     ParentRecordExpander,
-    SearchEpochProvider,
     VectorStore,
 )
 from searchkernel.ports.rerank import Reranker
 from searchkernel.runtime import (
-    CandidateCacheKey,
     CandidateResultCache,
     HydrationCache,
     HydrationCacheKey,
     QueryEmbeddingCache,
-    SearchEpochs,
-    UnstableCacheKey,
-    fingerprint,
 )
 from searchkernel.runtime.trace import QueryTrace
 from searchkernel.search.adaptive_limit import resolve_adaptive_result_limit
@@ -51,6 +46,7 @@ from searchkernel.search.bounded_graph import (
     expand_bounded_typed_graph,
 )
 from searchkernel.search.fusion import fuse_reciprocal_rank
+from searchkernel.search.pipeline_candidate_cache import CandidateCachePolicy
 from searchkernel.search.query_plan import (
     QueryPlan,
     QueryRouter,
@@ -339,6 +335,20 @@ class RecordSearchPipeline:
         self._policy_version = policy_version
         self._hydration_version = hydration_version
         self._hydration_version_provider = hydration_version_provider
+        self._candidate_cache_policy = CandidateCachePolicy(
+            self._candidate_cache,
+            config=self._config,
+            policy=self._policy,
+            keyword_store=self._keyword_store,
+            vector_store=self._vector_store,
+            graph_store=self._graph_store,
+            embedding_provider=self._embedding_provider,
+            embedding_model_name=self._embedding_model_name,
+            embedding_dim=self._embedding_dim,
+            encoder_namespace=self._encoder_namespace,
+            routing_fingerprint=self._routing_fingerprint,
+            policy_version=self._policy_version,
+        )
         self._router = QueryRouter(
             QueryRouterConfig(
                 candidate_multiplier=self._config.candidate_multiplier,
@@ -431,7 +441,7 @@ class RecordSearchPipeline:
             plan.keyword_candidate_budget,
             plan.vector_candidate_budget,
         )
-        candidate_key = self._candidate_cache_key(
+        candidate_key = self._candidate_cache_policy.key(
             query,
             filters,
             limit,
@@ -440,18 +450,10 @@ class RecordSearchPipeline:
         )
         candidates: list[RecordSearchCandidate] | None = None
         if candidate_key is not None and not failures:
-            try:
-                cached_candidates = self._candidate_cache.get(candidate_key)
-            except Exception as error:  # noqa: BLE001 - cache is optional
-                cached_candidates = None
-                cache_diagnostics.append(
-                    f"candidate_cache:error:{type(error).__name__}"
-                )
-            if cached_candidates is not None:
-                candidates = list(cached_candidates)
-                cache_diagnostics.append("candidate_cache:hit")
-            else:
-                cache_diagnostics.append("candidate_cache:miss")
+            candidates = self._candidate_cache_policy.get(
+                candidate_key,
+                cache_diagnostics,
+            )
 
         if candidates is None:
             rankings: dict[str, list[RecordHit]] = {}
@@ -670,12 +672,11 @@ class RecordSearchPipeline:
             candidates = self._sort_candidates(candidates)
             candidates = await self._expand_parents(candidates, failures)
             if candidate_key is not None:
-                try:
-                    self._candidate_cache.set(candidate_key, tuple(candidates))
-                except Exception as error:  # noqa: BLE001 - cache is optional
-                    cache_diagnostics.append(
-                        f"candidate_cache:error:{type(error).__name__}"
-                    )
+                self._candidate_cache_policy.set(
+                    candidate_key,
+                    candidates,
+                    cache_diagnostics,
+                )
 
         assert candidates is not None
         result_limit = resolve_adaptive_result_limit(
@@ -847,150 +848,6 @@ class RecordSearchPipeline:
             return None
         diagnostics.append("expansion:applied")
         return expanded
-
-    def _candidate_cache_key(
-        self,
-        query: str,
-        filters: dict[str, object],
-        requested_limit: int,
-        acquisition_limit: int,
-        diagnostics: list[str],
-    ) -> CandidateCacheKey | None:
-        if not self._policy_cacheable():
-            diagnostics.append("candidate_cache:bypass:unstable_policy")
-            return None
-        try:
-            return CandidateCacheKey.build(
-                query=query,
-                filters=filters,
-                requested_limit=requested_limit,
-                acquisition_limit=acquisition_limit,
-                adaptive_limit=(
-                    self._config.maximum_limit
-                    if self._config.adaptive_enabled
-                    else None
-                ),
-                routing_fingerprint=fingerprint(
-                    {
-                        "name": self._routing_fingerprint,
-                        "candidate_multiplier": self._config.candidate_multiplier,
-                        "keyword_candidate_multiplier": (
-                            self._config.keyword_candidate_multiplier
-                        ),
-                        "vector_candidate_multiplier": (
-                            self._config.vector_candidate_multiplier
-                        ),
-                        "keyword_candidate_budget": (
-                            self._config.keyword_candidate_budget
-                        ),
-                        "vector_candidate_budget": (
-                            self._config.vector_candidate_budget
-                        ),
-                        "minimum_candidate_limit": (
-                            self._config.minimum_candidate_limit
-                        ),
-                        "rrf_k": self._config.rrf_k,
-                        "weighted_rrf_enabled": self._config.weighted_rrf_enabled,
-                        "base_semantic_weight": self._config.base_semantic_weight,
-                        "base_keyword_weight": self._config.base_keyword_weight,
-                        "base_graph_weight": self._config.base_graph_weight,
-                        "graph_fusion": self._config.graph_fusion,
-                        "graph_enabled": self._config.graph_enabled,
-                        "graph_depth": self._config.graph_depth,
-                        "max_graph_seeds": self._config.max_graph_seeds,
-                        "max_neighbors_per_seed": (
-                            self._config.max_neighbors_per_seed
-                        ),
-                        "adaptive_enabled": self._config.adaptive_enabled,
-                        "score_ratio_floor": self._config.score_ratio_floor,
-                        "minimum_score": self._config.minimum_score,
-                        "maximum_score_gap": self._config.maximum_score_gap,
-                        "artifact_confidence_threshold": (
-                            self._config.artifact_confidence_threshold
-                        ),
-                        "expansion_enabled": self._config.expansion_enabled,
-                        "expansion_timeout_s": self._config.expansion_timeout_s,
-                        "expansion_top_k": self._config.expansion_top_k,
-                        "expansion_similarity_threshold": (
-                            self._config.expansion_similarity_threshold
-                        ),
-                        "parent_expansion": (
-                            self._policy.parent_expander is not None
-                        ),
-                    }
-                ),
-                encoder_namespace=self._encoder_namespace_for_provider(),
-                epochs=self._cache_epochs(),
-                policy_version=self._policy_version,
-            )
-        except (UnstableCacheKey, ValueError) as error:
-            diagnostics.append(
-                f"candidate_cache:bypass:{type(error).__name__}"
-            )
-            return None
-
-    def _policy_cacheable(self) -> bool:
-        if self._policy_version is not None:
-            return True
-        return not any(
-            value is not None
-            for value in (
-                self._policy.candidate_filter,
-                self._policy.vector_candidate_ids,
-                self._policy.vector_ranking_order,
-                self._policy.score_adjuster,
-                self._policy.result_filter,
-                self._policy.post_process,
-                self._policy.parent_expander,
-            )
-        )
-
-    def _cache_epochs(self) -> SearchEpochs:
-        values = {
-            lane: _read_lane_epoch(store, lane)
-            for lane, store in (
-                ("keyword", self._keyword_store),
-                ("vector", self._vector_store),
-                ("graph", self._graph_store),
-            )
-        }
-        missing = [
-            lane
-            for lane, store in (
-                ("keyword", self._keyword_store),
-                ("vector", self._vector_store),
-                ("graph", self._graph_store),
-            )
-            if store is not None and values[lane] is None
-        ]
-        if missing:
-            raise UnstableCacheKey(
-                f"missing mutation epoch for {', '.join(missing)} lane"
-            )
-        return SearchEpochs(
-            keyword=values["keyword"] or 0,
-            vector=values["vector"] or 0,
-            graph=values["graph"] or 0,
-        )
-
-    def _encoder_namespace_for_provider(self) -> str | None:
-        provider = self._embedding_provider
-        if provider is None:
-            return self._encoder_namespace
-        explicit = self._encoder_namespace
-        if explicit:
-            return explicit
-        for name in ("encoder_namespace", "encoder_fingerprint", "fingerprint"):
-            value = getattr(provider, name, None)
-            if isinstance(value, str) and value:
-                return value
-        model_name = self._embedding_model_name or getattr(
-            provider, "model_name", None
-        )
-        dim = self._embedding_dim or getattr(provider, "dim", None)
-        if model_name is None:
-            return None
-        return f"{model_name}|dim={dim}"
 
     async def _acquire_vector(
         self,
@@ -1458,7 +1315,7 @@ class RecordSearchPipeline:
 
         try:
             vector = await self._query_embedding_cache.async_get_or_compute(
-                encoder_namespace=self._encoder_namespace_for_provider(),
+                encoder_namespace=self._candidate_cache_policy.encoder_namespace(),
                 query=query,
                 compute=compute,
             )
@@ -1611,45 +1468,6 @@ async def _resolve_parent_identity(
     ):
         raise TypeError("parent_expander returned a non-canonical identity")
     return parent_identity
-
-
-def _read_lane_epoch(store: object | None, lane: str) -> int | None:
-    if store is None:
-        return None
-    if isinstance(store, SearchEpochProvider):
-        try:
-            values = store.epochs()
-        except Exception:  # noqa: BLE001 - cache key reads must be best effort
-            return None
-        if isinstance(values, SearchEpochs):
-            try:
-                return values.for_lane(lane)
-            except ValueError:
-                return None
-        if isinstance(values, Mapping):
-            try:
-                return SearchEpochs.from_mapping(values).for_lane(lane)
-            except (TypeError, ValueError):
-                return None
-        return None
-    lane_epoch = getattr(store, f"{lane}_epoch", None)
-    if callable(lane_epoch):
-        try:
-            value = lane_epoch()
-        except Exception:  # noqa: BLE001 - cache key reads must be best effort
-            value = None
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            return value
-    if lane == "vector":
-        epoch = getattr(store, "epoch", None)
-        if callable(epoch):
-            try:
-                value = epoch()
-            except Exception:  # noqa: BLE001 - cache key reads must be best effort
-                value = None
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                return value
-    return None
 
 
 def _graph_hit(record_id: str, expansion: Any, seed_by_key: Mapping[str, RecordSearchCandidate]) -> RecordHit:
