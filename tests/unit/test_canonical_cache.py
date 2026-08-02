@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from searchkernel.domain import Record, RecordIdentity
+from searchkernel.domain import Record, RecordHit, RecordIdentity
 from searchkernel.runtime import (
     CandidateCacheKey,
     CandidateResultCache,
@@ -276,9 +276,9 @@ async def test_record_pipeline_warm_candidates_skip_retrieval_until_epoch_change
             query: str,
             k: int,
             filters: dict[str, Any] | None = None,
-        ) -> list[tuple[str, float]]:
+        ) -> list[RecordHit]:
             self.calls += 1
-            return [("record", 1.0)]
+            return [RecordHit(RecordIdentity(None, "note", "record"), 1.0)]
 
         def index(self, records: list[Record]) -> None:
             pass
@@ -342,8 +342,8 @@ async def test_record_pipeline_hydration_cache_uses_version_and_policy() -> None
             query: str,
             k: int,
             filters: dict[str, Any] | None = None,
-        ) -> list[tuple[str, float]]:
-            return [("record", 1.0)]
+        ) -> list[RecordHit]:
+            return [RecordHit(RecordIdentity(None, "note", "record"), 1.0)]
 
     keyword = Keyword()
     pipeline = RecordSearchPipeline(
