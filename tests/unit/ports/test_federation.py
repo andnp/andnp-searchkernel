@@ -90,6 +90,48 @@ def test_contract_validation_rejects_unknown_fields_and_unbounded_text() -> None
         )
 
 
+@pytest.mark.parametrize(
+    ("factory", "error", "message"),
+    [
+        (lambda: SearchRequest("query", top_k=0), ValueError, "top_k"),
+        (lambda: SearchRequest("query", contract_version="v2"), ValueError, "contract"),
+        (
+            lambda: SearchRequest("query", source_selection=("memory", "memory")),
+            ValueError,
+            "duplicates",
+        ),
+        (
+            lambda: SearchHit(
+                source_kind="note",
+                source_id="note-1",
+                title="Note",
+                snippet="snippet",
+                source_rank=1,
+                native_score=float("nan"),
+            ),
+            ValueError,
+            "finite",
+        ),
+    ],
+)
+def test_contract_validation_rejects_invalid_values(
+    factory: object,
+    error: type[Exception],
+    message: str,
+) -> None:
+    with pytest.raises(error, match=message):
+        factory()  # type: ignore[operator]
+
+
+def test_contract_json_is_canonical_and_rejects_malformed_payload() -> None:
+    first = SearchRequest("query", filters={"b": 2, "a": 1})
+    second = SearchRequest("query", filters={"a": 1, "b": 2})
+
+    assert first.to_json() == second.to_json()
+    with pytest.raises(ValueError, match="valid JSON"):
+        SearchRequest.from_json("{")
+
+
 def test_search_source_is_a_local_protocol() -> None:
     class LocalSource:
         async def search(self, request: SearchRequest) -> SearchResponse:

@@ -26,11 +26,13 @@ class FakeSource:
     source_capabilities: SourceCapabilities = field(
         default_factory=SourceCapabilities
     )
+    requests: list[SearchRequest] = field(default_factory=list)
 
     def capabilities(self) -> SourceCapabilities:
         return self.source_capabilities
 
     async def search(self, request: SearchRequest) -> SearchResponse:
+        self.requests.append(request)
         if self.delay:
             await asyncio.sleep(self.delay)
         if self.error is not None:
@@ -157,6 +159,145 @@ async def test_federation_filters_sources_by_selection_and_capabilities():
 
 
 @pytest.mark.asyncio
+async def test_federation_selects_requested_sources_and_reports_capability_degradation():
+    selected = source("selected", (hit("selected", "ok", 1),))
+    unsupported = source(
+        "unsupported",
+        (hit("unsupported", "no", 1),),
+        source_capabilities=SourceCapabilities(supports_filters=False),
+    )
+    unselected = source("unselected", (hit("unselected", "no", 1),))
+
+    response = await FederationExecutor(
+        [
+            RegisteredSearchSource(selected.identity, selected),
+            RegisteredSearchSource(unsupported.identity, unsupported),
+            RegisteredSearchSource(unselected.identity, unselected),
+        ]
+    ).search(
+        SearchRequest(
+            "query",
+            source_selection=("selected", "unsupported"),
+            filters={"workspace": "andy"},
+            top_k=10,
+        )
+    )
+
+    assert [item.source_id for item in response.hits] == ["ok"]
+    assert [request.top_k for request in selected.requests] == [10]
+    assert not unselected.requests
+    assert [(item.source, item.status) for item in response.degradations] == [
+        (unsupported.identity, "unavailable")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_federation_surfaces_source_partial_response_and_warning():
+    identity = SourceIdentity("partial", "partial")
+    source_response = SearchResponse(
+        source=identity,
+        hits=(hit("partial", "result", 1),),
+        partial=True,
+        warnings=("index warming",),
+    )
+    partial_source = FakeSource(identity=identity, response=source_response)
+
+    response = await FederationExecutor(
+        [RegisteredSearchSource(identity, partial_source)]
+    ).search(SearchRequest("query"))
+
+    assert response.hits[0].source_id == "result"
+    assert response.partial
+    assert response.source_responses == (source_response,)
+    assert response.warnings == (
+        "index warming",
+        "partial:partial partial: source returned partial results",
+    )
+    assert response.degradations[0].status == "partial"
+
+
+@pytest.mark.asyncio
+async def test_federation_rank_fusion_uses_local_rank_not_native_score():
+    first = source(
+        "first",
+        (
+            hit("first", "first-1", 1, native_score=-1),
+            hit("first", "first-2", 2, native_score=10_000),
+        ),
+    )
+    second = source(
+        "second",
+        (
+            hit("second", "second-1", 1, native_score=-1),
+            hit("first", "first-2", 2, native_score=-10_000),
+        ),
+    )
+
+    response = await FederationExecutor(
+        [
+            RegisteredSearchSource(first.identity, first),
+            RegisteredSearchSource(second.identity, second),
+        ]
+    ).search(SearchRequest("query", top_k=4))
+
+    assert [item.source_id for item in response.hits] == [
+        "first-2",
+        "first-1",
+        "second-1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_federation_deduplicates_identity_and_canonical_uri():
+    first = source(
+        "first",
+        (
+            hit("first", "same", 1, uri="https://example.test/item/"),
+            hit("first", "uri-only", 2, uri="https://EXAMPLE.test/other/"),
+        ),
+    )
+    second = source(
+        "second",
+        (
+            hit("first", "same", 1, uri="https://example.test/item"),
+            hit("second", "different-id", 2, uri="https://example.test/other"),
+        ),
+    )
+
+    response = await FederationExecutor(
+        [
+            RegisteredSearchSource(first.identity, first),
+            RegisteredSearchSource(second.identity, second),
+        ]
+    ).search(SearchRequest("query", top_k=10))
+
+    assert [(item.source_kind, item.source_id) for item in response.hits] == [
+        ("first", "same"),
+        ("first", "uri-only"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_federation_order_is_deterministic_for_equal_scores():
+    first = source("first", (hit("first", "first", 1),))
+    second = source("second", (hit("second", "second", 1),))
+    executor = FederationExecutor(
+        [
+            RegisteredSearchSource(first.identity, first),
+            RegisteredSearchSource(second.identity, second),
+        ]
+    )
+
+    responses = [
+        await executor.search(SearchRequest("query", top_k=10))
+        for _ in range(3)
+    ]
+
+    assert all(response.hits == responses[0].hits for response in responses)
+    assert [item.source_id for item in responses[0].hits] == ["first", "second"]
+
+
+@pytest.mark.asyncio
 async def test_federation_reranker_is_optional_for_hits_without_text():
     class Reranker:
         def __init__(self) -> None:
@@ -184,3 +325,57 @@ async def test_federation_reranker_is_optional_for_hits_without_text():
 
     assert reranker.documents == ["boun"]
     assert [item.source_id for item in response.hits] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_federation_reranker_is_bounded_by_candidates_and_text_length():
+    class Reranker:
+        def __init__(self) -> None:
+            self.documents: list[str] = []
+
+        def rerank(self, query: str, documents: list[str]) -> list[float]:
+            self.documents = documents
+            return [0.0, 1.0]
+
+    reranker = Reranker()
+    ranked = source(
+        "ranked",
+        (
+            hit("ranked", "one", 1, rerank_text="one text"),
+            hit("ranked", "two", 2, rerank_text="two text"),
+            hit("ranked", "three", 3, rerank_text="three text"),
+        ),
+    )
+
+    response = await FederationExecutor(
+        [RegisteredSearchSource(ranked.identity, ranked)],
+        reranker=reranker,
+        config=FederationConfig(
+            rerank_candidate_limit=2,
+            max_rerank_text_length=4,
+        ),
+    ).search(SearchRequest("query"))
+
+    assert reranker.documents == ["one ", "two "]
+    assert [item.source_id for item in response.hits] == ["two", "one", "three"]
+
+
+@pytest.mark.asyncio
+async def test_federation_adds_end_to_end_provenance_to_every_hit():
+    first = source(
+        "first",
+        (
+            hit("first", "one", 1),
+            hit("first", "two", 2),
+        ),
+    )
+    request = SearchRequest("query", request_id="request-42")
+
+    response = await FederationExecutor(
+        [RegisteredSearchSource(first.identity, first)]
+    ).search(request)
+
+    assert [
+        (item.provenance.source, item.provenance.request_id)
+        for item in response.hits
+    ] == [(first.identity, "request-42")] * 2
