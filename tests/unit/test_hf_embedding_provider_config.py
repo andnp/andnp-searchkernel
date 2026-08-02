@@ -23,6 +23,11 @@ class _FakeModel:
         return np.ones((len(texts), 1))
 
 
+class _InvalidDimensionModel(_FakeModel):
+    def get_embedding_dimension(self) -> int | None:
+        return None
+
+
 def test_embedding_batch_size_is_used_for_documents_and_queries() -> None:
     with patch("sentence_transformers.SentenceTransformer", _FakeModel):
         provider = HuggingFaceEmbeddingProvider(batch_size=4)
@@ -48,3 +53,11 @@ def test_embedding_batch_size_is_used_for_documents_and_queries() -> None:
 def test_embedding_batch_size_must_be_positive() -> None:
     with pytest.raises(ValueError, match="batch_size"):
         HuggingFaceEmbeddingProvider(batch_size=0)
+
+
+def test_embedding_model_dimension_is_required() -> None:
+    with (
+        patch("sentence_transformers.SentenceTransformer", _InvalidDimensionModel),
+        pytest.raises(RuntimeError, match="positive dimension"),
+    ):
+        HuggingFaceEmbeddingProvider()

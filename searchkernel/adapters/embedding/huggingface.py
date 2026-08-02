@@ -9,6 +9,7 @@ This is an ADDITIVE port implementation. The live embedding path
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from searchkernel.domain import Vector
@@ -54,7 +55,8 @@ class HuggingFaceEmbeddingProvider:
             model_name, truncate_dim=truncate_dim, device=device
         )
         native_dim = self._model.get_embedding_dimension()
-        assert native_dim is not None
+        if native_dim is None or native_dim < 1:
+            raise RuntimeError("embedding model did not report a positive dimension")
         self.dim: int = truncate_dim if truncate_dim is not None else int(native_dim)
         # Whether the model ships a named "query" prompt we can reference.
         self._has_query_prompt = "query" in getattr(self._model, "prompts", {})
@@ -75,7 +77,7 @@ class HuggingFaceEmbeddingProvider:
             normalize_embeddings=True,
             convert_to_numpy=True,
         )
-        return embeddings.tolist()
+        return self._validate_embeddings(embeddings.tolist(), len(texts))
 
     def embed_query(self, text: str) -> Vector:
         """Embed a single QUERY with the Qwen3 instruction prompt applied."""
@@ -99,4 +101,24 @@ class HuggingFaceEmbeddingProvider:
                 normalize_embeddings=True,
                 convert_to_numpy=True,
             )
-        return embeddings.tolist()
+        return self._validate_embeddings(embeddings.tolist(), len(texts))
+
+    def _validate_embeddings(
+        self, embeddings: object, expected_count: int
+    ) -> list[Vector]:
+        if not isinstance(embeddings, list) or len(embeddings) != expected_count:
+            raise RuntimeError(
+                f"embedding model returned {len(embeddings) if isinstance(embeddings, list) else 'an invalid number of'} "
+                f"vectors for {expected_count} inputs"
+            )
+        for index, vector in enumerate(embeddings):
+            if not isinstance(vector, list) or len(vector) != self.dim:
+                raise RuntimeError(
+                    f"embedding model returned invalid vector {index}: expected dimension {self.dim}"
+                )
+            if not all(
+                isinstance(value, (int, float)) and math.isfinite(float(value))
+                for value in vector
+            ):
+                raise RuntimeError(f"embedding model returned non-finite vector {index}")
+        return embeddings

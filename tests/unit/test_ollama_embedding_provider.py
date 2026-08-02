@@ -52,7 +52,7 @@ def test_resolve_dim_raises_when_missing():
 
 
 def test_embed_returns_vectors_in_order():
-    provider = OllamaEmbeddingProvider("qwen3-embedding:0.6b", dim=1024)
+    provider = OllamaEmbeddingProvider("qwen3-embedding:0.6b", dim=2)
     texts = ["cats are mammals", "postgresql is a database"]
     vectors = [[0.1, 0.2], [0.3, 0.4]]
 
@@ -72,7 +72,7 @@ def test_embed_returns_vectors_in_order():
 
 def test_custom_base_url_is_used():
     provider = OllamaEmbeddingProvider(
-        "qwen3-embedding:0.6b", dim=1024, base_url="http://gpu-box:11434/"
+        "qwen3-embedding:0.6b", dim=1, base_url="http://gpu-box:11434/"
     )
 
     with mock.patch("httpx.Client.post") as mock_post:
@@ -80,3 +80,19 @@ def test_custom_base_url_is_used():
         provider.embed(["x"])
         call = mock_post.call_args
         assert call.args[0] == "http://gpu-box:11434/api/embed"
+
+
+def test_embed_rejects_count_mismatch():
+    provider = OllamaEmbeddingProvider("qwen3-embedding:0.6b", dim=2)
+    with mock.patch("httpx.Client.post") as mock_post:
+        mock_post.return_value = _mock_response({"embeddings": [[0.1, 0.2]]})
+        with pytest.raises(RuntimeError, match="for 2 inputs"):
+            provider.embed(["x", "y"])
+
+
+def test_embed_rejects_wrong_dimension():
+    provider = OllamaEmbeddingProvider("qwen3-embedding:0.6b", dim=2)
+    with mock.patch("httpx.Client.post") as mock_post:
+        mock_post.return_value = _mock_response({"embeddings": [[0.1]]})
+        with pytest.raises(RuntimeError, match="dimension 2"):
+            provider.embed(["x"])

@@ -10,6 +10,7 @@ This is an ADDITIVE port implementation; no other adapters are modified.
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from searchkernel.domain import Vector
@@ -66,4 +67,23 @@ class OllamaEmbeddingProvider:
             json={"model": self.model_name, "input": texts},
         )
         response.raise_for_status()
-        return response.json()["embeddings"]
+        body = response.json()
+        embeddings = body.get("embeddings") if isinstance(body, dict) else None
+        if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+            raise RuntimeError(
+                f"ollama returned {len(embeddings) if isinstance(embeddings, list) else 'an invalid number of'} "
+                f"embeddings for {len(texts)} inputs"
+            )
+        for index, vector in enumerate(embeddings):
+            if (
+                not isinstance(vector, list)
+                or len(vector) != self.dim
+                or not all(
+                    isinstance(value, (int, float)) and math.isfinite(float(value))
+                    for value in vector
+                )
+            ):
+                raise RuntimeError(
+                    f"ollama returned invalid embedding {index}: expected finite vector dimension {self.dim}"
+                )
+        return embeddings

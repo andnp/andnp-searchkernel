@@ -153,6 +153,17 @@ async def test_json_parse_error_on_invalid_json():
 
 
 @pytest.mark.asyncio
+async def test_json_response_must_be_object():
+    provider = CopilotLLMProvider()
+    provider._copilot_path = "/usr/bin/copilot"
+
+    with mock.patch("subprocess.run") as mock_run:
+        mock_run.return_value = mock.Mock(returncode=0, stdout="[1, 2]", stderr="")
+        with pytest.raises(RuntimeError, match="must be a JSON object"):
+            await provider.complete("Test prompt", response_format={"type": "object"})
+
+
+@pytest.mark.asyncio
 async def test_tier_fast_and_smart_use_same_model():
     """Both FAST and SMART tiers should use the specified model."""
     provider = CopilotLLMProvider(model_name="gpt-5.6-luna")

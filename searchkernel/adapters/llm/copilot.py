@@ -116,10 +116,12 @@ class CopilotLLMProvider:
         if response_format is not None:
             try:
                 parsed = json.loads(completion_text)
-                return parsed
             except json.JSONDecodeError as e:
                 raise RuntimeError(
                     f"copilot output is not valid JSON: {completion_text[:200]}"
                 ) from e
+            if not isinstance(parsed, dict):
+                raise RuntimeError("copilot structured output must be a JSON object")
+            return parsed
 
         return completion_text

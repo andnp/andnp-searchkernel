@@ -113,6 +113,18 @@ async def test_json_parse_error_on_invalid_json():
 
 
 @pytest.mark.asyncio
+async def test_response_requires_string_message_content():
+    provider = OllamaLLMProvider("llama3.2")
+    context_manager, _ = _mock_client(json_body={"message": {}})
+
+    with (
+        mock.patch("httpx.AsyncClient", return_value=context_manager),
+        pytest.raises(TypeError, match="message.content"),
+    ):
+        await provider.complete("Test prompt")
+
+
+@pytest.mark.asyncio
 async def test_tier_fast_and_smart_use_same_model():
     provider = OllamaLLMProvider("llama3.2")
     context_manager, client = _mock_client(

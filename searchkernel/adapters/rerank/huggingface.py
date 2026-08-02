@@ -92,8 +92,12 @@ class HuggingFaceReranker:
 
         # Resolve yes/no token ids via the tokenizer
         # Qwen3-Reranker expects tokenization of single-token yes/no answers
-        self._yes_token_id = self._tokenizer.encode("Yes", add_special_tokens=False)[0]
-        self._no_token_id = self._tokenizer.encode("No", add_special_tokens=False)[0]
+        yes_token_ids = self._tokenizer.encode("Yes", add_special_tokens=False)
+        no_token_ids = self._tokenizer.encode("No", add_special_tokens=False)
+        if len(yes_token_ids) != 1 or len(no_token_ids) != 1:
+            raise ValueError("HuggingFace tokenizer must encode Yes and No as one token each")
+        self._yes_token_id = yes_token_ids[0]
+        self._no_token_id = no_token_ids[0]
 
     @staticmethod
     def _has_cuda() -> bool:
@@ -176,7 +180,10 @@ class HuggingFaceReranker:
             exp_no = torch.exp(no_logit)
             prob_yes = exp_yes / (exp_yes + exp_no)
 
-            scores.append(prob_yes.item())
+            score = prob_yes.item()
+            if not isinstance(score, float) or not 0.0 <= score <= 1.0:
+                raise RuntimeError("HuggingFace reranker returned a score outside [0, 1]")
+            scores.append(score)
 
         return scores
 

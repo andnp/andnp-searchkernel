@@ -84,16 +84,23 @@ class OllamaLLMProvider:
                 f"ollama returned status {response.status_code}: {response.text}"
             )
 
-        content = response.json()["message"]["content"]
+        body = response.json()
+        message = body.get("message") if isinstance(body, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, str):
+            raise TypeError("ollama response missing string message.content")
 
         if response_format is not None:
             import json
 
             try:
-                return json.loads(content)
+                parsed = json.loads(content)
             except json.JSONDecodeError as e:
                 raise RuntimeError(
                     f"ollama output is not valid JSON: {content[:200]}"
                 ) from e
+            if not isinstance(parsed, dict):
+                raise RuntimeError("ollama structured output must be a JSON object")
+            return parsed
 
         return content
