@@ -2,7 +2,9 @@
 
 import gc
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 from searchkernel.adapters.cache.memory_lru import MemoryLRUCacheStore
 from searchkernel.adapters.cache.sqlite import SQLiteCacheStore
@@ -128,6 +130,34 @@ class TestMemoryLRUCacheStore:
         nested = retrieved["nested"]
         assert isinstance(nested, dict)
         assert nested["b"] == [4, 5, 6]
+
+    def test_concurrent_access_preserves_bounded_state(self):
+        """Concurrent operations do not corrupt the LRU or exceed capacity."""
+        cache = MemoryLRUCacheStore(max_entries=8)
+        workers = 12
+        start = Barrier(workers)
+
+        def exercise(worker: int) -> None:
+            start.wait()
+            for iteration in range(200):
+                key = f"key-{(worker + iteration) % 16}"
+                if iteration % 11 == 0:
+                    cache.invalidate_epoch(iteration % 6)
+                elif iteration % 3 == 0:
+                    cache.get(key)
+                else:
+                    cache.set(
+                        key,
+                        {"worker": worker, "iteration": iteration},
+                        epoch=iteration % 6,
+                    )
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            list(executor.map(exercise, range(workers)))
+
+        assert len(cache._entries) <= 8
+        for key in list(cache._entries):
+            assert cache.get(key) is not None
 
 
 class TestSQLiteCacheStore:

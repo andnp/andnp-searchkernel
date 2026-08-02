@@ -1,6 +1,7 @@
 """In-memory LRU cache store with epoch-based invalidation."""
 
 from collections import OrderedDict
+from threading import Lock
 from typing import Any
 
 
@@ -21,6 +22,7 @@ class MemoryLRUCacheStore:
         """
         self._max_entries = max(1, max_entries)
         self._entries: OrderedDict[str, tuple[Any, int]] = OrderedDict()
+        self._lock = Lock()
 
     def get(self, key: str) -> Any | None:
         """Retrieve a cached value.
@@ -31,13 +33,14 @@ class MemoryLRUCacheStore:
         Returns:
             Cached value, or None if not found.
         """
-        if key not in self._entries:
-            return None
+        with self._lock:
+            if key not in self._entries:
+                return None
 
-        value, _epoch = self._entries[key]
-        # Move to end to mark as recently used (LRU)
-        self._entries.move_to_end(key)
-        return value
+            value, _epoch = self._entries[key]
+            # Move to end to mark as recently used (LRU)
+            self._entries.move_to_end(key)
+            return value
 
     def set(self, key: str, value: Any, epoch: int) -> None:
         """Store a value with an associated epoch.
@@ -47,15 +50,16 @@ class MemoryLRUCacheStore:
             value: Value to cache.
             epoch: Index epoch at cache time. Used for invalidation.
         """
-        if key in self._entries:
-            self._entries.pop(key)
+        with self._lock:
+            if key in self._entries:
+                self._entries.pop(key)
 
-        self._entries[key] = (value, epoch)
-        self._entries.move_to_end(key)
+            self._entries[key] = (value, epoch)
+            self._entries.move_to_end(key)
 
-        # Evict LRU entry if over capacity
-        while len(self._entries) > self._max_entries:
-            self._entries.popitem(last=False)
+            # Evict LRU entry if over capacity
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
 
     def invalidate_epoch(self, epoch: int) -> None:
         """Invalidate all entries from an epoch or earlier.
@@ -63,9 +67,10 @@ class MemoryLRUCacheStore:
         Args:
             epoch: Entries with epoch <= this are discarded.
         """
-        keys_to_delete = [
-            key for key, (_, entry_epoch) in self._entries.items()
-            if entry_epoch <= epoch
-        ]
-        for key in keys_to_delete:
-            del self._entries[key]
+        with self._lock:
+            keys_to_delete = [
+                key for key, (_, entry_epoch) in self._entries.items()
+                if entry_epoch <= epoch
+            ]
+            for key in keys_to_delete:
+                del self._entries[key]
