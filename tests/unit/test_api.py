@@ -5,7 +5,7 @@ import pytest
 
 from searchkernel import api, ports
 from searchkernel.domain import models
-from searchkernel.indexing import async_ingestion, semantic
+from searchkernel.indexing import semantic
 from searchkernel.indexing.runtime_readiness import SearchAvailability
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
@@ -22,7 +22,6 @@ from searchkernel.storage import db
 from searchkernel.utils import similarity
 
 API_EXPORTS = {
-    "AsyncIndexIngestor": async_ingestion.AsyncIndexIngestor,
     "ContentSource": content_source.ContentSource,
     "DatabaseManager": db.DatabaseManager,
     "EmbeddingProvider": embedding.EmbeddingProvider,

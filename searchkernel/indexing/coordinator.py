@@ -136,7 +136,7 @@ class ResumableSemanticCoordinator:
     """Coordinate bounded, commit-before-semantic indexing work.
 
     The coordinator deliberately accepts either an async ``RecordIngestor``
-    (including ``AsyncIndexIngestor``) or explicit lexical/graph stages.  The
+    or explicit lexical/graph stages.  The
     source and preparation functions remain caller-owned so no source-specific
     policy enters the library.
     """

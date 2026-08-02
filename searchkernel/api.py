@@ -51,10 +51,6 @@ from searchkernel.domain import (
     Vector,
     canonical_storage_key,
 )
-from searchkernel.indexing.async_ingestion import (
-    AsyncIndexIngestor,
-    BlockingRecordIndexer,
-)
 from searchkernel.indexing.bootstrap_checkpoint import (
     BOOTSTRAP_CHECKPOINT_FILE_NAME,
     CURRENT_BOOTSTRAP_CHECKPOINT_SCHEMA_VERSION,
@@ -87,7 +83,6 @@ from searchkernel.indexing.coordinator import (
     CoordinatorReceipt,
     ResumableSemanticCoordinator,
 )
-from searchkernel.indexing.core import IndexCore
 from searchkernel.indexing.discovery import (
     PARSER_SUFFIXES,
     discover_files,
@@ -101,12 +96,6 @@ from searchkernel.indexing.embedding_cache import (
     EmbeddingCacheMetrics,
     SQLiteEmbeddingCache,
 )
-from searchkernel.indexing.git_ingestion import (
-    GitIndexManager,
-    IngestibleSource,
-    ingest_git_source,
-)
-from searchkernel.indexing.implicit_graph import ImplicitGraphBuilder
 from searchkernel.indexing.manifest import (
     CURRENT_MANIFEST_SPEC_VERSION,
     IndexManifest,
@@ -299,7 +288,6 @@ __all__ = [
     "ActiveModelStore",
     "AsyncEmbeddingProvider",
     "AsyncGraphStore",
-    "AsyncIndexIngestor",
     "AsyncKeywordStore",
     "AsyncRecordHydrator",
     "AsyncRecordIngestor",
@@ -308,7 +296,6 @@ __all__ = [
     "BatchContentSource",
     "BatchGraphStore",
     "BatchRecordHydrator",
-    "BlockingRecordIndexer",
     "BootstrapCheckpoint",
     "BootstrapFileStamp",
     "BootstrapReadinessSnapshot",
@@ -336,7 +323,6 @@ __all__ = [
     "EmbeddingSink",
     "EncoderFingerprint",
     "Filters",
-    "GitIndexManager",
     "GraphEdge",
     "GraphEdgeLike",
     "GraphIndex",
@@ -347,13 +333,10 @@ __all__ = [
     "HeaderBasedChunker",
     "HierarchicalRetrievalConfig",
     "HierarchicalSearchableSource",
-    "ImplicitGraphBuilder",
     "IndexAvailability",
-    "IndexCore",
     "IndexManagerPort",
     "IndexManifest",
     "IndexStatus",
-    "IngestibleSource",
     "IngestionError",
     "IngestionFailureMode",
     "IngestionReceipt",
@@ -468,7 +451,6 @@ __all__ = [
     "get_semantic_completion_status",
     "has_incomplete_bootstrap_checkpoint",
     "infer_edge_type",
-    "ingest_git_source",
     "is_excluded_dir",
     "is_fully_ready",
     "load_bootstrap_checkpoint",
