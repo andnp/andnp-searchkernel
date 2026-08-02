@@ -371,10 +371,10 @@ cross-backend performance comparison.
 `benchmarks/local_scale_gate.json` defines the reproducible local scale-gate
 scope: synthetic 1k, 10k, and 100k record corpora; seed 0; 32-dimensional
 vectors; top-10 retrieval; one warmup; three serial repetitions; and optional
-FAISS recall@10 with a configured 0.9 minimum when FAISS is available. No
-committed scale-gate report exists for those runs. In particular, this
-roadmap makes no unrun claims about 10k/100k scaling, ANN recall, keyword
-scaling, pgvector latency, or production-corpus relevance.
+FAISS recall@10 with a configured 0.9 minimum when FAISS is available. The
+checked-in report is a synthetic local baseline, not a production claim.
+It does not establish keyword scaling, pgvector latency, or production-corpus
+relevance.
 
 ## 8. Milestone 1: canonical SQLite FTS5 keyword index
 
@@ -1133,12 +1133,26 @@ The code and contract portion of the definition of done is satisfied:
 - default installation remains SQLite/NumPy-only and optional integrations stay
   optional.
 
-The benchmark gate itself remains an evidence task rather than a completed
-performance claim. The harness supports relevance, latency, throughput,
-memory, disk-size, and optional ANN-recall checks, but the committed artifacts
-currently provide only the 1k synthetic baseline described above. A future
-scale-gate report must be produced before making comparative 1k/10k/100k,
-ANN, or production-performance claims.
+The full local scale gate was executed on 2026-08-01 with:
+
+```bash
+uv run python benchmarks/local_scale_gate.py \
+  --output benchmarks/local_scale_gate_report.json
+```
+
+The checked-in report is a synthetic local baseline, not a production
+performance claim:
+
+| Records | p50 / p95 / p99 (ms) | QPS | RSS before / after load / peak query (bytes) | Index size (bytes) | ANN |
+|---:|---:|---:|---:|---:|---|
+| 1,000 | 1.402 / 1.492 / 1.635 | 704.558 | 49,958,912 / 53,915,648 / 58,081,280 | 1,200,128 | available; recall@10 1.000 |
+| 10,000 | 13.501 / 14.223 / 14.559 | 73.110 | 83,587,072 / 92,057,600 / 106,119,168 | 10,031,104 | available; recall@10 1.000 |
+| 100,000 | 160.176 / 162.494 / 163.699 | 6.153 | 205,541,376 / 215,826,432 / 443,645,952 | 98,566,144 | available; recall@10 1.000 |
+
+The gate passed for all three corpus sizes. The report records the fixed
+configuration, environment, exact SQLite backend, and per-query distributions;
+the measurements are local synthetic evidence only. This does not establish
+production-corpus relevance, pgvector latency, or cross-machine performance.
 
 ## 21. Baseline verification from the review
 
