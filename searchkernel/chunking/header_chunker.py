@@ -114,9 +114,20 @@ class HeaderBasedChunker(ChunkingStrategy):
 
     def _extract_headers(self, root_node, content_bytes: bytes) -> list[HeaderNode]:
         headers = []
-
-        def byte_to_char_pos(byte_pos: int) -> int:
-            return len(content_bytes[:byte_pos].decode("utf8"))
+        byte_to_char = [0] * (len(content_bytes) + 1)
+        char_pos = 0
+        byte_pos = 0
+        for char_pos, char in enumerate(content_bytes.decode("utf8"), start=1):
+            codepoint = ord(char)
+            if codepoint <= 0x7F:
+                byte_pos += 1
+            elif codepoint <= 0x7FF:
+                byte_pos += 2
+            elif codepoint <= 0xFFFF:
+                byte_pos += 3
+            else:
+                byte_pos += 4
+            byte_to_char[byte_pos] = char_pos
 
         def find_inline(node):
             if node.type == "inline":
@@ -170,8 +181,8 @@ class HeaderBasedChunker(ChunkingStrategy):
                     HeaderNode(
                         level=level,
                         text=text,
-                        start_pos=byte_to_char_pos(marker_start),
-                        end_pos=byte_to_char_pos(node.end_byte),
+                        start_pos=byte_to_char[marker_start],
+                        end_pos=byte_to_char[node.end_byte],
                     )
                 )
 
@@ -186,12 +197,13 @@ class HeaderBasedChunker(ChunkingStrategy):
     ) -> list[Chunk]:
         chunks = []
         content = record.body
+        header_paths = self._build_header_paths(headers)
 
         for i, header in enumerate(headers):
             start_pos = header.start_pos
             end_pos = headers[i + 1].start_pos if i + 1 < len(headers) else len(content)
 
-            header_path = self._build_header_path(headers, i)
+            header_path = header_paths[i]
             section_body = content[header.end_pos:end_pos].strip()
             chunk_content = self._compose_chunk_content(header_path, section_body)
 
@@ -214,18 +226,17 @@ class HeaderBasedChunker(ChunkingStrategy):
 
         return chunks
 
-    def _build_header_path(self, headers: list[HeaderNode], current_index: int) -> str:
-        current_header = headers[current_index]
-        current_level = current_header.level
+    def _build_header_paths(self, headers: list[HeaderNode]) -> list[str]:
+        paths = []
+        path_parts: list[tuple[int, str]] = []
 
-        path_parts = [current_header.text]
+        for header in headers:
+            while path_parts and path_parts[-1][0] >= header.level:
+                path_parts.pop()
+            path_parts.append((header.level, header.text))
+            paths.append(" > ".join(text for _, text in path_parts))
 
-        for i in range(current_index - 1, -1, -1):
-            if headers[i].level < current_level:
-                path_parts.insert(0, headers[i].text)
-                current_level = headers[i].level
-
-        return " > ".join(path_parts)
+        return paths
 
     def _compose_chunk_content(self, header_path: str, section_body: str) -> str:
         cleaned_body = section_body.strip()

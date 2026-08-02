@@ -102,6 +102,46 @@ def test_header_offsets_use_characters_after_unicode_prefix():
     assert body[chunks[0].metadata["start_pos"] :] == "# Café\nélève"
 
 
+def test_many_headers_keep_paths_and_offsets_linear_with_multibyte_content():
+    sections = ["# Начало 🎉"]
+    for index in range(1, 101):
+        sections.extend([f"## Раздел {index} café", f"текст {index} 🧪"])
+    body = "\n".join(sections)
+
+    chunks = chunker().chunk_record(make_record(body))
+
+    assert len(chunks) == 101
+    assert chunks[0].metadata["header_path"] == "Начало 🎉"
+    assert chunks[1].metadata["header_path"] == "Начало 🎉 > Раздел 1 café"
+    assert chunks[-1].metadata["header_path"] == "Начало 🎉 > Раздел 100 café"
+    assert [body[chunk.metadata["start_pos"] :].split("\n", 1)[0] for chunk in chunks] == [
+        "# Начало 🎉",
+        *[f"## Раздел {index} café" for index in range(1, 101)],
+    ]
+
+
+def test_header_chunk_output_preserves_expected_content_and_hashes():
+    record = make_record("# Guide 🎉\nintro\n## Install 🧪\nsteps")
+
+    chunks = chunker().chunk_record(record)
+
+    assert [
+        (chunk.content, chunk.metadata["header_path"], chunk.content_hash)
+        for chunk in chunks
+    ] == [
+        (
+            "Guide 🎉\n\nintro",
+            "Guide 🎉",
+            "6ce23a5ac23bc39869c084d250cd3134751b9c5ebbe0d59e31518561896667c2",
+        ),
+        (
+            "Install 🧪\nContext: Guide 🎉\n\nsteps",
+            "Guide 🎉 > Install 🧪",
+            "1b373dd4cd63c20d449b11d995e641f734de30b1dc26000a4eb8f2dd067ba92a",
+        ),
+    ]
+
+
 def test_plain_text_fallback_keeps_short_content_and_metadata():
     record = make_record("plain text")
 
