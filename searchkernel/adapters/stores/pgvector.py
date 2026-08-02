@@ -16,10 +16,21 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Protocol
 
-import psycopg2
-import psycopg2.extras
-import psycopg2.pool
-from psycopg2 import sql
+try:
+    import psycopg2  # type: ignore[import-not-found]
+    import psycopg2.extras  # type: ignore[import-not-found]
+    import psycopg2.pool  # type: ignore[import-not-found]
+    from psycopg2 import sql  # type: ignore[import-not-found]
+except ImportError:
+    psycopg2 = None  # type: ignore[assignment]
+    sql = None  # type: ignore[assignment]
+
+try:
+    import psycopg  # type: ignore[import-not-found]
+    import psycopg_pool  # type: ignore[import-not-found]
+except ImportError:
+    psycopg = None  # type: ignore[assignment]
+    psycopg_pool = None  # type: ignore[assignment]
 
 from searchkernel.domain import (
     GraphEdge,
@@ -475,7 +486,15 @@ class PostgresConnection:
             dsn: PostgreSQL connection string
             min_connections: Minimum idle connections in pool
             max_connections: Maximum connections in pool
+
+        Raises:
+            ImportError: If psycopg2 is not installed
         """
+        if psycopg2 is None or psycopg2.pool is None:
+            raise ImportError(
+                "psycopg2 is required for PostgresConnection. "
+                "Install with: pip install 'andnp-searchkernel[pgvector]'"
+            )
         self.dsn = dsn
         self.pool = psycopg2.pool.SimpleConnectionPool(
             min_connections, max_connections, dsn
@@ -514,6 +533,72 @@ class PostgresConnection:
     def close(self):
         """Close all connections in the pool."""
         self.pool.closeall()
+
+
+class Psycopg3Connection:
+    """Thread-safe Postgres connection pool using psycopg3.
+
+    Provides the same interface as PostgresConnection but uses psycopg3's
+    native connection pool (psycopg_pool.ConnectionPool) instead of psycopg2.
+    Defers import of psycopg/psycopg_pool until instantiation, so users who
+    only use this class don't need psycopg2 installed.
+    """
+
+    def __init__(self, dsn: str, min_connections: int = 2, max_connections: int = 10):
+        """Initialize connection pool.
+
+        Args:
+            dsn: PostgreSQL connection string
+            min_connections: Minimum idle connections in pool
+            max_connections: Maximum connections in pool
+
+        Raises:
+            ImportError: If psycopg or psycopg_pool is not installed
+        """
+        if psycopg_pool is None:
+            raise ImportError(
+                "psycopg3 and psycopg_pool are required for Psycopg3Connection. "
+                "Install with: pip install 'andnp-searchkernel[pgvector-psycopg3]'"
+            )
+
+        self.dsn = dsn
+        self.pool = psycopg_pool.ConnectionPool(
+            dsn, min_size=min_connections, max_size=max_connections
+        )
+
+    def get_connection(self):
+        """Get a connection from the pool."""
+        return self.pool.getconn()
+
+    def put_connection(self, conn):
+        """Return a connection to the pool."""
+        try:
+            conn.rollback()
+        except psycopg.Error as e:  # pyright: ignore[union-attr]
+            logger.debug("Connection rollback failed during pool return: %s", e)
+        self.pool.putconn(conn)
+
+    def execute(self, sql: str, params: tuple = ()) -> Any:
+        """Execute a query and return results."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            result = cursor.fetchall()
+            cursor.close()
+            conn.commit()
+            return result
+        finally:
+            self.put_connection(conn)
+
+    def execute_one(self, sql: str, params: tuple = ()) -> Any | None:
+        """Execute a query and return a single result."""
+        result = self.execute(sql, params)
+        return result[0] if result else None
+
+    def close(self):
+        """Close all connections in the pool."""
+        self.pool.close()
 
 
 def _create_schema(conn_pool: PostgresConnection) -> None:
