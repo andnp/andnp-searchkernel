@@ -7,7 +7,7 @@ import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
-from searchkernel.domain import RecordHit, RecordIdentity, Vector
+from searchkernel.domain import RecordHit, Vector
 from searchkernel.ports import (
     AsyncKeywordStore,
     AsyncVectorStore,
@@ -53,7 +53,6 @@ class CandidateAcquirer:
         search = cast(Callable[..., Any], store.search)
         return _normalize_hits(
             await _call_async(search, query, acquisition_limit, filters),
-            filters,
         )
 
     async def vector(
@@ -75,10 +74,7 @@ class CandidateAcquirer:
         vector_filters = filters
         if self._policy.vector_candidate_ids is not None:
             candidate_ids = self._policy.vector_candidate_ids(
-                [
-                    (hit.source_id, hit.score)
-                    for hit in rankings.get("keyword", ())
-                ],
+                list(rankings.get("keyword", ())),
                 context,
             )
             if candidate_ids is not None:
@@ -103,54 +99,26 @@ class CandidateAcquirer:
                 dim=dim,
                 filters=vector_filters,
             ),
-            filters,
             sort=False,
         )
         if self._policy.vector_ranking_order is not None:
             vector_ranking = _normalize_hits(
                 self._policy.vector_ranking_order(
-                    [(hit.source_id, hit.score) for hit in vector_ranking],
+                    vector_ranking,
                     context,
                 ),
-                filters,
                 sort=False,
             )
         return vector_ranking
 
 
 def _normalize_hits(
-    results: Sequence[RecordHit | tuple[str, float]],
-    filters: Mapping[str, object],
+    results: Sequence[RecordHit],
     *,
     sort: bool = True,
 ) -> list[RecordHit]:
-    workspace_id = filters.get("workspace_id")
-    if workspace_id is not None and not isinstance(workspace_id, str):
-        workspace_id = str(workspace_id)
-    source_kind = filters.get("source_kind")
-    if not isinstance(source_kind, str):
-        source_kinds = filters.get("source_kinds")
-        source_kind = (
-            source_kinds[0]
-            if isinstance(source_kinds, list)
-            and len(source_kinds) == 1
-            and isinstance(source_kinds[0], str)
-            else "legacy"
-        )
-    normalized: list[RecordHit] = []
-    for result in results:
-        if isinstance(result, RecordHit):
-            normalized.append(result)
-        else:
-            source_id, score = result
-            normalized.append(
-                RecordHit(
-                    RecordIdentity(workspace_id, source_kind, source_id),
-                    score,
-                )
-            )
     best: dict[str, RecordHit] = {}
-    for hit in normalized:
+    for hit in results:
         current = best.get(hit.storage_key)
         if current is None or hit.score > current.score:
             best[hit.storage_key] = hit
@@ -168,7 +136,7 @@ async def _search_vector_store(
     model_name: str,
     dim: int,
     filters: dict[str, object] | None,
-) -> Sequence[RecordHit | tuple[str, float]]:
+) -> Sequence[RecordHit]:
     async_search = getattr(store, "async_search", None)
     if callable(async_search):
         return await _call_async(

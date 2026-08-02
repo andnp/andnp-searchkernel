@@ -56,8 +56,7 @@ from searchkernel.search.query_plan import (
 logger = logging.getLogger(__name__)
 
 RecordHydratorCallable = Callable[
-    [RecordIdentity | str],
-    Record | None | Awaitable[Record | None],
+    [RecordIdentity], Record | None | Awaitable[Record | None]
 ]
 ParentIdentityResolver = Callable[
     [RecordIdentity],
@@ -122,15 +121,15 @@ class RecordSearchPolicy:
     candidate_filter: Callable[[RecordSearchCandidate], bool] | None = None
     vector_candidate_ids: (
         Callable[
-            [Sequence[tuple[str, float]], RecordSearchQueryContext],
+            [Sequence[RecordHit], RecordSearchQueryContext],
             Sequence[str] | None,
         ]
         | None
     ) = None
     vector_ranking_order: (
         Callable[
-            [Sequence[tuple[str, float]], RecordSearchQueryContext],
-            Sequence[tuple[str, float]],
+            [Sequence[RecordHit], RecordSearchQueryContext],
+            Sequence[RecordHit],
         ]
         | None
     ) = None
@@ -1110,11 +1109,10 @@ class RecordSearchPipeline:
             plan,
         )
         for seed_key in seed_scores:
-            seed = seed_by_key[seed_key]
             raw_neighbors = neighbors_by_seed.get(seed_key, ())
             sorted_neighbors = sorted(
                 (
-                    _normalize_graph_neighbor(neighbor, seed.identity)
+                    _normalize_graph_neighbor(neighbor)
                     for neighbor in raw_neighbors
                 ),
                 key=lambda item: (-item[2], item[0], item[1]),
@@ -1146,7 +1144,7 @@ class RecordSearchPipeline:
         graph_store: GraphStore | AsyncGraphStore,
         graph_seeds: Sequence[RecordSearchCandidate],
         plan: QueryPlan,
-    ) -> dict[str, Sequence[GraphNeighbor | tuple[str, str, float]]]:
+    ) -> dict[str, Sequence[GraphNeighbor]]:
         identities = [candidate.identity for candidate in graph_seeds]
         neighbors_many = getattr(graph_store, "neighbors_many", None)
         if callable(neighbors_many):
@@ -1159,7 +1157,7 @@ class RecordSearchPipeline:
                 cast(
                     Mapping[
                         str,
-                        Sequence[GraphNeighbor | tuple[str, str, float]],
+                        Sequence[GraphNeighbor],
                     ],
                     result,
                 )
@@ -1169,34 +1167,22 @@ class RecordSearchPipeline:
 
         async def load(
             seed: RecordSearchCandidate,
-        ) -> tuple[str, Sequence[GraphNeighbor | tuple[str, str, float]]]:
+        ) -> tuple[str, Sequence[GraphNeighbor]]:
             async with semaphore:
-                try:
-                    neighbors = await _call_async(
-                        graph_store.neighbors,
-                        seed.identity,
-                        depth=plan.graph_depth,
-                    )
-                except TypeError:
-                    logger.warning(
-                        "graph adapter rejected canonical identity; "
-                        "using legacy source_id fallback for %s",
-                        seed.storage_key,
-                    )
-                    neighbors = await _call_async(
-                        graph_store.neighbors,
-                        seed.record_id,
-                        depth=plan.graph_depth,
-                    )
+                neighbors = await _call_async(
+                    graph_store.neighbors,
+                    seed.identity,
+                    depth=plan.graph_depth,
+                )
                 return seed.storage_key, cast(
-                    Sequence[GraphNeighbor | tuple[str, str, float]],
+                    Sequence[GraphNeighbor],
                     neighbors,
                 )
 
         loaded = await _gather_tasks(
             [asyncio.create_task(load(seed)) for seed in graph_seeds]
         )
-        return dict(cast(list[tuple[str, Sequence[GraphNeighbor | tuple[str, str, float]]]], loaded))
+        return dict(cast(list[tuple[str, Sequence[GraphNeighbor]]], loaded))
 
     async def _query_embedding(self, query: str) -> tuple[Vector, str, int]:
         provider = self._embedding_provider
@@ -1254,10 +1240,8 @@ class RecordSearchPipeline:
                 cast(RecordHydrator, self._hydrator).hydrate_record,
                 identity,
             )
-        return await _call_async(
-            cast(RecordHydratorCallable, self._hydrator),
-            identity.source_id,
-        )
+        hydrator = getattr(self._hydrator, "hydrate_record", self._hydrator)
+        return await _call_async(cast(RecordHydratorCallable, hydrator), identity)
 
     def _handle_error(
         self,
@@ -1348,14 +1332,16 @@ async def _resolve_parent_identity(
     return parent_identity
 
 
-def _graph_hit(record_id: str, expansion: Any, seed_by_key: Mapping[str, RecordSearchCandidate]) -> RecordHit:
+def _graph_hit(
+    record_id: str,
+    expansion: Any,
+    seed_by_key: Mapping[str, RecordSearchCandidate],
+) -> RecordHit:
     seed = seed_by_key[expansion.provenance.seed_id]
     if record_id == seed.storage_key:
         identity = seed.identity
-    elif record_id.startswith("record:"):
-        identity = RecordIdentity.from_storage_key(record_id)
     else:
-        identity = RecordIdentity(seed.workspace_id, seed.source_kind, record_id)
+        identity = RecordIdentity.from_storage_key(record_id)
     return RecordHit(
         identity,
         expansion.contribution,
@@ -1363,21 +1349,9 @@ def _graph_hit(record_id: str, expansion: Any, seed_by_key: Mapping[str, RecordS
 
 
 def _normalize_graph_neighbor(
-    neighbor: GraphNeighbor | tuple[str, str, float],
-    seed_identity: RecordIdentity,
+    neighbor: GraphNeighbor,
 ) -> tuple[str, str, float]:
-    if isinstance(neighbor, GraphNeighbor):
-        return neighbor.identity.storage_key, neighbor.edge_type, neighbor.weight
-    target_id, edge_type, weight = neighbor
-    if target_id.startswith("record:"):
-        target_id = RecordIdentity.from_storage_key(target_id).storage_key
-    else:
-        target_id = RecordIdentity(
-            seed_identity.workspace_id,
-            seed_identity.source_kind,
-            target_id,
-        ).storage_key
-    return target_id, edge_type, weight
+    return neighbor.identity.storage_key, neighbor.edge_type, neighbor.weight
 
 
 async def _call_async[T](

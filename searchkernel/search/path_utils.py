@@ -92,10 +92,8 @@ def extract_doc_id_from_chunk_id(chunk_id: str) -> str:
     """
     Extract document ID from chunk ID.
 
-    Handles all supported formats:
+    Handles the canonical hash-separated format:
     - "doc/path#chunk_0" → "doc/path"
-    - "doc_path_chunk_0" → "doc_path"
-    - "doc_path_parent_0" → "doc_path"
 
     Args:
         chunk_id: Chunk identifier (with separator)
@@ -106,23 +104,10 @@ def extract_doc_id_from_chunk_id(chunk_id: str) -> str:
     Example:
         >>> extract_doc_id_from_chunk_id("guide/setup#chunk_0")
         "guide/setup"
-        >>> extract_doc_id_from_chunk_id("guide_setup_chunk_0")
-        "guide_setup"
     """
-    # Try hash separator first (preferred format)
     if "#" in chunk_id:
         return chunk_id.split("#")[0]
 
-    # Fall back to underscore separator (legacy format)
-    # Split from right, remove last part if it matches "chunk_N"
-    parts = chunk_id.rsplit("_", 2)  # ["doc", "chunk", "0"]
-    if len(parts) >= 3 and parts[-2] == "chunk":
-        return "_".join(parts[:-2])
-
-    if len(parts) >= 3 and parts[-2] == "parent":
-        return "_".join(parts[:-2])
-
-    # No valid separator found, return as-is
     logger.warning(f"Chunk ID '{chunk_id}' has unexpected format")
     return chunk_id
 

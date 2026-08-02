@@ -193,26 +193,6 @@ def test_extract_doc_id_hash_separator_nested():
     assert extract_doc_id_from_chunk_id("api/v2/auth/jwt#chunk_5") == "api/v2/auth/jwt"
 
 
-def test_extract_doc_id_underscore_separator():
-    """Test chunk_id with underscore separator (legacy)."""
-    assert extract_doc_id_from_chunk_id("guide_setup_chunk_0") == "guide_setup"
-
-
-def test_extract_doc_id_underscore_separator_multiple():
-    """Test chunk_id with multiple underscores before chunk suffix."""
-    assert extract_doc_id_from_chunk_id("my_doc_name_chunk_3") == "my_doc_name"
-
-
-def test_extract_doc_id_parent_separator():
-    """Test parent chunk IDs resolve back to the owning document."""
-    assert extract_doc_id_from_chunk_id("guide_setup_parent_2") == "guide_setup"
-
-
-def test_extract_doc_id_parent_separator_nested():
-    """Test nested doc IDs with parent chunk suffix."""
-    assert extract_doc_id_from_chunk_id("guides/setup_parent_1") == "guides/setup"
-
-
 def test_extract_doc_id_no_separator():
     """Test chunk_id without valid separator."""
     assert extract_doc_id_from_chunk_id("just_a_doc") == "just_a_doc"

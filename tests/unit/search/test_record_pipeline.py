@@ -39,9 +39,17 @@ def _record(record_id: str) -> Record:
     )
 
 
+def _hit(record_id: str, score: float) -> RecordHit:
+    return RecordHit(RecordIdentity(None, "fake", record_id), score)
+
+
+def _hits(results: Sequence[tuple[str, float]]) -> list[RecordHit]:
+    return [_hit(record_id, score) for record_id, score in results]
+
+
 class FakeKeywordStore:
-    def __init__(self, results: list[RecordHit | tuple[str, float]]) -> None:
-        self.results = results
+    def __init__(self, results: Sequence[tuple[str, float]]) -> None:
+        self.results = _hits(results)
         self.queries: list[tuple[str, int, dict[str, object] | None]] = []
 
     def index(self, records: list[Record]) -> None:
@@ -52,14 +60,14 @@ class FakeKeywordStore:
         query: str,
         k: int,
         filters: dict[str, object] | None = None,
-    ) -> list[RecordHit | tuple[str, float]]:
+    ) -> list[RecordHit]:
         self.queries.append((query, k, filters))
         return self.results
 
 
 class FakeVectorStore:
-    def __init__(self, results: list[RecordHit | tuple[str, float]]) -> None:
-        self.results = results
+    def __init__(self, results: Sequence[tuple[str, float]]) -> None:
+        self.results = _hits(results)
         self.filters: list[dict[str, object] | None] = []
 
     def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
@@ -73,7 +81,7 @@ class FakeVectorStore:
         model_name: str,
         dim: int,
         filters: dict[str, object] | None = None,
-    ) -> list[RecordHit | tuple[str, float]]:
+    ) -> list[RecordHit]:
         assert query_vector == [1.0, 0.0]
         assert (model_name, dim) == ("fake-model", 2)
         self.filters.append(filters)
@@ -91,7 +99,17 @@ class FakeGraphStore:
         self,
         neighbors: dict[str, list[GraphNeighbor | tuple[str, str, float]]],
     ) -> None:
-        self._neighbors = neighbors
+        self._neighbors = {
+            key: [
+                neighbor
+                if isinstance(neighbor, GraphNeighbor)
+                else GraphNeighbor(
+                    RecordIdentity(None, "fake", neighbor[0]), neighbor[1], neighbor[2]
+                )
+                for neighbor in values
+            ]
+            for key, values in neighbors.items()
+        }
 
     def upsert_edges(
         self,
@@ -110,8 +128,8 @@ class FakeGraphStore:
         record_id: RecordIdentity | str,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> list[GraphNeighbor | tuple[str, str, float]]:
-        key = record_id.source_id if isinstance(record_id, RecordIdentity) else record_id
+    ) -> list[GraphNeighbor]:
+        key = record_id.source_id
         return self._neighbors.get(key, [])
 
 
@@ -125,9 +143,8 @@ class FakeEmbedder:
 
 
 def _hydrator(records: dict[str, Record]):
-    def hydrate(record_id: RecordIdentity | str) -> Record | None:
-        key = record_id.source_id if isinstance(record_id, RecordIdentity) else record_id
-        return records.get(key)
+    def hydrate(record_id: RecordIdentity) -> Record | None:
+        return records.get(record_id.source_id)
 
     return hydrate
 
@@ -192,7 +209,7 @@ async def test_vector_candidate_acquisition_supports_async_store_adapter() -> No
             assert query_vector == [1.0, 0.0]
             assert (model_name, dim) == ("fake-model", 2)
             assert filters == {"statuses": ["active"]}
-            return [("a", 0.9)]
+            return _hits([("a", 0.9)])
 
     pipeline = RecordSearchPipeline(
         vector_store=AsyncVectorStore(),
@@ -235,7 +252,7 @@ async def test_vector_policy_receives_typed_query_context() -> None:
     contexts: list[RecordSearchQueryContext] = []
 
     def select_candidates(
-        ranking: Sequence[tuple[str, float]],
+        ranking: Sequence[RecordHit],
         context: RecordSearchQueryContext,
     ) -> list[str]:
         contexts.append(context)
@@ -243,12 +260,12 @@ async def test_vector_policy_receives_typed_query_context() -> None:
         assert context.limit == 2
         assert context["workspace_id"] == "workspace-1"
         assert context["statuses"] == ["active"]
-        return [record_id for record_id, _ in ranking]
+        return [hit.source_id for hit in ranking]
 
     def order_candidates(
-        ranking: Sequence[tuple[str, float]],
+        ranking: Sequence[RecordHit],
         context: RecordSearchQueryContext,
-    ) -> Sequence[tuple[str, float]]:
+    ) -> Sequence[RecordHit]:
         contexts.append(context)
         assert dict(context) == dict(context.filters)
         return list(reversed(ranking))
@@ -685,7 +702,7 @@ async def test_keyword_and_embedding_work_overlap_without_candidate_gating() -> 
         ) -> list[RecordHit | tuple[str, float]]:
             keyword_started.set()
             await release.wait()
-            return [("a", 1.0)]
+            return _hits([("a", 1.0)])
 
     class Embedder:
         model_name = "fake-model"
@@ -707,7 +724,7 @@ async def test_keyword_and_embedding_work_overlap_without_candidate_gating() -> 
             filters: dict[str, object] | None = None,
         ) -> list[RecordHit | tuple[str, float]]:
             vector_started.set()
-            return [("a", 1.0)]
+            return _hits([("a", 1.0)])
 
     pipeline = RecordSearchPipeline(
         keyword_store=Keyword(),
@@ -743,7 +760,7 @@ async def test_candidate_gating_delays_vector_lookup_until_keyword_ids_arrive() 
             keyword_started.set()
             await release_keyword.wait()
             keyword_finished.set()
-            return [("a", 1.0)]
+            return _hits([("a", 1.0)])
 
     class Embedder:
         model_name = "fake-model"
@@ -765,7 +782,7 @@ async def test_candidate_gating_delays_vector_lookup_until_keyword_ids_arrive() 
         ) -> list[RecordHit | tuple[str, float]]:
             assert keyword_finished.is_set()
             vector_started.set()
-            return [("a", 1.0)]
+            return _hits([("a", 1.0)])
 
     pipeline = RecordSearchPipeline(
         keyword_store=Keyword(),
@@ -837,7 +854,7 @@ async def test_artifact_keyword_results_bound_vector_acquisition() -> None:
     assert vector_store.filters[0] == {
         "statuses": ["active"],
         "candidate_storage_keys": [
-            RecordIdentity(None, "legacy", "keyword").storage_key
+            RecordIdentity(None, "fake", "keyword").storage_key
         ],
     }
 
@@ -955,7 +972,11 @@ async def test_conditional_expansion_is_called_once_after_weak_first_pass() -> N
             filters: dict[str, object] | None = None,
         ) -> list[RecordHit | tuple[str, float]]:
             self.queries.append((query, k, filters))
-            return [("a", 1.0)] if query == "what is thing?" else [("b", 0.9)]
+            return (
+                _hits([("a", 1.0)])
+                if query == "what is thing?"
+                else _hits([("b", 0.9)])
+            )
 
     class ExpandingVector(FakeVectorStore):
         def __init__(self) -> None:
