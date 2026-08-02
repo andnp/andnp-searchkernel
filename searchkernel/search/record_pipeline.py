@@ -639,23 +639,28 @@ class RecordSearchPipeline:
         )
 
         hydrated: list[RecordSearchResult] = []
-        selected_candidates = candidates[:result_limit]
-        batch_hydration = await self._hydrate_candidates(
-            selected_candidates,
-            failures,
-            cache_diagnostics,
-        )
-        for candidate, record in batch_hydration:
-            if record is None:
-                missing_record_ids.append(candidate.record_id)
-                continue
-            result = RecordSearchResult(
-                record=record,
-                score=candidate.score,
-                provenance=candidate.provenance,
+        hydration_offset = 0
+        while hydration_offset < len(candidates) and len(hydrated) < result_limit:
+            hydration_batch = candidates[
+                hydration_offset : hydration_offset + result_limit
+            ]
+            hydration_offset += len(hydration_batch)
+            batch_hydration = await self._hydrate_candidates(
+                hydration_batch,
+                failures,
+                cache_diagnostics,
             )
-            if self._policy.result_filter is None or self._policy.result_filter(result):
-                hydrated.append(result)
+            for candidate, record in batch_hydration:
+                if record is None:
+                    missing_record_ids.append(candidate.record_id)
+                    continue
+                result = RecordSearchResult(
+                    record=record,
+                    score=candidate.score,
+                    provenance=candidate.provenance,
+                )
+                if self._policy.result_filter is None or self._policy.result_filter(result):
+                    hydrated.append(result)
 
         hydrated = await self._rerank_results(
             query,
@@ -872,7 +877,14 @@ class RecordSearchPipeline:
                 loaded,
                 diagnostics,
             )
-            return cached + loaded
+            hydrated_by_key = {
+                candidate.storage_key: record
+                for candidate, record in [*cached, *loaded]
+            }
+            return [
+                (candidate, hydrated_by_key[candidate.storage_key])
+                for candidate in candidates
+            ]
 
         semaphore = asyncio.Semaphore(self._config.max_hydration_concurrency)
 
@@ -898,7 +910,15 @@ class RecordSearchPipeline:
                 continue
             hydrated.append((candidate, record))
         self._store_hydration_cache(versioned, hydrated, diagnostics)
-        return cached + hydrated
+        hydrated_by_key = {
+            candidate.storage_key: record
+            for candidate, record in [*cached, *hydrated]
+        }
+        return [
+            (candidate, hydrated_by_key[candidate.storage_key])
+            for candidate in candidates
+            if candidate.storage_key in hydrated_by_key
+        ]
 
     async def _hydration_version_for(
         self,

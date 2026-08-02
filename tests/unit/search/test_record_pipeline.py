@@ -15,7 +15,11 @@ from searchkernel.domain import (
     RecordIdentity,
 )
 from searchkernel.ports.search_results import RecordSearchOutcome
-from searchkernel.runtime import CandidateResultCache
+from searchkernel.runtime import (
+    CandidateResultCache,
+    HydrationCache,
+    HydrationCacheKey,
+)
 from searchkernel.search.record_pipeline import (
     RecordSearchConfig,
     RecordSearchError,
@@ -1346,6 +1350,72 @@ async def test_scalar_and_batch_hydration_have_identical_results_and_provenance(
         ]
 
     assert signature(scalar_outcome) == signature(batch_outcome)
+
+
+async def test_hydration_merges_cache_hits_and_batch_loads_in_candidate_order() -> None:
+    records = {record_id: _record(record_id) for record_id in ("a", "b")}
+
+    class BatchHydrator:
+        async def hydrate_records(
+            self,
+            identities: Sequence[RecordIdentity],
+        ) -> dict[str, Record]:
+            assert [identity.source_id for identity in identities] == ["a"]
+            return {identities[0].storage_key: records["a"]}
+
+    identity_b = RecordIdentity(None, "fake", "b")
+    cache = HydrationCache()
+    cache.set(
+        HydrationCacheKey.build(
+            identity_b,
+            record_version=1,
+            policy_version="policy/v1",
+        ),
+        records["b"],
+    )
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0), ("b", 0.9)]),
+        hydrator=BatchHydrator(),
+        hydration_cache=cache,
+        hydration_version=1,
+        policy_version="policy/v1",
+    )
+
+    outcome = await pipeline.async_search("query", limit=2)
+
+    assert [result.record_id for result in outcome.results] == ["a", "b"]
+
+
+async def test_missing_top_candidate_backfills_from_lower_ranked_candidates() -> None:
+    records = {record_id: _record(record_id) for record_id in ("b", "c")}
+
+    class BatchHydrator:
+        def __init__(self) -> None:
+            self.identities: list[list[str]] = []
+
+        async def hydrate_records(
+            self,
+            identities: Sequence[RecordIdentity],
+        ) -> dict[str, Record | None]:
+            self.identities.append([identity.source_id for identity in identities])
+            return {
+                identity.storage_key: records.get(identity.source_id)
+                for identity in identities
+            }
+
+    hydrator = BatchHydrator()
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore(
+            [("a", 1.0), ("b", 0.9), ("c", 0.8)]
+        ),
+        hydrator=hydrator,
+    )
+
+    outcome = await pipeline.async_search("query", limit=2)
+
+    assert [result.record_id for result in outcome.results] == ["b", "c"]
+    assert outcome.missing_record_ids == ("a",)
+    assert hydrator.identities == [["a", "b"], ["c"]]
 
 
 async def test_scalar_graph_fallback_is_bounded() -> None:
