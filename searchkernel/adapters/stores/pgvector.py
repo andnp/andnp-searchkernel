@@ -14,7 +14,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 import psycopg2
 import psycopg2.extras
@@ -517,6 +517,78 @@ class _PostgresConnectionLike(Protocol):
     def put_connection(self, conn: _PostgresSession) -> None: ...
 
 
+class _PostgresEpochLane:
+    """Own epoch SQL shared by the PostgreSQL storage lanes."""
+
+    _LANE_COLUMNS: ClassVar[dict[str, str]] = {
+        "keyword": "keyword_epoch",
+        "vector": "vector_epoch",
+        "graph": "graph_epoch",
+    }
+
+    @staticmethod
+    def bump(
+        cursor: Any,
+        *,
+        keyword: bool = False,
+        vector: bool = False,
+        graph: bool = False,
+    ) -> None:
+        if not any((keyword, vector, graph)):
+            return
+        cursor.execute(
+            """
+            UPDATE index_epoch
+            SET epoch = epoch + 1,
+                keyword_epoch = keyword_epoch + %s,
+                vector_epoch = vector_epoch + %s,
+                graph_epoch = graph_epoch + %s;
+            """,
+            (int(keyword), int(vector), int(graph)),
+        )
+
+    def read_all(self, conn_pool: _PostgresConnectionLike) -> dict[str, int]:
+        conn = conn_pool.get_connection()
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT keyword_epoch, vector_epoch, graph_epoch "
+                "FROM index_epoch LIMIT 1;"
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return {lane: 0 for lane in self._LANE_COLUMNS}
+            return {
+                lane: int(row[index])
+                for index, lane in enumerate(self._LANE_COLUMNS)
+            }
+        finally:
+            if cursor is not None:
+                cursor.close()
+            conn_pool.put_connection(conn)
+
+    def read(self, conn_pool: _PostgresConnectionLike, lane: str) -> int:
+        return self.read_all(conn_pool)[lane]
+
+    @staticmethod
+    def read_total(conn_pool: _PostgresConnectionLike) -> int:
+        conn = conn_pool.get_connection()
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT epoch FROM index_epoch LIMIT 1;")
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            if cursor is not None:
+                cursor.close()
+            conn_pool.put_connection(conn)
+
+
+_POSTGRES_EPOCH_LANE = _PostgresEpochLane()
+
+
 class PostgresConnection:
     """Thread-safe Postgres connection pool."""
 
@@ -702,49 +774,6 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
 
         conn.commit()
         logger.info("pgvector schema initialized successfully")
-    finally:
-        if cursor is not None:
-            cursor.close()
-        conn_pool.put_connection(conn)
-
-
-def _bump_epochs(
-    cursor: Any,
-    *,
-    keyword: bool = False,
-    vector: bool = False,
-    graph: bool = False,
-) -> None:
-    if not any((keyword, vector, graph)):
-        return
-    cursor.execute(
-        """
-        UPDATE index_epoch
-        SET epoch = epoch + 1,
-            keyword_epoch = keyword_epoch + %s,
-            vector_epoch = vector_epoch + %s,
-            graph_epoch = graph_epoch + %s;
-        """,
-        (int(keyword), int(vector), int(graph)),
-    )
-
-
-def _read_epochs(conn_pool: _PostgresConnectionLike) -> dict[str, int]:
-    conn = conn_pool.get_connection()
-    cursor = None
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT keyword_epoch, vector_epoch, graph_epoch FROM index_epoch LIMIT 1;"
-        )
-        row = cursor.fetchone()
-        if row is None:
-            return {"keyword": 0, "vector": 0, "graph": 0}
-        return {
-            "keyword": int(row[0]),
-            "vector": int(row[1]),
-            "graph": int(row[2]),
-        }
     finally:
         if cursor is not None:
             cursor.close()
@@ -1037,7 +1066,9 @@ class PGVectorStore:
                     vector_rows,
                 )
 
-            _bump_epochs(cursor, keyword=True, vector=bool(vector_rows))
+            _POSTGRES_EPOCH_LANE.bump(
+                cursor, keyword=True, vector=bool(vector_rows)
+            )
 
             conn.commit()
             logger.debug(f"Upserted {len(records)} records for model {model_name}")
@@ -1189,7 +1220,7 @@ class PGVectorStore:
                 "DELETE FROM records WHERE record_id = ANY(%s);", (storage_ids,)
             )
 
-            _bump_epochs(
+            _POSTGRES_EPOCH_LANE.bump(
                 cursor,
                 keyword=True,
                 vector=True,
@@ -1270,7 +1301,7 @@ class PGVectorStore:
                     (storage_ids,),
                 )
 
-            _bump_epochs(
+            _POSTGRES_EPOCH_LANE.bump(
                 cursor,
                 keyword=True,
                 vector=True,
@@ -1284,23 +1315,13 @@ class PGVectorStore:
 
     def epoch(self) -> int:
         """Get current index epoch."""
-        conn = self.conn_pool.get_connection()
-        cursor = None
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT epoch FROM index_epoch LIMIT 1;")
-            result = cursor.fetchone()
-            return result[0] if result else 0
-        finally:
-            if cursor is not None:
-                cursor.close()
-            self.conn_pool.put_connection(conn)
+        return _POSTGRES_EPOCH_LANE.read_total(self.conn_pool)
 
     def vector_epoch(self) -> int:
-        return _read_epochs(self.conn_pool)["vector"]
+        return _POSTGRES_EPOCH_LANE.read(self.conn_pool, "vector")
 
     def epochs(self) -> dict[str, int]:
-        return _read_epochs(self.conn_pool)
+        return _POSTGRES_EPOCH_LANE.read_all(self.conn_pool)
 
 
 class PGKeywordStore:
@@ -1345,7 +1366,7 @@ class PGKeywordStore:
                 ],
             )
 
-            _bump_epochs(cursor, keyword=True)
+            _POSTGRES_EPOCH_LANE.bump(cursor, keyword=True)
             conn.commit()
             logger.debug(f"Indexed {len(records)} records for keyword search")
         finally:
@@ -1354,23 +1375,13 @@ class PGKeywordStore:
             self.conn_pool.put_connection(conn)
 
     def keyword_epoch(self) -> int:
-        return _read_epochs(self.conn_pool)["keyword"]
+        return _POSTGRES_EPOCH_LANE.read(self.conn_pool, "keyword")
 
     def epoch(self) -> int:
-        conn = self.conn_pool.get_connection()
-        cursor = None
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT epoch FROM index_epoch LIMIT 1;")
-            row = cursor.fetchone()
-            return int(row[0]) if row else 0
-        finally:
-            if cursor is not None:
-                cursor.close()
-            self.conn_pool.put_connection(conn)
+        return _POSTGRES_EPOCH_LANE.read_total(self.conn_pool)
 
     def epochs(self) -> dict[str, int]:
-        return _read_epochs(self.conn_pool)
+        return _POSTGRES_EPOCH_LANE.read_all(self.conn_pool)
 
     def search(
         self, query: str, k: int, filters: dict[str, Any] | None = None
@@ -1506,7 +1517,7 @@ class PGGraphStore:
                 rows,
             )
 
-            _bump_epochs(cursor, graph=True)
+            _POSTGRES_EPOCH_LANE.bump(cursor, graph=True)
             conn.commit()
             logger.debug(f"Upserted {len(edges)} edges")
         finally:
@@ -1552,7 +1563,7 @@ class PGGraphStore:
                 rows,
             )
             if cursor.rowcount:
-                _bump_epochs(cursor, graph=True)
+                _POSTGRES_EPOCH_LANE.bump(cursor, graph=True)
             conn.commit()
         finally:
             if cursor is not None:
@@ -1560,10 +1571,10 @@ class PGGraphStore:
             self.conn_pool.put_connection(conn)
 
     def graph_epoch(self) -> int:
-        return _read_epochs(self.conn_pool)["graph"]
+        return _POSTGRES_EPOCH_LANE.read(self.conn_pool, "graph")
 
     def epochs(self) -> dict[str, int]:
-        return _read_epochs(self.conn_pool)
+        return _POSTGRES_EPOCH_LANE.read_all(self.conn_pool)
 
     def neighbors(
         self,
