@@ -5,6 +5,7 @@ These MOCK the HTTP client to avoid requiring a real Ollama daemon.
 
 from unittest import mock
 
+import httpx
 import pytest
 
 from searchkernel.adapters.embedding import OllamaEmbeddingProvider
@@ -16,6 +17,13 @@ def _mock_response(json_body: dict) -> mock.Mock:
     response.raise_for_status = mock.Mock()
     response.json = mock.Mock(return_value=json_body)
     return response
+
+
+def _missing_model_response() -> httpx.Response:
+    return httpx.Response(
+        404,
+        request=httpx.Request("POST", "http://localhost:11434/api/show"),
+    )
 
 
 def test_satisfies_port():
@@ -41,6 +49,69 @@ def test_resolve_dim_from_show_endpoint():
         call = mock_post.call_args
         assert call.args[0].endswith("/api/show")
         assert call.kwargs["json"] == {"model": "qwen3-embedding:0.6b"}
+
+
+def test_missing_model_is_pulled_before_dimension_probe():
+    with mock.patch("httpx.Client.post") as mock_post:
+        mock_post.side_effect = [
+            _missing_model_response(),
+            _mock_response({"status": "success"}),
+            _mock_response({"model_info": {"qwen3.embedding_length": 1024}}),
+        ]
+
+        provider = OllamaEmbeddingProvider(
+            "qwen3-embedding:0.6b",
+            pull_timeout=123.0,
+        )
+
+        assert provider.dim == 1024
+        assert mock_post.call_args_list[1].kwargs == {
+            "json": {"name": "qwen3-embedding:0.6b", "stream": False},
+            "timeout": 123.0,
+        }
+        assert mock_post.call_args_list[2].kwargs["json"] == {
+            "model": "qwen3-embedding:0.6b",
+        }
+
+
+def test_auto_pull_can_be_disabled():
+    with (
+        mock.patch("httpx.Client.post", return_value=_missing_model_response()),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        OllamaEmbeddingProvider("qwen3-embedding:0.6b", auto_pull=False)
+
+
+def test_missing_model_is_pulled_before_retrying_embed():
+    provider = OllamaEmbeddingProvider("qwen3-embedding:0.6b", dim=2)
+    vectors = [[0.1, 0.2]]
+
+    with mock.patch("httpx.Client.post") as mock_post:
+        mock_post.side_effect = [
+            _missing_model_response(),
+            _mock_response({"status": "success"}),
+            _mock_response({"embeddings": vectors}),
+        ]
+
+        assert provider.embed(["x"]) == vectors
+        assert mock_post.call_args_list[1].kwargs["json"] == {
+            "name": "qwen3-embedding:0.6b",
+            "stream": False,
+        }
+
+
+def test_pull_failure_is_propagated():
+    with mock.patch("httpx.Client.post") as mock_post:
+        mock_post.side_effect = [
+            _missing_model_response(),
+            httpx.Response(
+                500,
+                request=httpx.Request("POST", "http://localhost:11434/api/pull"),
+            ),
+        ]
+
+        with pytest.raises(httpx.HTTPStatusError):
+            OllamaEmbeddingProvider("qwen3-embedding:0.6b")
 
 
 def test_resolve_dim_raises_when_missing():
