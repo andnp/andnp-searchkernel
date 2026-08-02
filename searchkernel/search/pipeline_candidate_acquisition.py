@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from searchkernel.domain import RecordHit, RecordIdentity, Vector
 from searchkernel.ports import (
+    AsyncKeywordStore,
     AsyncVectorStore,
     KeywordStore,
     VectorStore,
@@ -30,7 +31,7 @@ class CandidateAcquirer:
     def __init__(
         self,
         *,
-        keyword_store: KeywordStore | None,
+        keyword_store: KeywordStore | AsyncKeywordStore | None,
         vector_store: VectorStore | AsyncVectorStore | None,
         policy: RecordSearchPolicy,
         query_embedding: QueryEmbedding,
@@ -160,7 +161,7 @@ def _normalize_hits(
 
 
 async def _search_vector_store(
-    store: VectorStore | AsyncVectorStore | object,
+    store: VectorStore | AsyncVectorStore,
     vector: Vector,
     k: int,
     *,
