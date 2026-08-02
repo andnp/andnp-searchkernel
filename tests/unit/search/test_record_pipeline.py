@@ -175,6 +175,36 @@ async def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
     assert outcome.results[0].provenance.strategies == ("keyword", "vector")
 
 
+async def test_vector_candidate_acquisition_supports_async_store_adapter() -> None:
+    class AsyncVectorStore:
+        def epoch(self) -> int:
+            return 0
+
+        async def async_search(
+            self,
+            query_vector: list[float],
+            k: int,
+            *,
+            model_name: str,
+            dim: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit | tuple[str, float]]:
+            assert query_vector == [1.0, 0.0]
+            assert (model_name, dim) == ("fake-model", 2)
+            assert filters == {"statuses": ["active"]}
+            return [("a", 0.9)]
+
+    pipeline = RecordSearchPipeline(
+        vector_store=AsyncVectorStore(),
+        embedding_provider=FakeEmbedder(),
+        hydrator=_hydrator({"a": _record("a")}),
+    )
+
+    outcome = await pipeline.async_search("query")
+
+    assert [result.record_id for result in outcome.results] == ["a"]
+
+
 async def test_policy_can_bound_vector_acquisition_to_keyword_candidates() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b")}
     vector_store = FakeVectorStore([("a", 0.9)])

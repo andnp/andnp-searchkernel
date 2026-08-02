@@ -46,6 +46,7 @@ from searchkernel.search.bounded_graph import (
     expand_bounded_typed_graph,
 )
 from searchkernel.search.fusion import fuse_reciprocal_rank
+from searchkernel.search.pipeline_candidate_acquisition import CandidateAcquirer
 from searchkernel.search.pipeline_candidate_cache import CandidateCachePolicy
 from searchkernel.search.query_plan import (
     QueryPlan,
@@ -349,6 +350,12 @@ class RecordSearchPipeline:
             routing_fingerprint=self._routing_fingerprint,
             policy_version=self._policy_version,
         )
+        self._candidate_acquirer = CandidateAcquirer(
+            keyword_store=self._keyword_store,
+            vector_store=self._vector_store,
+            policy=self._policy,
+            query_embedding=self._query_embedding,
+        )
         self._router = QueryRouter(
             QueryRouterConfig(
                 candidate_multiplier=self._config.candidate_multiplier,
@@ -461,7 +468,7 @@ class RecordSearchPipeline:
                 keyword_result = await self._capture_optional_stage(
                     "keyword",
                     plan.keyword_enabled,
-                    lambda: self._acquire_keyword(
+                    lambda: self._candidate_acquirer.keyword(
                         query,
                         plan.keyword_candidate_budget,
                         filters,
@@ -493,7 +500,7 @@ class RecordSearchPipeline:
                         asyncio.create_task(
                             _capture_stage(
                                 "keyword",
-                                lambda: self._acquire_keyword(
+                                lambda: self._candidate_acquirer.keyword(
                                     query, plan.keyword_candidate_budget, filters
                                 ),
                             )
@@ -523,7 +530,7 @@ class RecordSearchPipeline:
                 if embedding_result is not None:
                     vector_result = await _capture_stage(
                         "vector",
-                        lambda: self._acquire_vector(
+                        lambda: self._candidate_acquirer.vector(
                             cast(tuple[Vector, str, int], embedding_result),
                             plan.vector_candidate_budget,
                             filters,
@@ -541,7 +548,7 @@ class RecordSearchPipeline:
                         asyncio.create_task(
                             _capture_stage(
                                 "keyword",
-                                lambda: self._acquire_keyword(
+                                lambda: self._candidate_acquirer.keyword(
                                     query, plan.keyword_candidate_budget, filters
                                 ),
                             )
@@ -551,7 +558,7 @@ class RecordSearchPipeline:
                         asyncio.create_task(
                             _capture_stage(
                                 "vector",
-                                lambda: self._acquire_vector(
+                                lambda: self._candidate_acquirer.vector(
                                     None,
                                     plan.vector_candidate_budget,
                                     filters,
@@ -641,7 +648,7 @@ class RecordSearchPipeline:
                     expansion_ranking = await self._capture_optional_stage(
                         "keyword",
                         plan.keyword_enabled,
-                        lambda: self._acquire_keyword(
+                        lambda: self._candidate_acquirer.keyword(
                             expanded_query,
                             plan.keyword_candidate_budget,
                             filters,
@@ -780,20 +787,6 @@ class RecordSearchPipeline:
         diagnostics.append(f"rerank:applied:{len(reranked)}")
         return [*reranked, *results[len(selected) :]]
 
-    async def _acquire_keyword(
-        self,
-        query: str,
-        acquisition_limit: int,
-        filters: dict[str, object],
-    ) -> list[RecordHit]:
-        store = self._keyword_store
-        if store is None:
-            return []
-        return _normalize_hits(
-            await _call_async(store.search, query, acquisition_limit, filters),
-            filters,
-        )
-
     async def _capture_optional_stage(
         self,
         stage: FailureStage,
@@ -848,67 +841,6 @@ class RecordSearchPipeline:
             return None
         diagnostics.append("expansion:applied")
         return expanded
-
-    async def _acquire_vector(
-        self,
-        embedding: tuple[Vector, str, int] | None,
-        acquisition_limit: int,
-        filters: dict[str, object],
-        rankings: Mapping[str, Sequence[RecordHit]],
-        *,
-        context: RecordSearchQueryContext,
-        query: str | None = None,
-        plan: QueryPlan | None = None,
-    ) -> list[RecordHit]:
-        if embedding is None:
-            if query is None:
-                raise ValueError("query is required when embedding is absent")
-            embedding = await self._query_embedding(query)
-        vector, model_name, dim = embedding
-        vector_filters = filters
-        if self._policy.vector_candidate_ids is not None:
-            candidate_ids = self._policy.vector_candidate_ids(
-                [
-                    (hit.source_id, hit.score)
-                    for hit in rankings.get("keyword", ())
-                ],
-                context,
-            )
-            if candidate_ids is not None:
-                vector_filters = dict(filters)
-                vector_filters["candidate_ids"] = list(candidate_ids)
-        elif plan is not None and plan.vector_candidates_keyword_bounded:
-            keyword_ranking = rankings.get("keyword", ())
-            if keyword_ranking:
-                vector_filters = dict(filters)
-                vector_filters["candidate_storage_keys"] = [
-                    hit.storage_key for hit in keyword_ranking
-                ]
-        vector_store = self._vector_store
-        if vector_store is None:
-            return []
-        vector_ranking = _normalize_hits(
-            await _search_vector_store(
-                vector_store,
-                vector,
-                acquisition_limit,
-                model_name=model_name,
-                dim=dim,
-                filters=vector_filters,
-            ),
-            filters,
-            sort=False,
-        )
-        if self._policy.vector_ranking_order is not None:
-            vector_ranking = _normalize_hits(
-                self._policy.vector_ranking_order(
-                    [(hit.source_id, hit.score) for hit in vector_ranking],
-                    context,
-                ),
-                filters,
-                sort=False,
-            )
-        return vector_ranking
 
     def _consume_stage(
         self,
@@ -1410,48 +1342,6 @@ class RecordSearchPipeline:
         return sorted(candidates, key=lambda item: (-item.score, item.storage_key))
 
 
-def _normalize_hits(
-    results: Sequence[RecordHit | tuple[str, float]],
-    filters: Mapping[str, object],
-    *,
-    sort: bool = True,
-) -> list[RecordHit]:
-    workspace_id = filters.get("workspace_id")
-    if workspace_id is not None and not isinstance(workspace_id, str):
-        workspace_id = str(workspace_id)
-    source_kind = filters.get("source_kind")
-    if not isinstance(source_kind, str):
-        source_kinds = filters.get("source_kinds")
-        source_kind = (
-            source_kinds[0]
-            if isinstance(source_kinds, list)
-            and len(source_kinds) == 1
-            and isinstance(source_kinds[0], str)
-            else "legacy"
-        )
-    normalized: list[RecordHit] = []
-    for result in results:
-        if isinstance(result, RecordHit):
-            normalized.append(result)
-        else:
-            source_id, score = result
-            normalized.append(
-                RecordHit(
-                    RecordIdentity(workspace_id, source_kind, source_id),
-                    score,
-                )
-            )
-    best: dict[str, RecordHit] = {}
-    for hit in normalized:
-        current = best.get(hit.storage_key)
-        if current is None or hit.score > current.score:
-            best[hit.storage_key] = hit
-    normalized = list(best.values())
-    if sort:
-        normalized.sort(key=lambda hit: (-hit.score, hit.storage_key))
-    return normalized
-
-
 async def _resolve_parent_identity(
     expander: ParentRecordExpander | ParentIdentityResolver,
     identity: RecordIdentity,
@@ -1593,39 +1483,3 @@ def _find_stage(
         if result_stage == stage:
             return result_stage, value, error
     return None
-
-
-async def _search_vector_store(
-    store: VectorStore | AsyncVectorStore,
-    vector: Vector,
-    k: int,
-    *,
-    model_name: str,
-    dim: int,
-    filters: dict[str, object] | None,
-) -> Sequence[RecordHit | tuple[str, float]]:
-    async_search = getattr(store, "async_search", None)
-    if callable(async_search):
-        return await _call_async(
-            cast(
-                Callable[
-                    ...,
-                    Sequence[RecordHit | tuple[str, float]]
-                    | Awaitable[Sequence[RecordHit | tuple[str, float]]],
-                ],
-                async_search,
-            ),
-            vector,
-            k,
-            model_name=model_name,
-            dim=dim,
-            filters=filters,
-        )
-    return await _call_async(
-        store.search,
-        vector,
-        k,
-        model_name=model_name,
-        dim=dim,
-        filters=filters,
-    )
