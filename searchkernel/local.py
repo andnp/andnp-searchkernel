@@ -1,0 +1,88 @@
+"""Public composition helpers for the canonical local record backend."""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from searchkernel.domain import Vector
+from searchkernel.indices import (
+    LocalGraphStore,
+    LocalKeywordStore,
+    LocalRecordBackend,
+    LocalVectorStore,
+)
+from searchkernel.kernel import SearchKernel
+from searchkernel.ports.embedding import AsyncEmbeddingProvider, EmbeddingProvider
+from searchkernel.ports.rerank import Reranker
+from searchkernel.search.orchestrator import SearchOrchestrator
+from searchkernel.search.record_pipeline import (
+    QueryEmbeddingProvider,
+    RecordSearchConfig,
+    RecordSearchPipeline,
+    RecordSearchPolicy,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class LocalRecordKernel:
+    """The canonical local stores and the kernel that searches them."""
+
+    backend: LocalRecordBackend
+    vector_store: LocalVectorStore
+    keyword_store: LocalKeywordStore
+    graph_store: LocalGraphStore
+    pipeline: RecordSearchPipeline
+    kernel: SearchKernel
+
+
+def build_local_record_kernel(
+    db_path: Path | None = None,
+    *,
+    embedding_provider: (
+        EmbeddingProvider
+        | AsyncEmbeddingProvider
+        | QueryEmbeddingProvider
+        | Callable[[str], Vector | Awaitable[Vector]]
+    ),
+    embedding_model_name: str | None = None,
+    embedding_dim: int | None = None,
+    vector_engine: str = "exact",
+    faiss_path: Path | None = None,
+    reranker: Reranker | None = None,
+    search_policy: RecordSearchPolicy | None = None,
+    search_config: RecordSearchConfig | None = None,
+) -> LocalRecordKernel:
+    """Build the durable local record stores and their search kernel."""
+
+    backend = LocalRecordBackend(db_path, vector_engine=vector_engine)
+    vector_store = LocalVectorStore(backend, faiss_path=faiss_path)
+    keyword_store = LocalKeywordStore(backend)
+    graph_store = LocalGraphStore(backend)
+    pipeline = RecordSearchPipeline(
+        hydrator=backend.hydrate_record,
+        keyword_store=keyword_store,
+        vector_store=vector_store,
+        graph_store=graph_store,
+        embedding_provider=embedding_provider,
+        embedding_model_name=embedding_model_name,
+        embedding_dim=embedding_dim,
+        reranker=reranker,
+        policy=search_policy,
+        config=search_config,
+    )
+    kernel = SearchKernel.build(
+        orchestrator=SearchOrchestrator(pipeline=pipeline),
+    )
+    return LocalRecordKernel(
+        backend=backend,
+        vector_store=vector_store,
+        keyword_store=keyword_store,
+        graph_store=graph_store,
+        pipeline=pipeline,
+        kernel=kernel,
+    )
+
+
+__all__ = ["LocalRecordKernel", "build_local_record_kernel"]
