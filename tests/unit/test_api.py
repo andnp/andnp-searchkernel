@@ -11,7 +11,6 @@ from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
     content_source,
     embedding,
-    live_indices,
     retrieval,
     search,
     stores,
@@ -43,7 +42,6 @@ API_EXPORTS = {
 PORT_EXPORTS = {
     "ContentSource": content_source.ContentSource,
     "EmbeddingProvider": embedding.EmbeddingProvider,
-    "GraphIndexPort": live_indices.GraphIndexPort,
     "RecordHit": models.RecordHit,
     "SearchAPI": search.SearchAPI,
     "SearchFilters": models.SearchFilters,

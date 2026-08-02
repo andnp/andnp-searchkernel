@@ -128,9 +128,6 @@ from searchkernel.indexing.submission import (
     TaskBatchSubmissionResult,
     TaskSubmissionResult,
 )
-from searchkernel.indices.graph import GraphStore as GraphIndex
-from searchkernel.indices.keyword import KeywordIndex
-from searchkernel.indices.vector import VectorIndex
 from searchkernel.ingestion.records import SemanticRecordIngestor
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports import (
@@ -152,14 +149,12 @@ from searchkernel.ports import (
     EmbeddingBatchProvider,
     EmbeddingProvider,
     EmbeddingSink,
-    GraphIndexPort,
     GraphStore,
     HierarchicalSearchableSource,
     IndexManagerPort,
     IngestionError,
     IngestionFailureMode,
     IngestionReceipt,
-    KeywordIndexPort,
     KeywordStore,
     LLMProvider,
     ModelBackupStore,
@@ -177,11 +172,9 @@ from searchkernel.ports import (
     SearchAPI,
     SourceBatch,
     SourceCapabilities,
-    VectorIndexPort,
     VectorStore,
     extract_retrieval_fields,
 )
-from searchkernel.ports.live_indices import LiveSearchResult
 from searchkernel.runtime.reindex import (
     ReindexError,
     ReindexProgress,
@@ -221,7 +214,6 @@ from searchkernel.search.record_pipeline import (
     RecordSearchPolicy,
     RecordSearchResult,
 )
-from searchkernel.search.types import SearchResultDict
 from searchkernel.search.utils import classify_query_type, truncate_content
 from searchkernel.storage import DatabaseManager, SQLiteTuning
 from searchkernel.utils import (
@@ -313,8 +305,6 @@ __all__ = [
     "EmbeddingSink",
     "EncoderFingerprint",
     "GraphEdge",
-    "GraphIndex",
-    "GraphIndexPort",
     "GraphNeighbor",
     "GraphStore",
     "HeaderBasedChunker",
@@ -328,11 +318,8 @@ __all__ = [
     "IngestionFailureMode",
     "IngestionReceipt",
     "JsonCheckpointStore",
-    "KeywordIndex",
-    "KeywordIndexPort",
     "KeywordStore",
     "LLMProvider",
-    "LiveSearchResult",
     "LlamaIndexEmbeddingCacheAdapter",
     "MemoryCheckpointStore",
     "MigrationPhase",
@@ -383,7 +370,6 @@ __all__ = [
     "SearchKernel",
     "SearchOrchestrator",
     "SearchResult",
-    "SearchResultDict",
     "SearchResultProvenance",
     "SearchStrategyStats",
     "SearchableSource",
@@ -400,8 +386,6 @@ __all__ = [
     "Tier",
     "ValidationResult",
     "Vector",
-    "VectorIndex",
-    "VectorIndexPort",
     "VectorStore",
     "apply_source_diversity",
     "atomic_write_json",
