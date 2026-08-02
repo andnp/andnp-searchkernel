@@ -13,6 +13,7 @@ backend providers remain in their adapter modules.
 
 from typing import TYPE_CHECKING, Any
 
+from searchkernel.adapters.embedding.ollama import OllamaEmbeddingProvider
 from searchkernel.compression import truncate_delta
 from searchkernel.domain import (
     ActiveModelMetadata,
@@ -128,6 +129,7 @@ from searchkernel.indexing.submission import (
 )
 from searchkernel.ingestion.records import SemanticRecordIngestor
 from searchkernel.kernel import SearchKernel
+from searchkernel.local import LocalRecordKernel, build_local_record_kernel
 from searchkernel.ports import (
     ActiveModelStore,
     AsyncEmbeddingProvider,
@@ -309,6 +311,7 @@ __all__ = [
     "KeywordStore",
     "LLMProvider",
     "LlamaIndexEmbeddingCacheAdapter",
+    "LocalRecordKernel",
     "MemoryCheckpointStore",
     "MigrationPhase",
     "MigrationState",
@@ -318,6 +321,7 @@ __all__ = [
     "ModelNamespace",
     "ModelNamespaceStore",
     "ModelValidationStore",
+    "OllamaEmbeddingProvider",
     "OrchestratorConfig",
     "PublicIndexStateSnapshot",
     "QueryEmbeddingProvider",
@@ -375,6 +379,7 @@ __all__ = [
     "build_embedding_text",
     "build_file_stamps",
     "build_indexed_files_map",
+    "build_local_record_kernel",
     "can_refresh_loaded_indices",
     "can_serve_queries",
     "canonical_storage_key",
