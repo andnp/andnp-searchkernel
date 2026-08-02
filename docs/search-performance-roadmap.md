@@ -1,7 +1,7 @@
 # Search Performance and Retrieval Quality Roadmap
 
-Status: 0.5.0 canonical record architecture; performance work is still in
-validation
+Status: 0.6.0 canonical record architecture with v1 federation contracts;
+performance work is still in validation
 
 Last reviewed: 2026-08-02
 
@@ -9,14 +9,16 @@ Last reviewed: 2026-08-02
 
 This roadmap tracks the work needed to make `andnp-searchkernel` fast,
 predictable, and useful across mixed-source search. Version 0.5.0 establishes
-one supported query architecture: source adapters produce `Record` values and
-the canonical record pipeline performs candidate retrieval, fusion, optional
-graph expansion, policy application, and hydration.
+one supported local query architecture: source adapters produce `Record`
+values and the canonical record pipeline performs candidate retrieval, fusion,
+optional graph expansion, policy application, and hydration. Version 0.6.0
+adds a versioned federation port, bounded executor, and HTTP source adapter for
+systems that own independent search indexes.
 
-The architecture is ready for focused contract testing, but it is not a
-production performance or relevance claim. The repository has synthetic
-benchmarks and backend tests; it does not yet have a representative,
-versioned, labeled corpus or a cross-backend latency study.
+Both paths are ready for focused contract testing, but neither is a production
+performance or relevance claim. The repository has synthetic benchmarks,
+backend tests, and federation contract tests; it does not yet have a
+representative, versioned, labeled corpus or a cross-backend latency study.
 
 ## 1. Canonical architecture
 
@@ -37,6 +39,21 @@ Record source adapter
 The composition root is `SearchKernel.build`; applications provide stores,
 providers, policies, and a hydrator instead of teaching the kernel about a
 source's native schema.
+
+The supported federated flow is:
+
+```text
+Independent source
+  -> SearchSource (v1 contract)
+     -> FederationExecutor
+        -> bounded concurrent calls
+           -> rank fusion and identity/URI deduplication
+              -> hits + source responses + degradation diagnostics
+```
+
+Federation is intentionally a separate composition boundary. The executor
+does not replace source-owned authorization, filtering, lifecycle, or index
+management.
 
 Ingestion uses `SemanticRecordIngestor` for keyword and vector stages and
 `ResumableSemanticCoordinator` when source iteration and checkpoints are
@@ -106,13 +123,35 @@ state, or supersession state. Core imports must remain usable without FAISS,
 Hugging Face, Postgres, tree-sitter, or an LLM provider. Optional adapters
 must fail at their own boundary with actionable diagnostics.
 
-## 3. Retired compatibility boundary
+### 2.6 Federation safety and comparability
 
-The former chunk-oriented query pipeline and federated query execution were
-retired before the 0.5.0 architecture. Chunks may still be created as an
-ingestion artifact, but they are not the public query identity. All query
-boundaries return canonical record outcomes and carry complete identities
-through `RecordHit`, graph expansion, and hydration.
+Federated sources must advertise the `v1` contract and the capabilities they
+can enforce. A source that cannot honor requested filters is not queried. The
+executor bounds concurrency, per-source deadlines, request sizes, response
+sizes, and optional reranking text. Source-native scores are retained but are
+not assumed comparable; fusion uses local result ranks and deterministic
+identity tie-breaking.
+
+Partial availability is part of the response contract. Successful source
+responses remain usable when another source times out or fails, and callers
+must inspect `partial`, `degradations`, and `warnings` when completeness
+matters.
+
+## 3. Compatibility boundaries
+
+The former chunk-oriented query pipeline was retired before the 0.5.0
+architecture. Chunks may still be created as an ingestion artifact, but they
+are not the public query identity. Local query boundaries return canonical
+record outcomes and carry complete identities through `RecordHit`, graph
+expansion, and hydration.
+
+Federated query execution is supported in `0.6.0` through the v1
+`SearchSource`, `SearchRequest`, `SearchResponse`, and `FederationExecutor`
+contracts. Federation carries complete source identities, uses source-local
+rank for reciprocal-rank fusion, bounds per-source work, and reports timeout,
+unavailability, partial-source, and reranker degradation explicitly. The
+repository provides the transport-neutral contracts and HTTP client adapter;
+source services remain responsible for their own authorization and filtering.
 
 ## 4. Validation baseline and limits
 
