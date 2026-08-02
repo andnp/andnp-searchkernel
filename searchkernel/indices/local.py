@@ -487,6 +487,12 @@ class LocalRecordBackend:
         )
 
     @staticmethod
+    def _key_chunks(keys: Sequence[str]) -> Iterable[list[str]]:
+        # Keep IN statements below SQLite's default bound-parameter limit.
+        for start in range(0, len(keys), 900):
+            yield list(keys[start : start + 900])
+
+    @staticmethod
     def _delete_fts_row(
         conn: sqlite3.Connection,
         row: sqlite3.Row,
@@ -531,50 +537,97 @@ class LocalRecordBackend:
         conn: sqlite3.Connection,
         rows: list[Record],
     ) -> None:
-        for record in rows:
-            old_row = conn.execute(
-                """
-                SELECT rowid, title, body, indexed_text, uri, keywords
-                FROM local_records
-                WHERE storage_key = ?
-                """,
-                (record.storage_key,),
-            ).fetchone()
-            if old_row is not None and self._fts5_available:
-                self._delete_fts_row(conn, old_row)
-            conn.execute(
-                """
-                INSERT INTO local_records (
-                    storage_key, workspace_id, source_kind, source_id, title, body,
-                    indexed_text, created_at, updated_at, metadata, uri, keywords, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(storage_key) DO UPDATE SET
-                    workspace_id = excluded.workspace_id,
-                    source_kind = excluded.source_kind,
-                    source_id = excluded.source_id,
-                    title = excluded.title,
-                    body = excluded.body,
-                    indexed_text = excluded.indexed_text,
-                    created_at = excluded.created_at,
-                    updated_at = excluded.updated_at,
-                    metadata = excluded.metadata,
-                    uri = excluded.uri,
-                    keywords = excluded.keywords,
-                    status = excluded.status
-                """,
-                self._record_values(record),
+        keys = list(dict.fromkeys(record.storage_key for record in rows))
+        old_rows: dict[str, sqlite3.Row] = {}
+        for key_chunk in self._key_chunks(keys):
+            placeholders = ",".join("?" for _ in key_chunk)
+            old_rows.update(
+                {
+                    row["storage_key"]: row
+                    for row in conn.execute(
+                        f"""
+                        SELECT storage_key, rowid, title, body, indexed_text, uri, keywords
+                        FROM local_records
+                        WHERE storage_key IN ({placeholders})
+                        """,
+                        key_chunk,
+                    ).fetchall()
+                }
             )
-            if self._fts5_available:
-                new_row = conn.execute(
-                    """
-                    SELECT rowid, title, body, indexed_text, uri, keywords
-                    FROM local_records
-                    WHERE storage_key = ?
-                    """,
-                    (record.storage_key,),
-                ).fetchone()
-                assert new_row is not None
-                self._insert_fts_row(conn, new_row)
+
+        if self._fts5_available:
+            conn.executemany(
+                f"""
+                INSERT INTO {_LOCAL_FTS_TABLE}
+                    ({_LOCAL_FTS_TABLE}, rowid, title, body, uri, keywords)
+                VALUES ('delete', ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row["rowid"],
+                        row["title"],
+                        row["indexed_text"] or row["body"],
+                        row["uri"],
+                        row["keywords"],
+                    )
+                    for row in old_rows.values()
+                ],
+            )
+
+        conn.executemany(
+            """
+            INSERT INTO local_records (
+                storage_key, workspace_id, source_kind, source_id, title, body,
+                indexed_text, created_at, updated_at, metadata, uri, keywords, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(storage_key) DO UPDATE SET
+                workspace_id = excluded.workspace_id,
+                source_kind = excluded.source_kind,
+                source_id = excluded.source_id,
+                title = excluded.title,
+                body = excluded.body,
+                indexed_text = excluded.indexed_text,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
+                metadata = excluded.metadata,
+                uri = excluded.uri,
+                keywords = excluded.keywords,
+                status = excluded.status
+            """,
+            [self._record_values(record) for record in rows],
+        )
+
+        if self._fts5_available:
+            new_rows: list[sqlite3.Row] = []
+            for key_chunk in self._key_chunks(keys):
+                placeholders = ",".join("?" for _ in key_chunk)
+                new_rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT rowid, title, body, indexed_text, uri, keywords
+                        FROM local_records
+                        WHERE storage_key IN ({placeholders})
+                        """,
+                        key_chunk,
+                    ).fetchall()
+                )
+            conn.executemany(
+                f"""
+                INSERT INTO {_LOCAL_FTS_TABLE}
+                    (rowid, title, body, uri, keywords)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row["rowid"],
+                        row["title"],
+                        row["indexed_text"] or row["body"],
+                        row["uri"],
+                        row["keywords"],
+                    )
+                    for row in new_rows
+                ],
+            )
 
     def _upsert_records(self, records: Iterable[Record]) -> None:
         rows = list(records)
@@ -1332,44 +1385,64 @@ class LocalRecordBackend:
                 existing_records = 0
                 existing_vectors = 0
                 deleted_graph_edges = 0
-                for record_id in record_ids:
-                    record = self.hydrate_record(record_id)
-                    if record is None:
-                        continue
-                    existing_records += 1
+                existing_rows: list[sqlite3.Row] = []
+                for key_chunk in self._key_chunks(record_ids):
+                    placeholders = ",".join("?" for _ in key_chunk)
+                    existing_rows.extend(
+                        conn.execute(
+                            f"""
+                            SELECT storage_key, rowid, title, body, indexed_text, uri, keywords
+                            FROM local_records
+                            WHERE storage_key IN ({placeholders})
+                            """,
+                            key_chunk,
+                        ).fetchall()
+                    )
                     existing_vectors += int(
                         conn.execute(
-                            """
-                            SELECT EXISTS(
-                                SELECT 1 FROM local_vectors_v2
-                                WHERE storage_key = ?
-                            )
+                            f"""
+                            SELECT COUNT(*) FROM local_vectors_v2
+                            WHERE storage_key IN ({placeholders})
                             """,
-                            (record.storage_key,),
+                            key_chunk,
                         ).fetchone()[0]
                     )
-                    old_row = conn.execute(
-                        """
-                        SELECT rowid, title, body, indexed_text, uri, keywords
-                        FROM local_records
-                        WHERE storage_key = ?
+                existing_records = len(existing_rows)
+                if self._fts5_available:
+                    conn.executemany(
+                        f"""
+                        INSERT INTO {_LOCAL_FTS_TABLE}
+                            ({_LOCAL_FTS_TABLE}, rowid, title, body, uri, keywords)
+                        VALUES ('delete', ?, ?, ?, ?, ?)
                         """,
-                        (record.storage_key,),
-                    ).fetchone()
-                    if old_row is not None and self._fts5_available:
-                        self._delete_fts_row(conn, old_row)
-                    conn.execute(
-                        "DELETE FROM local_vectors_v2 WHERE storage_key = ?",
-                        (record.storage_key,),
+                        [
+                            (
+                                row["rowid"],
+                                row["title"],
+                                row["indexed_text"] or row["body"],
+                                row["uri"],
+                                row["keywords"],
+                            )
+                            for row in existing_rows
+                        ],
                     )
+                for key_chunk in self._key_chunks(record_ids):
+                    placeholders = ",".join("?" for _ in key_chunk)
                     deleted_graph_edges += conn.execute(
-                        "DELETE FROM local_graph_edges "
-                        "WHERE source_id = ? OR target_id = ?",
-                        (record.storage_key, record.storage_key),
+                        f"""
+                        DELETE FROM local_graph_edges
+                        WHERE source_id IN ({placeholders})
+                           OR target_id IN ({placeholders})
+                        """,
+                        (*key_chunk, *key_chunk),
                     ).rowcount
                     conn.execute(
-                        "DELETE FROM local_records WHERE storage_key = ?",
-                        (record.storage_key,),
+                        f"DELETE FROM local_vectors_v2 WHERE storage_key IN ({placeholders})",
+                        key_chunk,
+                    )
+                    conn.execute(
+                        f"DELETE FROM local_records WHERE storage_key IN ({placeholders})",
+                        key_chunk,
                     )
                 self._epoch_lane.bump(
                     conn,

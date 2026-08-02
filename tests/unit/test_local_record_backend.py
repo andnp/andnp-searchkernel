@@ -321,6 +321,54 @@ def test_keyword_update_delete_and_rebuild_consistency(tmp_path) -> None:
     assert backend.check_keyword_index()
 
 
+def test_batch_record_updates_and_deletes_keep_fts_visible(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    first = _record("note", "first", "old first", metadata={"tags": ["old-tag"]})
+    second = _record("note", "second", "old second")
+    third = _record("note", "third", "keep third")
+    backend.index([first, second, third])
+
+    first.body = "new first"
+    first.metadata = {"tags": ["new-tag"]}
+    second.body = "new second"
+    backend.index([first, second])
+
+    assert backend.search_keyword("old", 10) == []
+    assert {hit.source_id for hit in backend.search_keyword("new", 10)} == {
+        "first",
+        "second",
+    }
+    assert [hit.source_id for hit in backend.search_keyword("new-tag", 10)] == [
+        "first"
+    ]
+    assert backend.check_keyword_index()
+
+    backend.delete([first.storage_key, third.storage_key, "missing"])
+
+    assert [hit.source_id for hit in backend.search_keyword("new", 10)] == ["second"]
+    assert backend.search_keyword("keep", 10) == []
+    assert backend.check_keyword_index()
+
+
+def test_batch_delete_counts_all_vectors_and_invalidates_vector_epoch(tmp_path) -> None:
+    backend, _keyword, vector, _graph = _backend(tmp_path)
+    records = [
+        _record("note", "first", "first"),
+        _record("note", "second", "second"),
+    ]
+    for record in records:
+        record.embedding = [1.0, 0.0]
+    vector.upsert(records, "test", 2)
+    before = backend.epochs()
+
+    backend.delete([record.storage_key for record in records])
+
+    conn = backend.db_manager.get_connection()
+    assert conn.execute("SELECT COUNT(*) FROM local_vectors_v2").fetchone()[0] == 0
+    after = backend.epochs()
+    assert after["vector"] == before["vector"] + 1
+
+
 def test_keyword_ties_are_ordered_by_storage_key() -> None:
     backend = LocalRecordBackend()
     first = _record("note", "a", "same")
