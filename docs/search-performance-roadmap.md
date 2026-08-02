@@ -40,6 +40,12 @@ The composition root is `SearchKernel.build`; applications provide stores,
 providers, policies, and a hydrator instead of teaching the kernel about a
 source's native schema.
 
+Ingestion uses `SemanticRecordIngestor` for keyword and vector stages and
+`ResumableSemanticCoordinator` when source iteration and checkpoints are
+needed. The ingestor returns per-record outcomes. The coordinator persists a
+source checkpoint only after the complete batch succeeds, so the checkpoint
+never claims progress beyond a failed batch.
+
 ## 2. Contracts that every optimization must preserve
 
 ### 2.1 Identity
@@ -71,7 +77,22 @@ materialization where the backend supports it, and must preserve the same
 eligible identity set as the local reference implementation. Filter changes
 must include tests for collisions across workspaces and source kinds.
 
-### 2.3 Provenance and failures
+### 2.3 Ingestion consistency and partial failure
+
+The keyword and semantic stages may commit independently; ingestion is not a
+cross-store transaction and does not roll back a store that succeeded before a
+different stage failed. Strict mode stops at the first failed record or stage
+and the coordinator raises `IngestionError`. Lenient mode keeps successful
+records, reports failed records with stage errors, and continues processing
+source batches, but a failed batch blocks subsequent checkpoint advancement
+until the failed work is retried.
+
+This means a partial index is an expected serving state, not proof that every
+source record is searchable. Public readiness exposes `indexing`, `partial`,
+and `ready`; availability snapshots separately describe which lexical, graph,
+and semantic capabilities can serve queries.
+
+### 2.4 Provenance and search failures
 
 Record results retain `SearchResultProvenance`: contributing strategies,
 rank/raw-score details, score adjustments, and parent-expansion identity.
@@ -80,7 +101,7 @@ source IDs. Strict mode raises retrieval or hydration failures; lenient mode
 returns explicit degradation diagnostics. Batch, cache, and concurrent paths
 must not hide either kind of failure.
 
-### 2.4 Query safety and optional dependencies
+### 2.5 Query safety and optional dependencies
 
 Search is read-only. It must not mutate source lifecycle, checkpoints, access
 state, or supersession state. Core imports must remain usable without FAISS,
@@ -90,8 +111,10 @@ must fail at their own boundary with actionable diagnostics.
 ## 3. Legacy deletion boundary
 
 The old chunk-oriented query pipeline and legacy federated query execution are
-removed from the supported 0.5.0 architecture. Chunks may still be created
-as an ingestion artifact, but they are not the public query identity.
+removed from the supported 0.5.0 architecture. Chunks may still be created as
+an ingestion artifact, but they are not the public query identity. This is the
+removal boundary: compatibility types may remain only at migration seams, and
+they must not dispatch, own, or define a second query path.
 
 Compatibility types and adapters that accept tuple-shaped or flat legacy
 results may remain temporarily at migration seams. They are not a second
@@ -101,15 +124,16 @@ canonical `RecordHit` values and all callers consume complete identities.
 
 ## 4. Validation baseline and limits
 
-The safe default gate is the complete collected pytest suite with
-`--strict-markers -m "not slow and not real_embeddings"`. The local baseline
-on 2026-08-02 is:
+The CI quality gate runs Ruff, Pyrefly, import-linter, and the complete
+collected pytest suite with `--strict-markers -m "not slow and not
+real_embeddings"`. Pyrefly is the only type checker. The local baseline on
+2026-08-02 is:
 
 - Python 3.13.7 with the locked environment;
 - 1,199 passing tests;
 - 79% total line coverage;
 - `uv lock --check` passing;
-- Ruff, Pyrefly, and import-linter available as separate static gates.
+- the locked environment and the CI static checks passing.
 
 The CI coverage floor is intentionally 75%. It is a regression floor for the
 whole package, not a claim that every optional adapter or failure branch is
@@ -137,8 +161,7 @@ CI output and must not be reported as backend coverage.
 - Enforce strict marker handling and a 75% package coverage floor.
 - Check supported Python versions and installability of selected optional
   extras from the locked dependency graph.
-- Keep Pyrefly as the type checker and use `uv sync --locked`; do not add ty or
-  pyright back to the project.
+- Keep Pyrefly as the only type checker and use `uv sync --locked`.
 
 ### R1 — Complete identity migration
 

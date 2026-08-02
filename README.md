@@ -102,13 +102,14 @@ require any optional provider or backend.
 
 ## Validation limits
 
-The normal quality gate runs the complete collected suite while excluding
-`slow` and `real_embeddings` tests. It does not prove production relevance,
-latency, memory use, or parity across every backend. The pgvector tests need
-Docker or `SEARCHKERNEL_PG_DSN`; real-embedding tests need locally cached
-models and are not part of the default offline gate. Use the benchmark
-artifacts and [the performance roadmap](docs/search-performance-roadmap.md)
-for the measured scope and remaining limits.
+The CI quality gate runs Ruff, Pyrefly, import-linter, and the complete
+collected suite while excluding `slow` and `real_embeddings` tests. Pyrefly is
+the only type checker. This gate does not prove production relevance, latency,
+memory use, or parity across every backend. The pgvector tests need Docker or
+`SEARCHKERNEL_PG_DSN`; real-embedding tests need locally cached models and are
+not part of the default offline gate. Use the benchmark artifacts and [the
+performance roadmap](docs/search-performance-roadmap.md) for the measured
+scope and remaining limits.
 
 ## Releases
 
