@@ -742,6 +742,17 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
         conn_pool.put_connection(conn)
 
 
+def _sql_module_for(conn_pool: _PostgresConnectionLike):
+    """Return the SQL builder module matching the connection pool's driver.
+
+    For psycopg3 connections, returns psycopg.sql; otherwise returns psycopg2.sql.
+    This ensures all Composed objects created by PGVectorStore match the cursor's driver.
+    """
+    if isinstance(conn_pool, Psycopg3Connection):
+        return psycopg.sql
+    return sql
+
+
 class PGVectorStore:
     """Postgres + pgvector implementation of VectorStore port.
 
@@ -816,6 +827,7 @@ class PGVectorStore:
         ):
             raise ValueError("hnsw_scan_mem_multiplier must be finite and >= 1")
         self.conn_pool = conn_pool
+        self._sql = _sql_module_for(conn_pool)
         self.hnsw_ef_search = hnsw_ef_search
         self.hnsw_iterative_scan = hnsw_iterative_scan
         self.hnsw_max_scan_tuples = hnsw_max_scan_tuples
@@ -899,23 +911,23 @@ class PGVectorStore:
         table_name = _vector_table_name(model_name, dim)
 
         cursor.execute(
-            sql.SQL(
+            self._sql.SQL(
                 "CREATE TABLE IF NOT EXISTS {table} ("
                 "record_id TEXT PRIMARY KEY, "
                 "embedding vector({dim}) NOT NULL, "
                 "created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, "
                 "updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"
                 ");"
-            ).format(table=sql.Identifier(table_name), dim=sql.SQL(str(int(dim))))
+            ).format(table=self._sql.Identifier(table_name), dim=self._sql.SQL(str(int(dim))))
         )
 
         cursor.execute(
-            sql.SQL(
+            self._sql.SQL(
                 "CREATE INDEX IF NOT EXISTS {index_name} ON {table} "
                 "USING hnsw (embedding vector_cosine_ops);"
             ).format(
-                index_name=sql.Identifier(f"idx_{table_name}_hnsw"),
-                table=sql.Identifier(table_name),
+                index_name=self._sql.Identifier(f"idx_{table_name}_hnsw"),
+                table=self._sql.Identifier(table_name),
             )
         )
 
@@ -1006,12 +1018,12 @@ class PGVectorStore:
                 )
 
             # Upsert vectors into the per-model typed table
-            upsert_vec_sql = sql.SQL(
+            upsert_vec_sql = self._sql.SQL(
                 "INSERT INTO {table} (record_id, embedding) "
                 "VALUES (%s, %s::vector) "
                 "ON CONFLICT (record_id) DO UPDATE SET "
                 "embedding = EXCLUDED.embedding, updated_at = CURRENT_TIMESTAMP;"
-            ).format(table=sql.Identifier(table_name))
+            ).format(table=self._sql.Identifier(table_name))
 
             vector_rows = [
                 (record.storage_key, _vector_literal(record.embedding))
@@ -1019,13 +1031,22 @@ class PGVectorStore:
                 if record.embedding is not None
             ]
             if vector_rows:
-                psycopg2.extras.execute_values(
-                    cursor,
-                    upsert_vec_sql.as_string(cursor).replace(
-                        "VALUES (%s, %s::vector)", "VALUES %s"
-                    ),
-                    vector_rows,
-                )
+                if isinstance(self.conn_pool, Psycopg3Connection):
+                    insert_sql = (
+                        "INSERT INTO " + self._sql.Identifier(table_name).as_string(cursor)
+                        + " (record_id, embedding) VALUES (%s, %s::vector) "
+                        "ON CONFLICT (record_id) DO UPDATE SET "
+                        "embedding = EXCLUDED.embedding, updated_at = CURRENT_TIMESTAMP;"
+                    )
+                    cursor.executemany(insert_sql, vector_rows)
+                else:
+                    psycopg2.extras.execute_values(
+                        cursor,
+                        upsert_vec_sql.as_string(cursor).replace(
+                            "VALUES (%s, %s::vector)", "VALUES %s"
+                        ),
+                        vector_rows,
+                    )
 
             _POSTGRES_EPOCH_LANE.bump(
                 cursor, keyword=True, vector=bool(vector_rows)
@@ -1096,7 +1117,7 @@ class PGVectorStore:
 
             # Order by the raw distance operator (not a wrapped/aliased
             # expression) so the planner can use the HNSW index for ANN.
-            query_sql = sql.SQL(
+            query_sql = self._sql.SQL(
                 "SELECT r.workspace_id, r.source_kind, r.source_id, "
                 "v.embedding <=> %s::vector AS distance "
                 "FROM {table} v "
@@ -1104,7 +1125,7 @@ class PGVectorStore:
                 "WHERE 1 = 1 " + where_clause + " "
                 "ORDER BY v.embedding <=> %s::vector ASC, v.record_id ASC "
                 "LIMIT %s;"
-            ).format(table=sql.Identifier(table_name))
+            ).format(table=self._sql.Identifier(table_name))
 
             results: list[Any] = []
             scan_limits = bounded_scan_limits(
@@ -1171,8 +1192,8 @@ class PGVectorStore:
 
             for table_name in table_names:
                 cursor.execute(
-                    sql.SQL("DELETE FROM {table} WHERE record_id = ANY(%s);").format(
-                        table=sql.Identifier(table_name)
+                    self._sql.SQL("DELETE FROM {table} WHERE record_id = ANY(%s);").format(
+                        table=self._sql.Identifier(table_name)
                     ),
                     (storage_ids,),
                 )
@@ -1220,8 +1241,8 @@ class PGVectorStore:
             table_name = row[0]
 
             cursor.execute(
-                sql.SQL("DELETE FROM {table} WHERE record_id = ANY(%s);").format(
-                    table=sql.Identifier(table_name)
+                self._sql.SQL("DELETE FROM {table} WHERE record_id = ANY(%s);").format(
+                    table=self._sql.Identifier(table_name)
                 ),
                 (storage_ids,),
             )
@@ -1229,16 +1250,16 @@ class PGVectorStore:
             cursor.execute("SELECT table_name FROM vector_tables;")
             table_names = [table_row[0] for table_row in cursor.fetchall()]
             remaining_checks = [
-                sql.SQL(
+                self._sql.SQL(
                     "NOT EXISTS (SELECT 1 FROM {table} v "
                     "WHERE v.record_id = r.record_id)"
-                ).format(table=sql.Identifier(other_table))
+                ).format(table=self._sql.Identifier(other_table))
                 for other_table in table_names
             ]
             if remaining_checks:
-                remaining_clause = sql.SQL(" AND ").join(remaining_checks)
+                remaining_clause = self._sql.SQL(" AND ").join(remaining_checks)
                 cursor.execute(
-                    sql.SQL(
+                    self._sql.SQL(
                         "SELECT r.workspace_id, r.source_kind, r.source_id "
                         "FROM records r "
                         "WHERE r.record_id = ANY(%s) AND {}"
@@ -1253,7 +1274,7 @@ class PGVectorStore:
                     cursor, deleted_identities
                 )
                 cursor.execute(
-                    sql.SQL(
+                    self._sql.SQL(
                         "DELETE FROM records r WHERE r.record_id = ANY(%s) AND {}"
                     ).format(remaining_clause),
                     (storage_ids,),
