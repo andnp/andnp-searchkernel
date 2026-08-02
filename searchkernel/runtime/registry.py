@@ -29,13 +29,16 @@ class SourceRegistry:
     def select(self, source_kinds: list[str] | None = None) -> list[SearchableSource]:
         """Resolve a list of source_kinds to their registered sources.
 
-        Unknown source_kinds are silently skipped. If source_kinds is None,
-        every registered source is returned.
+        Raises:
+            KeyError: If any requested source_kind is not registered.
         """
         if source_kinds is None:
             return list(self._sources.values())
+        unknown = [kind for kind in source_kinds if kind not in self._sources]
+        if unknown:
+            raise KeyError(f"Unknown source kind(s): {unknown!r}")
         return [
-            self._sources[kind] for kind in source_kinds if kind in self._sources
+            self._sources[kind] for kind in source_kinds
         ]
 
     def all(self) -> list[SearchableSource]:

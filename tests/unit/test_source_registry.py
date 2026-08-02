@@ -60,14 +60,13 @@ def test_select_names_filters_to_requested_sources():
     assert selected == [memory]
 
 
-def test_select_skips_unknown_names():
+def test_select_rejects_unknown_names():
     registry = SourceRegistry()
     local = _StubSource("local")
     registry.register(local)
 
-    selected = registry.select(["local", "nonexistent"])
-
-    assert selected == [local]
+    with pytest.raises(KeyError, match="nonexistent"):
+        registry.select(["local", "nonexistent"])
 
 
 def test_register_rejects_duplicate_source_kind():
