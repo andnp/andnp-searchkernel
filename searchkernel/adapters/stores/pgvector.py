@@ -584,7 +584,7 @@ class Psycopg3Connection:
         try:
             cursor = conn.cursor()
             cursor.execute(sql, params)
-            result = cursor.fetchall()
+            result = cursor.fetchall() if cursor.description is not None else []
             cursor.close()
             conn.commit()
             return result
@@ -1312,11 +1312,11 @@ class PGVectorStore:
 class PGKeywordStore:
     """Postgres full-text search implementation of KeywordStore port."""
 
-    def __init__(self, conn_pool: PostgresConnection):
+    def __init__(self, conn_pool: _PostgresConnectionLike):
         """Initialize keyword store.
 
         Args:
-            conn_pool: PostgresConnection pool
+            conn_pool: PostgresConnection or Psycopg3Connection pool
         """
         self.conn_pool = conn_pool
 
@@ -1334,22 +1334,34 @@ class PGKeywordStore:
         try:
             cursor = conn.cursor()
 
-            psycopg2.extras.execute_values(
-                cursor,
-                """
-                UPDATE records AS r
-                SET tsvector_body = to_tsvector('english', data.search_text)
-                FROM (VALUES %s) AS data(record_id, search_text)
-                WHERE r.record_id = data.record_id;
-                """,
-                [
-                    (
-                        record.storage_key,
-                        f"{record.title} {record.indexed_text or record.body}",
-                    )
-                    for record in records
-                ],
-            )
+            rows = [
+                (
+                    record.storage_key,
+                    f"{record.title} {record.indexed_text or record.body}",
+                )
+                for record in records
+            ]
+
+            if isinstance(self.conn_pool, Psycopg3Connection):
+                cursor.executemany(
+                    """
+                    UPDATE records AS r
+                    SET tsvector_body = to_tsvector('english', %s)
+                    WHERE r.record_id = %s;
+                    """,
+                    [(text, record_id) for record_id, text in rows],
+                )
+            else:
+                psycopg2.extras.execute_values(
+                    cursor,
+                    """
+                    UPDATE records AS r
+                    SET tsvector_body = to_tsvector('english', data.search_text)
+                    FROM (VALUES %s) AS data(record_id, search_text)
+                    WHERE r.record_id = data.record_id;
+                    """,
+                    rows,
+                )
 
             _POSTGRES_EPOCH_LANE.bump(cursor, keyword=True)
             conn.commit()
