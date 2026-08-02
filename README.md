@@ -55,14 +55,36 @@ dependencies are supplied. Callers that already own one may pass
 core keeps source-specific fields in opaque metadata and uses injected policy
 objects for filtering and ranking.
 
+## Ingest canonical records
+
+`SemanticRecordIngestor` is the canonical keyword-and-vector ingestor. It
+returns an `IngestionReceipt` with one outcome per record and leaves checkpoint
+persistence to the caller. `ResumableSemanticCoordinator` adds bounded source
+iteration and persists a source checkpoint only after the batch completes
+successfully:
+
+- Strict ingestion stops at the first failed record or stage and the
+  coordinator raises `IngestionError`; it does not roll back work already
+  committed to another store.
+- Lenient ingestion retains successful records, reports failed records with
+  stage errors, and does not advance the checkpoint for a failed batch.
+- Once a batch fails, later source batches may still be processed in lenient
+  mode, but their checkpoints remain blocked until the failed work is retried.
+
+These are partial-failure guarantees, not a cross-store transaction. A source
+can therefore be queryable with a partial index; readiness snapshots expose
+`indexing`, `partial`, and `ready` states.
+
 ## Removed legacy paths
 
 The old chunk-oriented query pipeline and legacy federated query execution are
 removed from the supported 0.5.0 architecture. Chunks may still be produced
-during ingestion, and a few compatibility types remain at migration seams,
-but new integrations must use `Record`, `RecordIdentity`, `RecordHit`, the
-record store ports, and the canonical record pipeline. Do not build a second
-query pipeline around the compatibility surface.
+during ingestion, and migration-only compatibility types may remain at their
+explicit seams, but neither is a public query path. New integrations must use
+`Record`, `RecordIdentity`, `RecordHit`, the record store ports, and the
+canonical record pipeline. The remaining compatibility seams are scheduled
+for removal after all backends and callers consume canonical record results;
+they must not regain ownership of query execution.
 
 ## Optional backends
 
