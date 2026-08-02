@@ -123,14 +123,22 @@ def discover_files(
 
     all_files: set[str] = set()
 
-    included_dirs = walk_included_dirs(docs_path, exclude, exclude_hidden_dirs)
-    for dir_path in included_dirs:
-        try:
-            for entry in os.scandir(str(dir_path)):
-                if entry.is_file() and Path(entry.name).suffix.lower() in suffixes:
-                    all_files.add(entry.path)
-        except OSError:
-            pass
+    for dirpath, dirnames, filenames in os.walk(docs_path, topdown=True):
+        # Prune in-place so os.walk skips excluded subtrees.
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if not is_excluded_dir(
+                os.path.join(dirpath, d), exclude, exclude_hidden_dirs
+            )
+        ]
+        for filename in filenames:
+            file_path = Path(dirpath) / filename
+            try:
+                if file_path.is_file() and file_path.suffix.lower() in suffixes:
+                    all_files.add(os.fspath(file_path))
+            except OSError:
+                pass
 
     return [
         f

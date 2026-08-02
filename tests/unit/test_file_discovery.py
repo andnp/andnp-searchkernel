@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from searchkernel.indexing import discovery
 from searchkernel.indexing.discovery import discover_files
 
 
@@ -132,3 +133,56 @@ class TestDiscoverFiles:
 
         assert str(docs / "guide.md") in files
         assert str(hidden_child / "secret.md") not in files
+
+    def test_include_and_exclude_patterns_preserve_nested_results(self, tmp_path):
+        docs = tmp_path / "docs"
+        (docs / "api").mkdir(parents=True)
+        (docs / "api" / "guide.md").write_text("# API")
+        (docs / "api" / "guide.txt").write_text("API")
+        (docs / "api" / "guide.py").write_text("pass")
+        (docs / "drafts").mkdir()
+        (docs / "drafts" / "guide.md").write_text("# Draft")
+        (docs / "README.md").write_text("# README")
+
+        files = discover_files(
+            docs,
+            include_patterns=["**/*.md"],
+            exclude_patterns=["**/drafts/**"],
+        )
+
+        assert files == sorted(
+            [str(docs / "README.md"), str(docs / "api" / "guide.md")]
+        )
+
+    def test_traverses_filesystem_once(self, docs_structure, monkeypatch):
+        real_walk = discovery.os.walk
+        walk_calls = 0
+
+        def counting_walk(*args, **kwargs):
+            nonlocal walk_calls
+            walk_calls += 1
+            yield from real_walk(*args, **kwargs)
+
+        monkeypatch.setattr(discovery.os, "walk", counting_walk)
+
+        discover_files(docs_structure)
+
+        assert walk_calls == 1
+
+    def test_symlink_file_is_discovered_but_symlink_dir_is_not_followed(
+        self, tmp_path
+    ):
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        target = tmp_path / "target.md"
+        target.write_text("# Target")
+        docs.joinpath("linked.md").symlink_to(target)
+        linked_dir = tmp_path / "linked-dir"
+        linked_dir.mkdir()
+        (linked_dir / "nested.md").write_text("# Nested")
+        docs.joinpath("linked-dir").symlink_to(linked_dir, target_is_directory=True)
+
+        files = discover_files(docs)
+
+        assert str(docs / "linked.md") in files
+        assert str(docs / "linked-dir" / "nested.md") not in files
