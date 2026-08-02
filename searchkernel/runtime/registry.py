@@ -15,7 +15,11 @@ class SourceRegistry:
         self._sources: dict[str, SearchableSource] = {}
 
     def register(self, source: SearchableSource) -> None:
-        """Register a source, keyed by its source_kind (overwrites any prior)."""
+        """Register a source, rejecting duplicate source kinds."""
+        if source.source_kind in self._sources:
+            raise ValueError(
+                f"Source kind {source.source_kind!r} is already registered"
+            )
         self._sources[source.source_kind] = source
 
     def get(self, source_kind: str) -> SearchableSource | None:

@@ -3,6 +3,8 @@
 from collections.abc import Iterable
 from typing import Any
 
+import pytest
+
 from searchkernel.domain import ScoredRef
 from searchkernel.runtime.registry import SourceRegistry
 
@@ -68,15 +70,16 @@ def test_select_skips_unknown_names():
     assert selected == [local]
 
 
-def test_register_overwrites_existing_source_kind():
+def test_register_rejects_duplicate_source_kind():
     registry = SourceRegistry()
     first = _StubSource("local")
     second = _StubSource("local")
     registry.register(first)
 
-    registry.register(second)
+    with pytest.raises(ValueError, match="'local'.*already registered"):
+        registry.register(second)
 
-    assert registry.get("local") is second
+    assert registry.get("local") is first
 
 
 def test_all_returns_every_registered_source():
