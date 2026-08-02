@@ -13,6 +13,7 @@ backend providers remain in their adapter modules.
 
 from typing import TYPE_CHECKING, Any
 
+from searchkernel.adapters.embedding.huggingface import HuggingFaceEmbeddingProvider
 from searchkernel.adapters.embedding.ollama import OllamaEmbeddingProvider
 from searchkernel.compression import truncate_delta
 from searchkernel.domain import (
@@ -339,6 +340,7 @@ __all__ = [
     "GraphNeighbor",
     "GraphStore",
     "HeaderBasedChunker",
+    "HuggingFaceEmbeddingProvider",
     "IndexAvailability",
     "IndexManagerPort",
     "IndexManifest",

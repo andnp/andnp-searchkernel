@@ -50,9 +50,19 @@ def test_embedding_batch_size_is_used_for_documents_and_queries() -> None:
     ]
 
 
-def test_embedding_batch_size_must_be_positive() -> None:
+def test_embedding_batch_size_defaults_to_32() -> None:
+    with patch("sentence_transformers.SentenceTransformer", _FakeModel):
+        provider = HuggingFaceEmbeddingProvider()
+
+    provider.embed(["document"])
+
+    assert provider._model.calls[0]["batch_size"] == 32
+
+
+@pytest.mark.parametrize("batch_size", [0, -1])
+def test_embedding_batch_size_must_be_positive(batch_size: int) -> None:
     with pytest.raises(ValueError, match="batch_size"):
-        HuggingFaceEmbeddingProvider(batch_size=0)
+        HuggingFaceEmbeddingProvider(batch_size=batch_size)
 
 
 def test_embedding_model_dimension_is_required() -> None:

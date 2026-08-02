@@ -4,6 +4,7 @@ import sys
 import pytest
 
 from searchkernel import api, ports
+from searchkernel.adapters.embedding import HuggingFaceEmbeddingProvider
 from searchkernel.domain import models
 from searchkernel.indexing import semantic
 from searchkernel.indexing.runtime_readiness import SearchAvailability
@@ -26,6 +27,7 @@ API_EXPORTS = {
     "ContentSource": content_source.ContentSource,
     "DatabaseManager": db.DatabaseManager,
     "EmbeddingProvider": embedding.EmbeddingProvider,
+    "HuggingFaceEmbeddingProvider": HuggingFaceEmbeddingProvider,
     "QueryPlan": query_plan.QueryPlan,
     "Record": models.Record,
     "RecordHit": models.RecordHit,
