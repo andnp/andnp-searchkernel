@@ -16,7 +16,7 @@ import threading
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 import numpy as np
 
@@ -67,6 +67,57 @@ class _Database(Protocol):
     def get_connection(self) -> sqlite3.Connection: ...
 
 
+class _LocalEpochLane:
+    """Own epoch keys and mutations shared by the local storage lanes."""
+
+    _RECORD_KEY = "local_record_epoch"
+    _LANE_KEYS: ClassVar[dict[str, str]] = {
+        "keyword": "local_keyword_epoch",
+        "vector": "local_vector_epoch",
+        "graph": "local_graph_epoch",
+    }
+
+    @classmethod
+    def bump(
+        cls,
+        conn: sqlite3.Connection,
+        *,
+        keyword: bool = False,
+        vector: bool = False,
+        graph: bool = False,
+    ) -> None:
+        lanes = {
+            cls._RECORD_KEY: True,
+            cls._LANE_KEYS["keyword"]: keyword,
+            cls._LANE_KEYS["vector"]: vector,
+            cls._LANE_KEYS["graph"]: graph,
+        }
+        for key, enabled in lanes.items():
+            if not enabled:
+                continue
+            conn.execute(
+                """
+                INSERT INTO system_state (key, value) VALUES (?, '1')
+                ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
+                """,
+                (key,),
+            )
+
+    @classmethod
+    def read(cls, conn: sqlite3.Connection, key: str) -> int:
+        row = conn.execute(
+            "SELECT value FROM system_state WHERE key = ?",
+            (key,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    @classmethod
+    def read_lanes(cls, conn: sqlite3.Connection) -> dict[str, int]:
+        return {
+            lane: cls.read(conn, key) for lane, key in cls._LANE_KEYS.items()
+        }
+
+
 class LocalRecordBackend:
     """Shared durable state for the local vector, keyword, and graph stores."""
 
@@ -101,6 +152,7 @@ class LocalRecordBackend:
         self._lock = threading.RLock()
         self._snapshot_lock = threading.RLock()
         self._vector_snapshots: dict[tuple[str, int], VectorSnapshot] = {}
+        self._epoch_lane = _LocalEpochLane()
         self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
         self._vector_engine = vector_engine
         self._faiss_threshold = faiss_threshold
@@ -521,31 +573,6 @@ class LocalRecordBackend:
             self._keyword_search_diagnostic = "FTS5 indexed lexical search is active"
 
     @staticmethod
-    def _bump_epoch(
-        conn: sqlite3.Connection,
-        *,
-        keyword: bool = False,
-        vector: bool = False,
-        graph: bool = False,
-    ) -> None:
-        lanes = {
-            "local_record_epoch": True,
-            "local_keyword_epoch": keyword,
-            "local_vector_epoch": vector,
-            "local_graph_epoch": graph,
-        }
-        for key, enabled in lanes.items():
-            if not enabled:
-                continue
-            conn.execute(
-                """
-                INSERT INTO system_state (key, value) VALUES (?, '1')
-                ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
-                """,
-                (key,),
-            )
-
-    @staticmethod
     def _record_values(record: Record) -> tuple[Any, ...]:
         return (
             record.storage_key,
@@ -661,7 +688,7 @@ class LocalRecordBackend:
             conn = self._db.get_connection()
             try:
                 self._write_records(conn, rows)
-                self._bump_epoch(conn, keyword=True)
+                self._epoch_lane.bump(conn, keyword=True)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -735,7 +762,7 @@ class LocalRecordBackend:
                         for storage_key, embedding in packed_vectors
                     ],
                 )
-                self._bump_epoch(
+                self._epoch_lane.bump(
                     conn,
                     keyword=True,
                     vector=bool(packed_vectors),
@@ -1103,7 +1130,9 @@ class LocalRecordBackend:
         with self._snapshot_lock:
             with self._lock:
                 conn = self._db.get_connection()
-                current_epoch = self._epoch_locked(conn)
+                current_epoch = self._epoch_lane.read(
+                    conn, _LocalEpochLane._RECORD_KEY
+                )
                 cached = self._vector_snapshots.get(key)
                 if cached is not None and cached.epoch == current_epoch:
                     return cached
@@ -1119,7 +1148,9 @@ class LocalRecordBackend:
                     """,
                     (model_name, dim),
                 ).fetchall()
-                snapshot_epoch = self._epoch_locked(conn)
+                snapshot_epoch = self._epoch_lane.read(
+                    conn, _LocalEpochLane._RECORD_KEY
+                )
             snapshot = VectorSnapshot.from_rows(
                 rows,
                 encoder_namespace=model_name,
@@ -1306,7 +1337,7 @@ class LocalRecordBackend:
                         "DELETE FROM local_records WHERE storage_key = ?",
                         (record.storage_key,),
                     )
-                self._bump_epoch(
+                self._epoch_lane.bump(
                     conn,
                     keyword=existing_records > 0,
                     vector=existing_vectors > 0,
@@ -1457,45 +1488,26 @@ class LocalRecordBackend:
     def epoch(self) -> int:
         with self._lock:
             conn = self._db.get_connection()
-            return self._epoch_locked(conn)
+            return self._epoch_lane.read(conn, _LocalEpochLane._RECORD_KEY)
 
     def keyword_epoch(self) -> int:
-        return self._lane_epoch("local_keyword_epoch")
+        return self._lane_epoch(_LocalEpochLane._LANE_KEYS["keyword"])
 
     def vector_epoch(self) -> int:
-        return self._lane_epoch("local_vector_epoch")
+        return self._lane_epoch(_LocalEpochLane._LANE_KEYS["vector"])
 
     def graph_epoch(self) -> int:
-        return self._lane_epoch("local_graph_epoch")
+        return self._lane_epoch(_LocalEpochLane._LANE_KEYS["graph"])
 
     def epochs(self) -> dict[str, int]:
         with self._lock:
             conn = self._db.get_connection()
-            return {
-                "keyword": self._lane_epoch_locked(conn, "local_keyword_epoch"),
-                "vector": self._lane_epoch_locked(conn, "local_vector_epoch"),
-                "graph": self._lane_epoch_locked(conn, "local_graph_epoch"),
-            }
-
-    @staticmethod
-    def _epoch_locked(conn: sqlite3.Connection) -> int:
-        row = conn.execute(
-            "SELECT value FROM system_state WHERE key = 'local_record_epoch'"
-        ).fetchone()
-        return int(row[0]) if row else 0
+            return self._epoch_lane.read_lanes(conn)
 
     def _lane_epoch(self, key: str) -> int:
         with self._lock:
             conn = self._db.get_connection()
-            return self._lane_epoch_locked(conn, key)
-
-    @staticmethod
-    def _lane_epoch_locked(conn: sqlite3.Connection, key: str) -> int:
-        row = conn.execute(
-            "SELECT value FROM system_state WHERE key = ?",
-            (key,),
-        ).fetchone()
-        return int(row[0]) if row else 0
+            return self._epoch_lane.read(conn, key)
 
     def upsert_edges(
         self,
@@ -1558,7 +1570,7 @@ class LocalRecordBackend:
                     rows,
                 )
                 if conn.total_changes > changes_before:
-                    self._bump_epoch(conn, graph=True)
+                    self._epoch_lane.bump(conn, graph=True)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -1603,7 +1615,7 @@ class LocalRecordBackend:
                     rows,
                 )
                 if conn.total_changes > changes_before:
-                    self._bump_epoch(conn, graph=True)
+                    self._epoch_lane.bump(conn, graph=True)
                 conn.commit()
             except Exception:
                 conn.rollback()
