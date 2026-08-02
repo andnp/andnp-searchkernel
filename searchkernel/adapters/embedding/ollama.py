@@ -11,7 +11,7 @@ This is an ADDITIVE port implementation; no other adapters are modified.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from searchkernel.domain import Vector
 
@@ -39,7 +39,21 @@ class OllamaEmbeddingProvider:
         self.model_name = model_name
         self._base_url = base_url.rstrip("/")
         self._client: httpx.Client = httpx.Client(timeout=timeout)
-        self.dim = dim if dim is not None else self._resolve_dim()
+        try:
+            self.dim = dim if dim is not None else self._resolve_dim()
+        except Exception:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        """Close the persistent HTTP client."""
+        self._client.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()
 
     def _resolve_dim(self) -> int:
         """Fetch the model's embedding dimension via /api/show.

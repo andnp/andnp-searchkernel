@@ -96,3 +96,22 @@ def test_embed_rejects_wrong_dimension():
         mock_post.return_value = _mock_response({"embeddings": [[0.1]]})
         with pytest.raises(RuntimeError, match="dimension 2"):
             provider.embed(["x"])
+
+
+def test_context_manager_closes_http_client():
+    with mock.patch("httpx.Client") as client_type:
+        provider = OllamaEmbeddingProvider("qwen3-embedding:0.6b", dim=2)
+        with provider as active_provider:
+            assert active_provider is provider
+
+        client_type.return_value.close.assert_called_once()
+
+
+def test_dimension_probe_failure_closes_http_client():
+    with mock.patch("httpx.Client") as client_type:
+        client_type.return_value.post.side_effect = RuntimeError("probe failed")
+
+        with pytest.raises(RuntimeError, match="probe failed"):
+            OllamaEmbeddingProvider("qwen3-embedding:0.6b")
+
+        client_type.return_value.close.assert_called_once()
