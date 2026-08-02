@@ -201,4 +201,10 @@ def record_matches_vector_filters(
         if str(document_id) in excluded or source_id in excluded:
             return False
 
+    metadata_equals = filters.get("metadata_equals")
+    if metadata_equals is not None:
+        for field, value in metadata_equals.items():
+            if value is not None and str(metadata.get(field)) != str(value):
+                return False
+
     return True

@@ -33,6 +33,7 @@ from searchkernel.domain import (
     Vector,
 )
 from searchkernel.domain.vector_filters import (
+    candidate_storage_keys,
     metadata_mapping,
     record_matches_vector_filters,
 )
@@ -726,6 +727,8 @@ class LocalRecordBackend:
         source_kinds = filters.get("source_kinds")
         if source_kinds is None and filters.get("source_kind") is not None:
             source_kinds = [filters["source_kind"]]
+        if source_kinds is None and filters.get("source_filter") is not None:
+            source_kinds = filters["source_filter"]
         if source_kinds is not None:
             source_kinds = LocalRecordBackend._filter_values(source_kinds)
             if not source_kinds:
@@ -739,7 +742,7 @@ class LocalRecordBackend:
         if candidate_keys is None:
             candidate_keys = filters.get("candidate_storage_keys")
         if candidate_keys is not None:
-            candidate_keys = LocalRecordBackend._filter_values(candidate_keys)
+            candidate_keys = sorted(candidate_storage_keys(candidate_keys))
             if not candidate_keys:
                 return ["0"], []
             clauses.append("r.storage_key IN ({})".format(
@@ -775,11 +778,13 @@ class LocalRecordBackend:
                     r.workspace_id,
                     r.source_kind,
                     r.source_id,
+                    r.status,
                     r.title,
                     r.body,
                     r.indexed_text,
                     r.uri,
                     r.keywords,
+                    r.metadata,
                     -bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0) AS score
                 FROM {_LOCAL_FTS_TABLE}
                 JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
@@ -787,10 +792,12 @@ class LocalRecordBackend:
                 ORDER BY score DESC, r.storage_key ASC
                 LIMIT ?
                 """,
-                (*parameters, limit),
+                (*parameters, limit if not filters else -1),
             ).fetchall()
         hits: list[RecordHit] = []
         for row in rows:
+            if filters and not self._matches(row, filters):
+                continue
             score = float(row["score"])
             if needs_artifact_rerank:
                 normalized_query = _keyword_scoring.normalize_artifact_value(query)
@@ -836,8 +843,9 @@ class LocalRecordBackend:
             conn = self._db.get_connection()
             rows = conn.execute(
                 f"""
-                SELECT storage_key, workspace_id, source_kind, source_id, title, body,
-                       indexed_text
+                SELECT storage_key, workspace_id, source_kind, source_id, status,
+                       title, body,
+                       indexed_text, uri, metadata
                 FROM local_records r
                 WHERE {" AND ".join(clause.replace("r.", "") for clause in clauses)}
                 LIMIT ?
@@ -852,6 +860,8 @@ class LocalRecordBackend:
             return []
         hits: list[RecordHit] = []
         for row in rows:
+            if filters and not self._matches(row, filters):
+                continue
             indexed_text = row["indexed_text"] or row["body"]
             haystack = f"{row['title']} {indexed_text}".lower()
             score = sum(haystack.count(term) for term in terms)

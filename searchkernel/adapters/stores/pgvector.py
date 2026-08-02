@@ -1395,35 +1395,20 @@ class PGKeywordStore:
         try:
             cursor = conn.cursor()
 
-            # Active records are the default search surface.
-            where_parts: list[str] = []
-            filter_params: list[Any] = []
-            status_values = ["active"]
-            if filters and "source_kinds" in filters:
-                source_kinds = filters["source_kinds"]
-                if not source_kinds:
-                    return []
-                placeholders = ",".join(["%s"] * len(source_kinds))
-                where_parts.append(f"source_kind IN ({placeholders})")
-                filter_params.extend(source_kinds)
-            if filters and "statuses" in filters:
-                status_values = list(filters["statuses"])
-            if filters and filters.get("include_inactive"):
-                status_values = ["active", "stale", "archived"]
-            where_parts.append("status = ANY(%s)")
-            filter_params.append(status_values)
-            if filters and filters.get("workspace_id") is not None:
-                where_parts.append("workspace_id = %s")
-                filter_params.append(filters["workspace_id"])
+            where_parts, filter_params = build_pgvector_filter_sql(
+                filters, record_alias="r"
+            )
             where_clause = "AND " + " AND ".join(where_parts)
 
             sql = f"""
-                SELECT workspace_id, source_kind, source_id,
-                       ts_rank(tsvector_body, plainto_tsquery('english', %s)) as relevance
-                FROM records
-                WHERE tsvector_body @@ plainto_tsquery('english', %s)
+                SELECT r.workspace_id, r.source_kind, r.source_id,
+                       ts_rank(r.tsvector_body,
+                               plainto_tsquery('english', %s)) AS relevance,
+                       r.record_id
+                FROM records AS r
+                WHERE r.tsvector_body @@ plainto_tsquery('english', %s)
                 {where_clause}
-                ORDER BY relevance DESC
+                ORDER BY relevance DESC, r.record_id ASC
                 LIMIT %s;
             """
             params = [query, query, *filter_params, k]

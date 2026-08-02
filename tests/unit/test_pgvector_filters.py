@@ -101,3 +101,28 @@ def test_pgvector_filter_sql_metadata_equals_ignores_none_values() -> None:
     assert "metadata->>'issue_type' = %s" in sql_text
     assert "metadata->>'component'" not in sql_text
     assert "Bug" in parameters
+
+
+def test_pgvector_keyword_filter_sql_supports_keyword_filter_aliases() -> None:
+    clauses, parameters = build_pgvector_filter_sql(
+        {
+            "source_filter": ["note"],
+            "project_filter": ["keep"],
+            "paths": ["docs/guide.md"],
+            "document_id": "doc-1",
+            "excluded_projects": ["drop"],
+            "excluded_paths": ["ignored.md"],
+            "excluded_documents": ["blocked"],
+            "metadata_equals": {"kind": "guide"},
+        }
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert "r.source_kind = ANY(%s)" in sql_text
+    assert "metadata->>'project_id' = ANY(%s)" in sql_text
+    assert "metadata->>'file_path'" in sql_text
+    assert "metadata->>'doc_id'" in sql_text
+    assert "metadata->>'kind' = %s" in sql_text
+    assert ["note"] in parameters
+    assert ["keep"] in parameters
+    assert ["doc-1"] in parameters

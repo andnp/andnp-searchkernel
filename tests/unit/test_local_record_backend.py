@@ -242,6 +242,57 @@ def test_keyword_search_applies_all_sql_filters(tmp_path) -> None:
     )] == ["three"]
 
 
+def test_keyword_search_applies_metadata_and_exclusion_filters(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    kept = _record(
+        "note",
+        "kept",
+        "common kept",
+        workspace_id="workspace",
+        uri="projects/keep/guide.md",
+        metadata={"project_id": "keep", "doc_id": "doc-kept", "kind": "guide"},
+    )
+    wrong_project = _record(
+        "note",
+        "wrong-project",
+        "common wrong project",
+        workspace_id="workspace",
+        uri="projects/drop/guide.md",
+        metadata={"project_id": "drop", "doc_id": "doc-drop", "kind": "guide"},
+    )
+    excluded = _record(
+        "note",
+        "excluded",
+        "common excluded",
+        workspace_id="workspace",
+        uri="projects/keep/ignored.md",
+        metadata={"project_id": "keep", "doc_id": "doc-excluded", "kind": "guide"},
+    )
+    backend.index([kept, wrong_project, excluded])
+
+    filters = {
+        "source_filter": ["note"],
+        "project_filter": ["keep"],
+        "paths": ["projects/keep/guide.md"],
+        "document_id": "doc-kept",
+        "metadata_equals": {"kind": "guide"},
+        "excluded_files": ["ignored.md"],
+        "excluded_projects": ["drop"],
+    }
+
+    assert [hit.storage_key for hit in backend.search_keyword("common", 10, filters)] == [
+        kept.storage_key
+    ]
+
+
+def test_keyword_search_rejects_bare_candidate_ids(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    record = _record("note", "same", "common")
+    backend.index([record])
+
+    assert backend.search_keyword("common", 10, {"candidate_ids": ["same"]}) == []
+
+
 def test_keyword_update_delete_and_rebuild_consistency(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     record = _record("note", "one", "before")
