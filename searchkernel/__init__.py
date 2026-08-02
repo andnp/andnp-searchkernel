@@ -61,6 +61,7 @@ from searchkernel.search.record_pipeline import (
     RecordSearchOutcome,
     RecordSearchPipeline,
     RecordSearchPolicy,
+    RecordSearchQueryContext,
     RecordSearchResult,
 )
 from searchkernel.search.utils import classify_query_type, truncate_content
@@ -99,6 +100,7 @@ __all__ = [
     "RecordSearchOutcome",
     "RecordSearchPipeline",
     "RecordSearchPolicy",
+    "RecordSearchQueryContext",
     "RecordSearchResult",
     "ResumableSemanticCoordinator",
     "RollbackMetadata",

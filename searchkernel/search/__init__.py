@@ -16,7 +16,10 @@ from searchkernel.search.query_plan import (
     QueryRouterConfig,
     route_query,
 )
-from searchkernel.search.record_pipeline import RecordSearchPipeline
+from searchkernel.search.record_pipeline import (
+    RecordSearchPipeline,
+    RecordSearchQueryContext,
+)
 
 __all__ = [
     "DiversityDiagnostic",
@@ -25,6 +28,7 @@ __all__ = [
     "QueryRouter",
     "QueryRouterConfig",
     "RecordSearchPipeline",
+    "RecordSearchQueryContext",
     "SearchOrchestrator",
     "SourceDiversityPolicy",
     "apply_source_diversity",

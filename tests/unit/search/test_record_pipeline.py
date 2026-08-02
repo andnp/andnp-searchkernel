@@ -20,6 +20,7 @@ from searchkernel.search.record_pipeline import (
     RecordSearchOutcome,
     RecordSearchPipeline,
     RecordSearchPolicy,
+    RecordSearchQueryContext,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -195,6 +196,61 @@ async def test_policy_can_bound_vector_acquisition_to_keyword_candidates() -> No
             "candidate_ids": ["b", "a"],
         }
     ]
+
+
+async def test_vector_policy_receives_typed_query_context() -> None:
+    records = {record_id: _record(record_id) for record_id in ("a", "b")}
+    vector_store = FakeVectorStore([("a", 0.9), ("b", 0.8)])
+    contexts: list[RecordSearchQueryContext] = []
+
+    def select_candidates(
+        ranking: Sequence[tuple[str, float]],
+        context: RecordSearchQueryContext,
+    ) -> list[str]:
+        contexts.append(context)
+        assert context.query == "query"
+        assert context.limit == 2
+        assert context["workspace_id"] == "workspace-1"
+        assert context["statuses"] == ["active"]
+        return [record_id for record_id, _ in ranking]
+
+    def order_candidates(
+        ranking: Sequence[tuple[str, float]],
+        context: RecordSearchQueryContext,
+    ) -> Sequence[tuple[str, float]]:
+        contexts.append(context)
+        assert dict(context) == dict(context.filters)
+        return list(reversed(ranking))
+
+    pipeline = RecordSearchPipeline(
+        vector_store=vector_store,
+        embedding_provider=FakeEmbedder(),
+        hydrator=_hydrator(records),
+        policy=RecordSearchPolicy(
+            vector_candidate_ids=select_candidates,
+            vector_ranking_order=order_candidates,
+        ),
+    )
+
+    outcome = await pipeline.async_search(
+        "query", limit=2, filters={"workspace_id": "workspace-1"}
+    )
+
+    assert [result.record_id for result in outcome.results] == ["b", "a"]
+    assert len(contexts) == 2
+    assert contexts[0] is contexts[1]
+
+
+async def test_missing_epoch_bypasses_candidate_cache() -> None:
+    records = {"a": _record("a")}
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        hydrator=_hydrator(records),
+    )
+
+    outcome = await pipeline.async_search("query")
+
+    assert "candidate_cache:bypass:UnstableCacheKey" in outcome.cache_diagnostics
 
 
 async def test_policy_can_order_vector_candidates_before_fusion() -> None:

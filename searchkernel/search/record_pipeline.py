@@ -6,9 +6,10 @@ import asyncio
 import inspect
 import logging
 import math
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
+from types import MappingProxyType
 from typing import Any, Literal, Protocol, cast
 
 from searchkernel.domain import (
@@ -29,6 +30,7 @@ from searchkernel.ports import (
     GraphStore,
     KeywordStore,
     ParentRecordExpander,
+    SearchEpochProvider,
     VectorStore,
 )
 from searchkernel.ports.rerank import Reranker
@@ -95,20 +97,43 @@ class QueryEmbeddingProvider(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class RecordSearchQueryContext(Mapping[str, object]):
+    """Read-only query state supplied to query-aware policy callbacks."""
+
+    query: str
+    filters: Mapping[str, object]
+    limit: int
+
+    def __post_init__(self) -> None:
+        if self.limit < 1:
+            raise ValueError("limit must be positive")
+        object.__setattr__(self, "filters", MappingProxyType(dict(self.filters)))
+
+    def __getitem__(self, key: str) -> object:
+        return self.filters[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.filters)
+
+    def __len__(self) -> int:
+        return len(self.filters)
+
+
+@dataclass(frozen=True, slots=True)
 class RecordSearchPolicy:
     """Optional application-owned filtering, ranking, and post-processing."""
 
     candidate_filter: Callable[[RecordSearchCandidate], bool] | None = None
     vector_candidate_ids: (
         Callable[
-            [Sequence[tuple[str, float]], dict[str, object]],
+            [Sequence[tuple[str, float]], RecordSearchQueryContext],
             Sequence[str] | None,
         ]
         | None
     ) = None
     vector_ranking_order: (
         Callable[
-            [Sequence[tuple[str, float]], dict[str, object]],
+            [Sequence[tuple[str, float]], RecordSearchQueryContext],
             Sequence[tuple[str, float]],
         ]
         | None
@@ -377,6 +402,11 @@ class RecordSearchPipeline:
         )
         filters = dict(filters or {})
         filters.setdefault("statuses", ["active"])
+        query_context = RecordSearchQueryContext(
+            query=query,
+            filters=filters,
+            limit=limit,
+        )
         plan = self._router.route(
             query,
             limit=limit,
@@ -496,6 +526,7 @@ class RecordSearchPipeline:
                             plan.vector_candidate_budget,
                             filters,
                             rankings,
+                            context=query_context,
                             plan=plan,
                         ),
                     )
@@ -523,6 +554,7 @@ class RecordSearchPipeline:
                                     plan.vector_candidate_budget,
                                     filters,
                                     rankings,
+                                    context=query_context,
                                     query=query,
                                     plan=plan,
                                 ),
@@ -955,6 +987,7 @@ class RecordSearchPipeline:
         filters: dict[str, object],
         rankings: Mapping[str, Sequence[RecordHit]],
         *,
+        context: RecordSearchQueryContext,
         query: str | None = None,
         plan: QueryPlan | None = None,
     ) -> list[RecordHit]:
@@ -970,7 +1003,7 @@ class RecordSearchPipeline:
                     (hit.source_id, hit.score)
                     for hit in rankings.get("keyword", ())
                 ],
-                filters,
+                context,
             )
             if candidate_ids is not None:
                 vector_filters = dict(filters)
@@ -1001,7 +1034,7 @@ class RecordSearchPipeline:
             vector_ranking = _normalize_hits(
                 self._policy.vector_ranking_order(
                     [(hit.source_id, hit.score) for hit in vector_ranking],
-                    filters,
+                    context,
                 ),
                 filters,
                 sort=False,
@@ -1571,23 +1604,29 @@ async def _resolve_parent_identity(
 def _read_lane_epoch(store: object | None, lane: str) -> int | None:
     if store is None:
         return None
-    epochs = getattr(store, "epochs", None)
-    if callable(epochs):
+    if isinstance(store, SearchEpochProvider):
         try:
-            values = epochs()
+            values = store.epochs()
         except Exception:  # noqa: BLE001 - cache key reads must be best effort
-            values = None
+            return None
+        if isinstance(values, SearchEpochs):
+            try:
+                return values.for_lane(lane)
+            except ValueError:
+                return None
         if isinstance(values, Mapping):
-            value = values.get(lane)
-            if isinstance(value, int):
-                return value
+            try:
+                return SearchEpochs.from_mapping(values).for_lane(lane)
+            except (TypeError, ValueError):
+                return None
+        return None
     lane_epoch = getattr(store, f"{lane}_epoch", None)
     if callable(lane_epoch):
         try:
             value = lane_epoch()
         except Exception:  # noqa: BLE001 - cache key reads must be best effort
             value = None
-        if isinstance(value, int):
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             return value
     if lane == "vector":
         epoch = getattr(store, "epoch", None)
@@ -1596,9 +1635,9 @@ def _read_lane_epoch(store: object | None, lane: str) -> int | None:
                 value = epoch()
             except Exception:  # noqa: BLE001 - cache key reads must be best effort
                 value = None
-            if isinstance(value, int):
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 return value
-    return 0
+    return None
 
 
 def _graph_hit(record_id: str, expansion: Any, seed_by_key: Mapping[str, RecordSearchCandidate]) -> RecordHit:

@@ -29,6 +29,7 @@ from searchkernel.ports.embedding import (
     EmbeddingProvider,
     EmbeddingSink,
 )
+from searchkernel.ports.epochs import SearchEpochProvider, SearchEpochs
 from searchkernel.ports.index_manager import IndexManagerPort
 from searchkernel.ports.live_indices import (
     GraphIndexPort,
@@ -110,6 +111,8 @@ __all__ = [
     "RetrievalFieldExtractor",
     "RetrievalFields",
     "SearchAPI",
+    "SearchEpochProvider",
+    "SearchEpochs",
     "SearchableSource",
     "SourceBatch",
     "SourceCapabilities",

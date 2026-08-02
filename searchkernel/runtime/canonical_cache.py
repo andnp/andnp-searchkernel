@@ -15,6 +15,7 @@ from enum import Enum
 from typing import TypeVar
 
 from searchkernel.domain import RecordIdentity
+from searchkernel.ports.epochs import SearchEpochs
 
 
 class UnstableCacheKey(ValueError):
@@ -39,15 +40,6 @@ def stable_json(value: object) -> str:
 def fingerprint(value: object) -> str:
     """Return a compact fingerprint for a stable configuration value."""
     return hashlib.sha256(stable_json(value).encode("utf-8")).hexdigest()
-
-
-@dataclass(frozen=True, slots=True)
-class SearchEpochs:
-    """Independent mutation epochs for search lanes."""
-
-    keyword: int = 0
-    vector: int = 0
-    graph: int = 0
 
 
 @dataclass(frozen=True, slots=True)

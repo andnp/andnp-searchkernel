@@ -1,5 +1,6 @@
 """Runtime support for the search kernel: tracing, caching, etc."""
 
+from searchkernel.ports.epochs import SearchEpochProvider
 from searchkernel.runtime.canonical_cache import (
     BoundedCacheMetrics,
     CandidateCacheKey,
@@ -29,6 +30,7 @@ __all__ = [
     "HydrationCacheKey",
     "QueryEmbeddingCache",
     "QueryEmbeddingCacheMetrics",
+    "SearchEpochProvider",
     "SearchEpochs",
     "UnstableCacheKey",
     "clear_query_embedding_cache",
