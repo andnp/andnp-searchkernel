@@ -75,14 +75,12 @@ can therefore be queryable with a partial index; readiness snapshots expose
 
 ## Removed legacy paths
 
-The old chunk-oriented query pipeline and legacy federated query execution are
-removed from the supported 0.5.0 architecture. Chunks may still be produced
-during ingestion, and migration-only compatibility types may remain at their
-explicit seams, but neither is a public query path. New integrations must use
-`Record`, `RecordIdentity`, `RecordHit`, the record store ports, and the
-canonical record pipeline. The remaining compatibility seams are scheduled
-for removal after all backends and callers consume canonical record results;
-they must not regain ownership of query execution.
+The old chunk-oriented query pipeline and federated query execution are not
+part of the supported architecture. Chunks may still be produced during
+ingestion, but query callers use `Record`, `RecordIdentity`, `RecordHit`, the
+record store ports, and the canonical record pipeline. `SearchKernel` remains
+as an ingestion and composition facade; its query method returns canonical
+record outcomes only.
 
 ## Optional backends
 

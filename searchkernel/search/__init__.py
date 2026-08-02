@@ -1,14 +1,5 @@
 """Canonical record-oriented search APIs."""
 
-from searchkernel.search.diversity import (
-    DiversityDiagnostic,
-    SourceDiversityPolicy,
-    apply_source_diversity,
-)
-from searchkernel.search.hierarchical import (
-    HierarchicalRetrievalConfig,
-    search_hierarchical,
-)
 from searchkernel.search.orchestrator import SearchOrchestrator
 from searchkernel.search.query_plan import (
     QueryPlan,
@@ -22,16 +13,11 @@ from searchkernel.search.record_pipeline import (
 )
 
 __all__ = [
-    "DiversityDiagnostic",
-    "HierarchicalRetrievalConfig",
     "QueryPlan",
     "QueryRouter",
     "QueryRouterConfig",
     "RecordSearchPipeline",
     "RecordSearchQueryContext",
     "SearchOrchestrator",
-    "SourceDiversityPolicy",
-    "apply_source_diversity",
     "route_query",
-    "search_hierarchical",
 ]

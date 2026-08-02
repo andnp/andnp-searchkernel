@@ -296,7 +296,7 @@ class Record:
     Records are the contract between content sources and the kernel. A source
     adapts its native schema into Records; the kernel chunks, embeds, and
     indexes them. Records can carry pre-computed embeddings if the source
-    already has them (avoids re-embedding for federated sources).
+    already has them (avoids re-embedding during retrieval).
     """
 
     source_kind: str
@@ -417,51 +417,6 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-@dataclass
-class SearchResult:
-    """A ranked result from a legacy search query.
-
-    This flat shape is retained for the legacy index/API surface. New record
-    callers should use the ``identity`` property instead of reconstructing
-    identity from individual fields; the duplicate legacy shape is scheduled
-    for removal with the old search path.
-    """
-
-    record_id: str
-    """ID of the matched Record."""
-
-    score: float
-    """Relevance score (normalized across fusion sources)."""
-
-    source_kind: str
-    """Source type of the matched record."""
-
-    metadata: dict[str, Any] = field(default_factory=dict)
-    """Additional metadata (e.g., strategy contributions, adjustments)."""
-
-    workspace_id: str | None = None
-    """Optional workspace scope of the matched record."""
-
-    @property
-    def identity(self) -> RecordIdentity:
-        """Return the canonical identity represented by this result."""
-        return RecordIdentity(self.workspace_id, self.source_kind, self.record_id)
-
-    @property
-    def storage_key(self) -> str:
-        return self.identity.storage_key
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a dictionary."""
-        return {
-            "record_id": self.record_id,
-            "score": self.score,
-            "source_kind": self.source_kind,
-            "workspace_id": self.workspace_id,
-            "metadata": self.metadata,
-        }
 
 
 @dataclass(frozen=True)
@@ -591,48 +546,3 @@ class SearchStrategyStats:
         if self.tag_expansion_count is not None:
             result["tag_expansion_count"] = self.tag_expansion_count
         return result
-
-
-@dataclass
-class ScoredRef:
-    """A ranked reference returned by a legacy federated SearchableSource.
-
-    Used in federation: when a source runs its own retrieval, it returns
-    an ordered list of ScoredRefs. The kernel fuses these across sources.
-    Record-oriented callers should use ``RecordHit`` or ``SearchResult``;
-    this adapter result remains until federation is migrated.
-    """
-
-    source_id: str
-    """The stable identifier of the matched record in its source."""
-
-    score: float
-    """Relevance score (source-specific scale; used for RRF fusion)."""
-
-    source_kind: str
-    """Source type (must match the adapter's source_kind)."""
-
-    metadata: dict[str, Any] = field(default_factory=dict)
-    """Source-specific result metadata."""
-
-    workspace_id: str | None = None
-    """Optional workspace scope of the matched record."""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a dictionary."""
-        return {
-            "source_id": self.source_id,
-            "score": self.score,
-            "source_kind": self.source_kind,
-            "workspace_id": self.workspace_id,
-            "metadata": self.metadata,
-        }
-
-    @property
-    def storage_key(self) -> str:
-        """Canonical identity used when fusing references."""
-        return canonical_storage_key(self.workspace_id, self.source_kind, self.source_id)
-
-    @property
-    def identity(self) -> RecordIdentity:
-        return RecordIdentity(self.workspace_id, self.source_kind, self.source_id)

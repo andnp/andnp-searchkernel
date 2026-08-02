@@ -16,8 +16,6 @@ from searchkernel.domain import (
     Cursor,
     Record,
     RecordIdentity,
-    ScoredRef,
-    SearchResult,
     Vector,
 )
 from searchkernel.ports.content_source import (
@@ -28,7 +26,6 @@ from searchkernel.ports.content_source import (
     IngestionReceipt,
     RecordIngestionResult,
     RecordIngestor,
-    SearchableSource,
     SourceBatch,
 )
 from searchkernel.ports.embedding import (
@@ -44,12 +41,6 @@ from searchkernel.ports.stores import (
     KeywordStore,
     VectorStore,
 )
-from searchkernel.runtime import federation
-from searchkernel.runtime.federation import DEFAULT_PER_SOURCE_TIMEOUT_S
-from searchkernel.runtime.local import LocalSearchSource
-from searchkernel.runtime.registry import SourceRegistry
-from searchkernel.search.diversity import SourceDiversityPolicy
-from searchkernel.search.hierarchical import HierarchicalRetrievalConfig
 from searchkernel.search.orchestrator import SearchOrchestrator
 from searchkernel.search.record_pipeline import (
     QueryEmbeddingProvider,
@@ -66,36 +57,25 @@ class SearchKernel:
     def __init__(
         self,
         *,
-        registry: SourceRegistry,
         orchestrator: SearchOrchestrator | None = None,
         ingestor: RecordIngestor | None = None,
         content_sources: Iterable[ContentSource] = (),
-        reranker: Reranker | None = None,
         config: object | None = None,
         embedder: EmbeddingProvider | None = None,
-        per_source_timeout_s: float = DEFAULT_PER_SOURCE_TIMEOUT_S,
-        diversity_policy: SourceDiversityPolicy | None = None,
-        hierarchical_config: HierarchicalRetrievalConfig | None = None,
     ) -> None:
-        self._registry = registry
         self._orchestrator = orchestrator
         self._ingestor = ingestor
         self._content_sources: dict[str, ContentSource] = {}
         for source in content_sources:
             self.register_content_source(source)
-        self._reranker = reranker
         self._config = config
         self._embedder = embedder
-        self._per_source_timeout_s = per_source_timeout_s
-        self._diversity_policy = diversity_policy
-        self._hierarchical_config = hierarchical_config
 
     @classmethod
     def build(
         cls,
         config: object | None = None,
         *,
-        sources: Iterable[SearchableSource] = (),
         content_sources: Iterable[ContentSource] = (),
         ingestor: RecordIngestor | None = None,
         embedder: EmbeddingProvider | None = None,
@@ -123,16 +103,12 @@ class SearchKernel:
         embedding_dim: int | None = None,
         search_policy: RecordSearchPolicy | None = None,
         search_config: RecordSearchConfig | None = None,
-        registry: SourceRegistry | None = None,
-        per_source_timeout_s: float = DEFAULT_PER_SOURCE_TIMEOUT_S,
-        diversity_policy: SourceDiversityPolicy | None = None,
-        hierarchical_config: HierarchicalRetrievalConfig | None = None,
     ) -> "SearchKernel":
         """Compose a kernel from source adapters and provider instances.
 
         ``config`` and ``embedder`` are retained as composition dependencies for
-        ingestion/admin capabilities; query execution only needs the registered
-        sources and reranker. A reranker may be supplied by ``config.reranker``.
+        ingestion and administration. A reranker may be supplied by
+        ``config.reranker``.
 
         Pass the record stores and ``record_hydrator`` to compose the canonical
         local record pipeline. ``orchestrator`` remains available for callers
@@ -187,12 +163,6 @@ class SearchKernel:
                 policy=search_policy,
                 config=search_config,
             )
-        source_registry = registry or SourceRegistry()
-        if orchestrator is not None:
-            source_registry.register(LocalSearchSource(orchestrator))
-        for source in sources:
-            source_registry.register(source)
-
         effective_embedder = embedder
         if effective_embedder is None:
             if isinstance(config, Mapping):
@@ -201,22 +171,12 @@ class SearchKernel:
                 effective_embedder = getattr(config, "embedder", None)
 
         return cls(
-            registry=source_registry,
             orchestrator=orchestrator,
             ingestor=ingestor,
             content_sources=content_sources,
-            reranker=effective_reranker,
             config=config,
             embedder=effective_embedder,
-            per_source_timeout_s=per_source_timeout_s,
-            diversity_policy=diversity_policy,
-            hierarchical_config=hierarchical_config,
         )
-
-    @property
-    def registry(self) -> SourceRegistry:
-        """Return the registry used by this kernel."""
-        return self._registry
 
     @property
     def config(self) -> object | None:
@@ -435,29 +395,6 @@ class SearchKernel:
             )
         return candidate, results, checkpoint_blocked or batch_has_failure
 
-    async def search_anything(
-        self,
-        query: str,
-        *,
-        sources: list[str] | None = None,
-        filters: dict[str, Any] | None = None,
-        k: int = 10,
-    ) -> list[SearchResult]:
-        """Search registered sources through the canonical federation point."""
-        scored_refs = await federation.search_anything(
-            query,
-            registry=self._registry,
-            reranker=self._reranker,
-            sources=sources,
-            top_n=k,
-            per_source_k=k,
-            per_source_timeout_s=self._per_source_timeout_s,
-            filters=filters,
-            diversity_policy=self._diversity_policy,
-            hierarchical_config=self._hierarchical_config,
-        )
-        return [self._to_search_result(ref) for ref in scored_refs]
-
     async def search(
         self,
         query: str,
@@ -471,16 +408,6 @@ class SearchKernel:
                 "Cannot search records: no record orchestrator was wired into SearchKernel"
             )
         return await self._orchestrator.search(query, limit=limit, filters=filters)
-
-    @staticmethod
-    def _to_search_result(ref: ScoredRef) -> SearchResult:
-        return SearchResult(
-            record_id=ref.source_id,
-            score=ref.score,
-            source_kind=ref.source_kind,
-            workspace_id=ref.workspace_id,
-            metadata=dict(ref.metadata),
-        )
 
 
 def _record_cursor(source: ContentSource, record: Record) -> Cursor:

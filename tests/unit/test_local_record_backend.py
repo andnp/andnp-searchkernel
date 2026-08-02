@@ -12,7 +12,6 @@ from searchkernel.indices import (
     LocalRecordBackend,
     LocalVectorStore,
 )
-from searchkernel.runtime.local import LocalSearchSource
 from searchkernel.search.orchestrator import SearchOrchestrator
 
 
@@ -416,7 +415,7 @@ def test_marked_keyword_scale_smoke() -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_source_matches_record_pipeline_contract_deterministically(tmp_path) -> None:
+async def test_local_orchestrator_matches_record_pipeline_contract_deterministically(tmp_path) -> None:
     backend, keyword, vector, _graph = _backend(tmp_path)
     first = _record("note", "one", "first alpha", workspace_id="workspace")
     second = _record("note", "two", "first beta", workspace_id="workspace")
@@ -425,22 +424,21 @@ async def test_local_source_matches_record_pipeline_contract_deterministically(t
     vector.upsert([first, second], "test", 2)
     keyword.index([first, second])
 
-    source = LocalSearchSource(
-        SearchOrchestrator(
-            hydrator=backend,
-            keyword_store=keyword,
-            vector_store=vector,
-            embedding_provider=_Embedder(),
-        )
+    orchestrator = SearchOrchestrator(
+        hydrator=backend,
+        keyword_store=keyword,
+        vector_store=vector,
+        embedding_provider=_Embedder(),
     )
-    results = list(
-        await source.search("first", 2, {"workspace_id": "workspace"})
+    outcome = await orchestrator.search(
+        "first", limit=2, filters={"workspace_id": "workspace"}
     )
+    results = outcome.results
 
     assert [result.storage_key for result in results] == sorted(
         (first.storage_key, second.storage_key)
     )
-    assert all(result.metadata["text"].startswith("first") for result in results)
+    assert all(result.record.body.startswith("first") for result in results)
 
 
 def test_graph_edges_cascade_when_a_record_is_deleted(tmp_path) -> None:

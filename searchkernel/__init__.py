@@ -20,8 +20,6 @@ from searchkernel.domain import (
     RecordHit,
     RecordIdentity,
     RollbackMetadata,
-    ScoredRef,
-    SearchResult,
     SearchResultProvenance,
     ValidationResult,
     canonical_storage_key,
@@ -33,6 +31,7 @@ from searchkernel.indexing.coordinator import (
 )
 from searchkernel.indexing.runtime_readiness import SearchAvailability
 from searchkernel.kernel import SearchKernel
+from searchkernel.local import LocalRecordKernel, build_local_record_kernel
 from searchkernel.ports import (
     ActiveModelStore,
     BatchContentSource,
@@ -43,7 +42,6 @@ from searchkernel.ports import (
     ModelNamespaceStore,
     ModelValidationStore,
     RecordIngestor,
-    SearchableSource,
     SearchAPI,
     SourceBatch,
 )
@@ -90,6 +88,7 @@ __all__ = [
     "EmbeddingProvider",
     "MigrationPhase",
     "MigrationState",
+    "LocalRecordKernel",
     "ModelBackupStore",
     "ModelDimensionMismatchError",
     "ModelLifecycleStore",
@@ -116,14 +115,11 @@ __all__ = [
     "RecordSearchResult",
     "ResumableSemanticCoordinator",
     "RollbackMetadata",
-    "ScoredRef",
     "SearchAPI",
     "SearchAvailability",
     "SearchKernel",
     "SearchOrchestrator",
-    "SearchResult",
     "SearchResultProvenance",
-    "SearchableSource",
     "SourceBatch",
     "ValidatedCacheEntry",
     "ValidatedCacheStore",
@@ -132,6 +128,7 @@ __all__ = [
     "ValidatedReadThroughCacheMetrics",
     "ValidationResult",
     "canonical_storage_key",
+    "build_local_record_kernel",
     "classify_query_type",
     "route_query",
     "truncate_content",

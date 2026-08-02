@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
-from searchkernel.domain import ChangeSignal, Cursor, Record, ScoredRef, SearchFilters
-from searchkernel.ports.retrieval import SourceCapabilities
+from searchkernel.domain import ChangeSignal, Cursor, Record
 
 IngestionFailureMode = Literal["strict", "lenient"]
 RecordIngestionStatus = Literal["committed", "skipped", "failed", "cancelled"]
@@ -155,51 +154,11 @@ class RecordIngestor(Protocol):
 AsyncRecordIngestor = RecordIngestor
 
 
-@runtime_checkable
-class SearchableSource(Protocol):
-    """Federated source whose native search is merged by the kernel."""
-
-    source_kind: str
-
-    async def search(
-        self, query: str, k: int, filters: SearchFilters | None = None
-    ) -> Iterable[ScoredRef]:
-        ...
-
-
-@runtime_checkable
-class HierarchicalSearchableSource(Protocol):
-    """Optional parent-first search contract for structured source adapters."""
-
-    source_kind: str
-    capabilities: SourceCapabilities
-
-    async def search_parents(
-        self, query: str, k: int, filters: SearchFilters | None = None
-    ) -> Iterable[ScoredRef]:
-        ...
-
-    async def search_children(
-        self,
-        query: str,
-        parent_ids: Sequence[str],
-        k: int,
-        filters: SearchFilters | None = None,
-    ) -> Iterable[ScoredRef]:
-        """Search children for canonical parent storage keys.
-
-        Legacy source-id requests remain adaptable when the selected parent
-        identities have unique source IDs.
-        """
-        ...
-
-
 __all__ = [
     "AsyncRecordIngestor",
     "BatchContentSource",
     "CheckpointStore",
     "ContentSource",
-    "HierarchicalSearchableSource",
     "IngestionBatchResult",
     "IngestionError",
     "IngestionFailureMode",
@@ -208,6 +167,5 @@ __all__ = [
     "RecordIngestionResult",
     "RecordIngestionStatus",
     "RecordIngestor",
-    "SearchableSource",
     "SourceBatch",
 ]

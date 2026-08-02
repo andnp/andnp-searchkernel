@@ -17,7 +17,6 @@ from searchkernel.domain import (
     Record,
     RecordHit,
     RecordIdentity,
-    SearchResult,
     SearchResultProvenance,
     Vector,
 )
@@ -183,17 +182,6 @@ class RecordSearchResult:
     @property
     def storage_key(self) -> str:
         return self.record.storage_key
-
-    def as_search_result(self) -> SearchResult:
-        """Adapt this record result to the kernel's generic result model."""
-        return SearchResult(
-            record_id=self.record_id,
-            score=self.score,
-            source_kind=self.record.source_kind,
-            workspace_id=self.record.workspace_id,
-            metadata={"provenance": self.provenance.to_dict()},
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class RecordSearchFailure:

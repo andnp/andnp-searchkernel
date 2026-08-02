@@ -34,8 +34,6 @@ Record source adapter
                        -> record results + provenance
 ```
 
-Federated callers may fan out across registered sources and fuse their ranked
-references, but the record-oriented path is the target for new integrations.
 The composition root is `SearchKernel.build`; applications provide stores,
 providers, policies, and a hydrator instead of teaching the kernel about a
 source's native schema.
@@ -110,17 +108,11 @@ must fail at their own boundary with actionable diagnostics.
 
 ## 3. Legacy deletion boundary
 
-The old chunk-oriented query pipeline and legacy federated query execution are
+The old chunk-oriented query pipeline and federated query execution are
 removed from the supported 0.5.0 architecture. Chunks may still be created as
-an ingestion artifact, but they are not the public query identity. This is the
-removal boundary: compatibility types may remain only at migration seams, and
-they must not dispatch, own, or define a second query path.
-
-Compatibility types and adapters that accept tuple-shaped or flat legacy
-results may remain temporarily at migration seams. They are not a second
-pipeline and must not regain ownership of query execution. The deletion goal
-is to remove those seams after all backends and source adapters return
-canonical `RecordHit` values and all callers consume complete identities.
+an ingestion artifact, but they are not the public query identity. All query
+boundaries return canonical record outcomes and carry complete identities
+through `RecordHit`, graph expansion, and hydration.
 
 ## 4. Validation baseline and limits
 
@@ -165,8 +157,8 @@ CI output and must not be reported as backend coverage.
 
 ### R1 — Complete identity migration
 
-- Change remaining store and federation seams to return `RecordHit` directly.
-- Remove tuple-only compatibility paths once callers have migrated.
+- Keep all store and retrieval seams returning `RecordHit` directly.
+- Remove tuple-only compatibility paths as each backend contract is finalized.
 - Add cross-backend fixtures proving canonical bytes, storage keys, cache keys,
   stale checks, and deletion behavior agree.
 - Verify that graph expansion, parent expansion, and hydration preserve the
@@ -212,11 +204,10 @@ CI output and must not be reported as backend coverage.
 
 ### R6 — Retire migration-only surfaces
 
-- Delete legacy flat-result and tuple adapters after R1-R3 acceptance gates
-  pass.
-- Remove documentation that suggests a legacy query bridge is supported.
+- Keep legacy storage migrations isolated from the query contracts.
+- Keep documentation aligned with the canonical record-only query path.
 - Keep source-specific behavior in adapters and injected policies, not in core
-  domain models or a replacement compatibility pipeline.
+  domain models or a compatibility pipeline.
 
 ## 6. Evidence policy
 
