@@ -2,13 +2,46 @@ from datetime import UTC, datetime
 
 import pytest
 
-from searchkernel.domain import Record, canonical_storage_key
+from searchkernel.domain import (
+    Record,
+    RecordIdentity,
+    ScoredRef,
+    SearchResult,
+    canonical_storage_key,
+)
 
 
 def test_storage_key_includes_optional_workspace_and_source_kind() -> None:
     assert canonical_storage_key(None, "note", "same") != canonical_storage_key(
         None, "commit", "same"
     )
+
+
+def test_identity_round_trips_through_canonical_storage_key_and_mapping() -> None:
+    identity = RecordIdentity("workspace-a", "note", "same/id")
+
+    assert RecordIdentity.from_storage_key(identity.storage_key) == identity
+    assert RecordIdentity.from_dict(identity.to_dict()) == identity
+
+
+def test_identity_rejects_non_canonical_storage_key_encoding() -> None:
+    with pytest.raises(ValueError, match="not canonical"):
+        RecordIdentity.from_storage_key('record:["workspace-a", "note", "same"]')
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        (None, "note", "same"),
+        ("workspace-a", "note", "same"),
+    ],
+)
+def test_results_expose_the_same_canonical_identity(value: tuple[str | None, str, str]) -> None:
+    workspace_id, source_kind, source_id = value
+    expected = RecordIdentity(workspace_id, source_kind, source_id)
+
+    assert SearchResult(source_id, 0.5, source_kind, workspace_id=workspace_id).identity == expected
+    assert ScoredRef(source_id, 0.5, source_kind, workspace_id=workspace_id).identity == expected
     assert canonical_storage_key("workspace-a", "note", "same") != (
         canonical_storage_key("workspace-b", "note", "same")
     )
@@ -30,6 +63,7 @@ def test_record_serialization_preserves_workspace_identity() -> None:
 
     assert restored.workspace_id == "workspace-a"
     assert restored.storage_key == record.storage_key
+    assert restored.identity == RecordIdentity("workspace-a", "note", "same")
 
 
 def test_record_serialization_preserves_indexed_text() -> None:

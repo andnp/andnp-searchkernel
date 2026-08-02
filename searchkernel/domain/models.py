@@ -5,6 +5,7 @@ and the outside world. No I/O, no imports from adapters/runtime/stores.
 """
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -30,8 +31,22 @@ class Tier(str, Enum):
 # Type aliases for clarity in port signatures
 Vector = list[float]  # Embedding vector
 Cursor = str | None  # Watermark for incremental sync (e.g., commit SHA, timestamp)
-Filters = dict[str, Any]  # Query filters (source-specific, opaque to core)
+Filters = Mapping[str, Any]  # Read-only query filters (source-specific, opaque to core)
 ChangeSignal = dict[str, Any]  # Source change info: {"watch": bool, "poll_interval": int}
+
+
+def _validate_identity_part(
+    name: str,
+    value: str | None,
+    *,
+    allow_none: bool = False,
+) -> None:
+    if allow_none and value is None:
+        return
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string or None")
+    if not value:
+        raise ValueError(f"{name} must not be empty")
 
 
 def canonical_storage_key(
@@ -44,10 +59,9 @@ def canonical_storage_key(
     JSON array encoding is deliberate: source identifiers may contain any
     delimiter, and ``source_kind`` is part of identity rather than metadata.
     """
-    if not source_kind:
-        raise ValueError("source_kind must not be empty")
-    if not source_id:
-        raise ValueError("source_id must not be empty")
+    _validate_identity_part("workspace_id", workspace_id, allow_none=True)
+    _validate_identity_part("source_kind", source_kind)
+    _validate_identity_part("source_id", source_id)
     return "record:" + json.dumps(
         [workspace_id, source_kind, source_id],
         ensure_ascii=False,
@@ -63,6 +77,11 @@ class RecordIdentity:
     source_kind: str
     source_id: str
 
+    def __post_init__(self) -> None:
+        _validate_identity_part("workspace_id", self.workspace_id, allow_none=True)
+        _validate_identity_part("source_kind", self.source_kind)
+        _validate_identity_part("source_id", self.source_id)
+
     @property
     def storage_key(self) -> str:
         return canonical_storage_key(
@@ -71,19 +90,41 @@ class RecordIdentity:
             self.source_id,
         )
 
+    def to_dict(self) -> dict[str, str | None]:
+        """Return the portable representation used by API boundaries."""
+        return {
+            "workspace_id": self.workspace_id,
+            "source_kind": self.source_kind,
+            "source_id": self.source_id,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "RecordIdentity":
+        """Build an identity from a mapping without accepting aliases."""
+        try:
+            return cls(
+                workspace_id=value.get("workspace_id"),
+                source_kind=value["source_kind"],
+                source_id=value["source_id"],
+            )
+        except KeyError as exc:
+            raise ValueError(f"missing identity field: {exc.args[0]}") from exc
+
     @classmethod
     def from_storage_key(cls, storage_key: str) -> "RecordIdentity":
         if not storage_key.startswith("record:"):
             raise ValueError("storage key must start with 'record:'")
-        value = json.loads(storage_key.removeprefix("record:"))
+        try:
+            value = json.loads(storage_key.removeprefix("record:"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("invalid record storage key") from exc
         if not isinstance(value, list) or len(value) != 3:
             raise ValueError("invalid record storage key")
         workspace_id, source_kind, source_id = value
-        if not isinstance(workspace_id, (str, type(None))):
-            raise TypeError("invalid workspace_id in storage key")
-        if not isinstance(source_kind, str) or not isinstance(source_id, str):
-            raise TypeError("invalid record identity in storage key")
-        return cls(workspace_id, source_kind, source_id)
+        identity = cls(workspace_id, source_kind, source_id)
+        if identity.storage_key != storage_key:
+            raise ValueError("record storage key is not canonical")
+        return identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +160,13 @@ class RecordHit:
 
     def __len__(self) -> int:
         return 2
+
+
+LegacyRecordHit = tuple[str, float]
+"""Legacy store result retained until all adapters return ``RecordHit``."""
+
+RecordHitLike = RecordHit | LegacyRecordHit
+"""Canonical store result plus the temporary tuple compatibility boundary."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +359,11 @@ class Record:
         """Canonical storage identity used by stores, fusion, and hydration."""
         return canonical_storage_key(self.workspace_id, self.source_kind, self.source_id)
 
+    @property
+    def identity(self) -> RecordIdentity:
+        """Return the canonical identity carried by this record."""
+        return RecordIdentity(self.workspace_id, self.source_kind, self.source_id)
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary for storage or RPC."""
         return {
@@ -373,10 +426,12 @@ def _as_utc(value: datetime) -> datetime:
 
 @dataclass
 class SearchResult:
-    """A ranked result from a search query.
+    """A ranked result from a legacy search query.
 
-    Returned by the SearchAPI; contains the matched record, its score,
-    and provenance information showing which stages contributed to the ranking.
+    This flat shape is retained for the legacy index/API surface. New record
+    callers should use the ``identity`` property instead of reconstructing
+    identity from individual fields; the duplicate legacy shape is scheduled
+    for removal with the old search path.
     """
 
     record_id: str
@@ -393,6 +448,15 @@ class SearchResult:
 
     workspace_id: str | None = None
     """Optional workspace scope of the matched record."""
+
+    @property
+    def identity(self) -> RecordIdentity:
+        """Return the canonical identity represented by this result."""
+        return RecordIdentity(self.workspace_id, self.source_kind, self.record_id)
+
+    @property
+    def storage_key(self) -> str:
+        return self.identity.storage_key
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary."""
@@ -536,10 +600,12 @@ class SearchStrategyStats:
 
 @dataclass
 class ScoredRef:
-    """A ranked reference returned by a SearchableSource.
+    """A ranked reference returned by a legacy federated SearchableSource.
 
     Used in federation: when a source runs its own retrieval, it returns
     an ordered list of ScoredRefs. The kernel fuses these across sources.
+    Record-oriented callers should use ``RecordHit`` or ``SearchResult``;
+    this adapter result remains until federation is migrated.
     """
 
     source_id: str
@@ -571,3 +637,7 @@ class ScoredRef:
     def storage_key(self) -> str:
         """Canonical identity used when fusing references."""
         return canonical_storage_key(self.workspace_id, self.source_kind, self.source_id)
+
+    @property
+    def identity(self) -> RecordIdentity:
+        return RecordIdentity(self.workspace_id, self.source_kind, self.source_id)
