@@ -4,14 +4,48 @@ import hashlib
 import logging
 from collections.abc import Callable
 from functools import wraps
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from searchkernel.ports.stores import CacheStore
 from searchkernel.runtime.canonical_cache import UnstableCacheKey, stable_json
+from searchkernel.runtime.validated_read_cache import (
+    ValidatedCacheEntry,
+    ValidatedCacheStore,
+)
 
 logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
+KeyT = TypeVar("KeyT")
+ValueT = TypeVar("ValueT")
+TokenT = TypeVar("TokenT")
+
+
+class EpochValidatedCacheStore[KeyT, ValueT, TokenT](
+    ValidatedCacheStore[KeyT, ValueT, TokenT]
+):
+    """Use an epoch-aware ``CacheStore`` for validated read-through entries.
+
+    The shared cache keeps ownership of persistence and epoch invalidation;
+    validated-read semantics remain in ``ValidatedReadThroughCache``.
+    """
+
+    def __init__(self, store: CacheStore, *, epoch: int) -> None:
+        self._store = store
+        self._epoch = epoch
+
+    def get(self, key: KeyT) -> ValidatedCacheEntry[ValueT, TokenT] | None:
+        value = self._store.get(cast(str, key))
+        if value is None:
+            return None
+        return cast(ValidatedCacheEntry[ValueT, TokenT], value)
+
+    def set(
+        self,
+        key: KeyT,
+        entry: ValidatedCacheEntry[ValueT, TokenT],
+    ) -> None:
+        self._store.set(cast(str, key), entry, self._epoch)
 
 
 def _serialize_key_args(*args: Any, **kwargs: Any) -> str:

@@ -6,6 +6,11 @@ from typing import Any, Protocol, cast
 
 from searchkernel.adapters.cache.memory_lru import MemoryLRUCacheStore
 from searchkernel.adapters.cache.sqlite import SQLiteCacheStore
+from searchkernel.runtime import (
+    EpochValidatedCacheStore,
+    ValidatedCacheValue,
+    ValidatedReadThroughCache,
+)
 from searchkernel.runtime.cache import cached, get_or_compute
 
 
@@ -275,3 +280,47 @@ class TestEpochInvalidation:
         result = get_or_compute(store, "fn1", 1, fn1, 10)
         assert result == 13  # 10 + 3
         assert compute_count["fn1"] == 3
+
+
+class TestEpochValidatedCacheStore:
+    def test_composes_with_shared_store_and_preserves_epoch_invalidation(self):
+        store = MemoryLRUCacheStore(max_entries=10)
+        cache = ValidatedReadThroughCache(
+            EpochValidatedCacheStore(store, epoch=1),
+        )
+        calls = 0
+
+        def load() -> ValidatedCacheValue[str, str]:
+            nonlocal calls
+            calls += 1
+            return ValidatedCacheValue(f"value-{calls}", "token-1")
+
+        assert cache.get_or_load(
+            "validated", validate=lambda _key, token: token == "token-1", load=load
+        ) == "value-1"
+        store.set("ordinary", "ordinary-value", epoch=1)
+        assert cache.get_or_load(
+            "validated", validate=lambda _key, token: token == "token-1", load=load
+        ) == "value-1"
+        assert store.get("ordinary") == "ordinary-value"
+        assert calls == 1
+
+        store.invalidate_epoch(1)
+        assert cache.get_or_load(
+            "validated", validate=lambda _key, token: token == "token-1", load=load
+        ) == "value-2"
+        assert calls == 2
+
+    def test_invalid_entry_is_left_for_validated_cache_to_reject(self):
+        store = MemoryLRUCacheStore(max_entries=10)
+        store.set("validated", "not-an-entry", epoch=1)
+        cache = ValidatedReadThroughCache(
+            EpochValidatedCacheStore(store, epoch=1),
+        )
+
+        assert cache.get_or_load(
+            "validated",
+            validate=lambda _key, _token: True,
+            load=lambda: ValidatedCacheValue("loaded", "token-1"),
+        ) == "loaded"
+        assert cache.metrics.cache_read_failures == 1
