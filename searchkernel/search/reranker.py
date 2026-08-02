@@ -1,8 +1,8 @@
 """ReRanker module using cross-encoder for candidate re-ranking.
 
 Uses circuit breaker pattern to protect against model loading/inference failures.
-This follows the same pattern as VectorIndex._embedding_circuit_breaker to ensure
-consistent resilience across model-dependent components.
+This follows the same circuit-breaker pattern as other model-dependent
+components to ensure consistent resilience during loading and inference.
 
 Circuit breaker behavior:
 - Model loading and prediction are protected by circuit breaker
@@ -72,7 +72,6 @@ class ReRanker:
         self._model_lock = threading.Lock()
 
         # Circuit breaker for model failure protection
-        # Follows same pattern as VectorIndex._embedding_circuit_breaker
         self._circuit_breaker = CircuitBreaker(
             failure_threshold=5,
             recovery_timeout=60.0,

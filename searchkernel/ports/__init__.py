@@ -32,11 +32,6 @@ from searchkernel.ports.embedding import (
 )
 from searchkernel.ports.epochs import SearchEpochProvider, SearchEpochs
 from searchkernel.ports.index_manager import IndexManagerPort
-from searchkernel.ports.live_indices import (
-    GraphIndexPort,
-    KeywordIndexPort,
-    VectorIndexPort,
-)
 from searchkernel.ports.llm import LLMProvider
 from searchkernel.ports.orchestrator_config import OrchestratorConfig
 from searchkernel.ports.record_search import (
@@ -90,7 +85,6 @@ __all__ = [
     "EmbeddingProvider",
     "EmbeddingSink",
     "GraphEdge",
-    "GraphIndexPort",
     "GraphNeighbor",
     "GraphStore",
     "HierarchicalSearchableSource",
@@ -98,7 +92,6 @@ __all__ = [
     "IngestionError",
     "IngestionFailureMode",
     "IngestionReceipt",
-    "KeywordIndexPort",
     "KeywordStore",
     "LLMProvider",
     "ModelBackupStore",
@@ -121,7 +114,6 @@ __all__ = [
     "SearchableSource",
     "SourceBatch",
     "SourceCapabilities",
-    "VectorIndexPort",
     "VectorStore",
     "extract_retrieval_fields",
 ]
