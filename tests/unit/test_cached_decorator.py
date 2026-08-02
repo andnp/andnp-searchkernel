@@ -324,3 +324,33 @@ class TestEpochValidatedCacheStore:
             load=lambda: ValidatedCacheValue("loaded", "token-1"),
         ) == "loaded"
         assert cache.metrics.cache_read_failures == 1
+
+
+class TestSQLiteCacheStore:
+    def test_reuses_connection_for_repeated_get_and_set(self, tmp_path: Path):
+        store = SQLiteCacheStore(tmp_path / "cache.db")
+        connection = store._local.connection
+
+        store.set("key", {"value": 1}, epoch=1)
+        assert store.get("key") == {"value": 1}
+        store.set("key", {"value": 2}, epoch=2)
+
+        assert store.get("key") == {"value": 2}
+        assert store._local.connection is connection
+
+    def test_invalidation_preserves_newer_entries(self, tmp_path: Path):
+        store = SQLiteCacheStore(tmp_path / "cache.db")
+        store.set("old", "stale", epoch=1)
+        store.set("new", "current", epoch=2)
+
+        store.invalidate_epoch(1)
+
+        assert store.get("old") is None
+        assert store.get("new") == "current"
+
+    def test_reopens_closed_connection(self, tmp_path: Path):
+        store = SQLiteCacheStore(tmp_path / "cache.db")
+        store.set("key", "value", epoch=1)
+        store._local.connection.close()
+
+        assert store.get("key") == "value"
