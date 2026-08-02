@@ -31,7 +31,10 @@ class RecordBatch:
 class RecordSource(Protocol):
     """Read records in bounded pages using an opaque source cursor."""
 
-    total_records: int | None
+    @property
+    def total_records(self) -> int | None:
+        """Return the source count when it can be computed cheaply."""
+        ...
 
     def fetch_batch(
         self,

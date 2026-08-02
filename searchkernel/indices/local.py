@@ -901,7 +901,7 @@ class LocalRecordBackend:
             )
         snapshot = self._get_vector_snapshot(model_name, dim)
         eligible = snapshot.filter_mask(
-            filters,
+            dict(filters) if filters is not None else None,
             status_values=self._status_values(filters),
             filter_values=self._filter_values,
         )

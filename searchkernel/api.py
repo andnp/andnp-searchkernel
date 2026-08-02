@@ -198,6 +198,8 @@ from searchkernel.runtime.federation import (
     RegisteredSearchSource,
 )
 from searchkernel.runtime.reindex import (
+    RecordBatch,
+    RecordSource,
     ReindexError,
     ReindexProgress,
     ReindexRoutine,
@@ -363,6 +365,7 @@ __all__ = [
     "QueryRouterConfig",
     "ReadinessStage",
     "Record",
+    "RecordBatch",
     "RecordHit",
     "RecordHydrator",
     "RecordIdentity",
@@ -377,6 +380,7 @@ __all__ = [
     "RecordSearchPipeline",
     "RecordSearchPolicy",
     "RecordSearchResult",
+    "RecordSource",
     "RecordStatus",
     "RegisteredSearchSource",
     "ReindexError",
