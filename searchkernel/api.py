@@ -103,7 +103,6 @@ from searchkernel.indexing.manifest import (
     save_manifest,
     should_rebuild,
 )
-from searchkernel.indexing.migration import detect_and_migrate_legacy_index
 from searchkernel.indexing.reconciler import (
     build_indexed_files_map,
     find_excluded_indexed_files,
@@ -438,7 +437,6 @@ __all__ = [
     "cosine_similarity_lists",
     "derive_bootstrap_readiness_snapshot",
     "derive_loaded_index_state_snapshot",
-    "detect_and_migrate_legacy_index",
     "discover_files",
     "discover_files_multi_root",
     "embedding_identity",
