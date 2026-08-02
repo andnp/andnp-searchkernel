@@ -1,30 +1,41 @@
 # `andnp-searchkernel`
 
-A domain-agnostic search/indexing kernel for building hybrid vector + keyword + graph search systems with pluggable embedding, LLM, and reranker providers.
+A domain-agnostic search and indexing kernel for hybrid keyword, vector, and
+graph retrieval with pluggable embedding, LLM, and reranker providers.
 
 ## Status
 
-**Pre-alpha, canonical record path established.** The legacy chunk query
-pipeline has been removed; source adapters, backend integrations, and
-performance validation remain subject to change.
+**0.5.0, pre-alpha: canonical record architecture.** Record ingestion,
+candidate retrieval, fusion, graph expansion, and hydration use the
+record-oriented contracts. The package is still evolving, and the validation
+limits below are important when assessing production readiness.
 
-## Optional backends
+## Canonical record contracts
 
-The core package provides the domain models, ports, record search pipeline, and
-evaluation primitives. Install only the integrations required by an
-application:
+Records are identified by the composite tuple
+`(workspace_id, source_kind, source_id)`. The canonical `storage_key` is the
+serialized form of that tuple and is the identity used by local and Postgres
+stores, fusion, graph expansion, caches, and hydration. A bare `source_id` is
+not a safe identity because different sources or workspaces may reuse it.
 
-```bash
-pip install andnp-searchkernel[pgvector,huggingface,markdown]
-```
+The search path also preserves these invariants:
 
-Available extras are `faiss`, `pgvector`, `huggingface`, and `markdown`.
-FAISS and pgvector implement the same record-oriented backend contracts; they
-can be selected independently or used together during migrations.
+- `RecordHit` carries the complete `RecordIdentity` across every backend
+  boundary.
+- Search is read-only. Source lifecycle, checkpoints, access state, and
+  supersession state are not changed by a query.
+- Status, workspace, source-kind, and candidate-storage-key filters are
+  applied as retrieval constraints. Candidate-ID filtering is an explicit
+  adapter capability; an adapter must not silently ignore a requested filter.
+- Equal scores are ordered by canonical `storage_key`, so scalar, batch, and
+  concurrent execution remain deterministic.
+- Record results retain `SearchResultProvenance`, including contributing
+  strategies, rank/raw-score details, score adjustments, and parent-expansion
+  identity where applicable. Degraded-mode failures are reported explicitly.
 
-## Canonical search composition
+## Compose canonical search
 
-Compose local search from the record-oriented ports:
+Compose a local record pipeline from the record hydrator and store ports:
 
 ```python
 from searchkernel.api import SearchKernel
@@ -38,26 +49,44 @@ kernel = SearchKernel.build(
 )
 ```
 
-`SearchKernel.build` registers a canonical `SearchOrchestrator` for these
-dependencies. Callers that already own one may pass `orchestrator=` instead.
-The deprecated chunk-oriented execution path has been removed; migrate callers
-to this record composition. For an explicit migration bridge around an
-existing legacy orchestrator, import `LegacyLocalOrchestratorAdapter` from
-`searchkernel.runtime.local`; it is not the supported search pipeline.
+`SearchKernel.build` creates the canonical `SearchOrchestrator` when record
+dependencies are supplied. Callers that already own one may pass
+`orchestrator=` instead. Source adapters map native data into `Record`; the
+core keeps source-specific fields in opaque metadata and uses injected policy
+objects for filtering and ranking.
 
-## Integration tests
+## Removed legacy paths
 
-The pgvector integration tests automatically start a temporary
-`pgvector/pgvector:pg17` Docker container when `SEARCHKERNEL_PG_DSN` is not
-set. Docker must be running:
+The old chunk-oriented query pipeline and legacy federated query execution are
+removed from the supported 0.5.0 architecture. Chunks may still be produced
+during ingestion, and a few compatibility types remain at migration seams,
+but new integrations must use `Record`, `RecordIdentity`, `RecordHit`, the
+record store ports, and the canonical record pipeline. Do not build a second
+query pipeline around the compatibility surface.
+
+## Optional backends
+
+The core package provides source-agnostic domain models, ports, record search,
+and evaluation primitives. Install only the integrations an application uses:
 
 ```bash
-uv run pytest tests/integration
+pip install andnp-searchkernel[pgvector,huggingface,markdown]
 ```
 
-To use an existing PostgreSQL instance instead, set
-`SEARCHKERNEL_PG_DSN` to its connection string. The database must allow the
-`vector` extension to be created.
+Available extras are `faiss`, `pgvector`, `huggingface`, `ollama`, and
+`markdown`. FAISS and pgvector implement the same record-oriented backend
+contracts and can be selected independently. Importing the core does not
+require any optional provider or backend.
+
+## Validation limits
+
+The normal quality gate runs the complete collected suite while excluding
+`slow` and `real_embeddings` tests. It does not prove production relevance,
+latency, memory use, or parity across every backend. The pgvector tests need
+Docker or `SEARCHKERNEL_PG_DSN`; real-embedding tests need locally cached
+models and are not part of the default offline gate. Use the benchmark
+artifacts and [the performance roadmap](docs/search-performance-roadmap.md)
+for the measured scope and remaining limits.
 
 ## Releases
 
