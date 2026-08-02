@@ -19,7 +19,7 @@ from searchkernel.adapters.stores.pgvector import (
     _create_schema,
     _vector_table_name,
 )
-from searchkernel.domain import Record, RecordStatus, Vector
+from searchkernel.domain import GraphEdge, Record, RecordIdentity, RecordStatus, Vector
 from searchkernel.indices import LocalRecordBackend
 from tests.integration.conftest import pg_dsn_for_schema, pg_worker_schema
 
@@ -791,6 +791,60 @@ class TestGraphStore:
 
         assert "test:2" in neighbor_ids
         assert "test:3" not in neighbor_ids
+
+    def test_neighbors_preserve_duplicate_ids_across_workspaces(self, pg_conn):
+        store = PGGraphStore(pg_conn)
+        start = RecordIdentity("workspace-a", "note", "start")
+        first_shared = RecordIdentity("workspace-b", "note", "shared")
+        second_shared = RecordIdentity("workspace-c", "note", "shared")
+
+        store.upsert_edges(
+            [
+                GraphEdge(start, first_shared, "links", 0.9),
+                GraphEdge(first_shared, second_shared, "links", 0.8),
+            ]
+        )
+
+        neighbors = store.neighbors(start, depth=2)
+
+        assert [neighbor.identity for neighbor in neighbors] == [
+            first_shared,
+            second_shared,
+        ]
+
+    def test_neighbors_stop_cycles_without_returning_the_seed(self, pg_conn):
+        store = PGGraphStore(pg_conn)
+        start = RecordIdentity("workspace-a", "note", "start")
+        target = RecordIdentity("workspace-b", "note", "target")
+
+        store.upsert_edges(
+            [
+                GraphEdge(start, target, "links", 0.9),
+                GraphEdge(target, start, "links", 0.8),
+            ]
+        )
+
+        neighbors = store.neighbors(start, depth=3)
+
+        assert [neighbor.identity for neighbor in neighbors] == [target]
+
+    def test_neighbors_order_ties_by_complete_identity(self, pg_conn):
+        store = PGGraphStore(pg_conn)
+        start = RecordIdentity("workspace-a", "note", "start")
+        earlier = RecordIdentity("workspace-b", "note", "shared")
+        later = RecordIdentity("workspace-c", "note", "shared")
+
+        store.upsert_edges(
+            [
+                GraphEdge(start, later, "links", 0.5),
+                GraphEdge(start, earlier, "links", 0.5),
+            ]
+        )
+
+        assert [neighbor.identity for neighbor in store.neighbors(start)] == [
+            earlier,
+            later,
+        ]
 
     def test_schema_migrates_legacy_graph_edges(self, pg_conn):
         conn = pg_conn.get_connection()

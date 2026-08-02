@@ -1553,8 +1553,16 @@ class PGGraphStore:
                            target_workspace_id, target_kind, target_id,
                            edge_type, weight, 1 AS hop,
                            ARRAY[
-                               source_kind || chr(31) || source_id,
-                               target_kind || chr(31) || target_id
+                               jsonb_build_array(
+                                   NULLIF(source_workspace_id, ''),
+                                   source_kind,
+                                   source_id
+                               )::text,
+                               jsonb_build_array(
+                                   NULLIF(target_workspace_id, ''),
+                                   target_kind,
+                                   target_id
+                               )::text
                            ] AS path
                     FROM graph_edges
                     WHERE source_workspace_id IS NOT DISTINCT FROM %s
@@ -1567,7 +1575,11 @@ class PGGraphStore:
                            edge.target_kind, edge.target_id, edge.edge_type,
                            walk.weight * edge.weight, walk.hop + 1,
                            walk.path || (
-                               edge.target_kind || chr(31) || edge.target_id
+                               jsonb_build_array(
+                                   NULLIF(edge.target_workspace_id, ''),
+                                   edge.target_kind,
+                                   edge.target_id
+                               )::text
                            )
                     FROM walk
                     JOIN graph_edges edge
@@ -1577,7 +1589,11 @@ class PGGraphStore:
                      AND edge.source_id = walk.target_id
                     WHERE walk.hop < %s
                       AND NOT (
-                          edge.target_kind || chr(31) || edge.target_id
+                          jsonb_build_array(
+                              NULLIF(edge.target_workspace_id, ''),
+                              edge.target_kind,
+                              edge.target_id
+                          )::text
                       ) = ANY(walk.path)
                       AND TRUE {edge_filter.replace("edge_type", "edge.edge_type")}
                 ),
@@ -1587,7 +1603,7 @@ class PGGraphStore:
                            ROW_NUMBER() OVER (
                                PARTITION BY target_workspace_id, target_kind,
                                             target_id
-                               ORDER BY weight DESC
+                               ORDER BY weight DESC, edge_type
                            ) AS row_number
                     FROM walk
                 )
@@ -1595,7 +1611,8 @@ class PGGraphStore:
                        edge_type, weight
                 FROM ranked
                 WHERE row_number = 1
-                ORDER BY weight DESC, target_kind, target_id;
+                ORDER BY weight DESC, target_workspace_id, target_kind,
+                         target_id, edge_type;
             """
 
             cursor.execute(sql, params)
