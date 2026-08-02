@@ -57,7 +57,7 @@ async def test_complete_text_response_mocked():
         assert "Test prompt" in call_args
         assert "--model" in call_args
         assert "gpt-5.6-luna" in call_args
-        assert "--allow-all" in call_args
+        assert "--allow-all" not in call_args
 
 
 @pytest.mark.asyncio

@@ -21,8 +21,8 @@ from searchkernel.domain import Tier
 class CopilotLLMProvider:
     """LLMProvider backed by the GitHub Copilot CLI.
 
-    Invokes `copilot -p <prompt> --model <model_name> --allow-all` to
-    generate completions. The CLI must be installed and available in PATH.
+    Invokes `copilot -p <prompt> --model <model_name>` to generate
+    completions. The CLI must be installed and available in PATH.
     Errors are deferred until first use (not on import).
     """
 
@@ -87,7 +87,6 @@ class CopilotLLMProvider:
             prompt,
             "--model",
             self.model_name,
-            "--allow-all",
             "-s",  # silent mode: output only the response
         ]
 
