@@ -270,6 +270,37 @@ class SemanticRecordIngestor:
         *,
         failure_mode: IngestionFailureMode,
     ) -> list[RecordIngestionResult]:
+        try:
+            await asyncio.to_thread(
+                self.vector_store.upsert,
+                list(records),
+                self.embedding_provider.model_name,
+                self.embedding_provider.dim,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - preserve per-record attribution
+            return await self._index_vector_records_individually(
+                records,
+                failure_mode=failure_mode,
+            )
+
+        return [
+            RecordIngestionResult(
+                source_kind=record.source_kind,
+                source_id=record.source_id,
+                workspace_id=record.workspace_id,
+                status="committed",
+            )
+            for record in records
+        ]
+
+    async def _index_vector_records_individually(
+        self,
+        records: Sequence[Record],
+        *,
+        failure_mode: IngestionFailureMode,
+    ) -> list[RecordIngestionResult]:
         outcomes: list[RecordIngestionResult] = []
         for record in records:
             try:
