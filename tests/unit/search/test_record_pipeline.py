@@ -235,7 +235,9 @@ async def test_policy_can_bound_vector_acquisition_to_keyword_candidates() -> No
         embedding_provider=FakeEmbedder(),
         hydrator=_hydrator(records),
         policy=RecordSearchPolicy(
-            vector_candidate_ids=lambda ranking, filters: [record_id for record_id, _ in ranking]
+            vector_candidate_ids=lambda ranking, filters: [
+                hit.storage_key for hit in ranking
+            ]
         ),
     )
 
@@ -245,7 +247,10 @@ async def test_policy_can_bound_vector_acquisition_to_keyword_candidates() -> No
         {
             "workspace_id": "workspace-1",
             "statuses": ["active"],
-            "candidate_ids": ["b", "a"],
+            "candidate_ids": [
+                RecordIdentity(None, "fake", "b").storage_key,
+                RecordIdentity(None, "fake", "a").storage_key,
+            ],
         }
     ]
 
@@ -264,7 +269,7 @@ async def test_vector_policy_receives_typed_query_context() -> None:
         assert context.limit == 2
         assert context["workspace_id"] == "workspace-1"
         assert context["statuses"] == ["active"]
-        return [hit.source_id for hit in ranking]
+        return [hit.storage_key for hit in ranking]
 
     def order_candidates(
         ranking: Sequence[RecordHit],
@@ -795,7 +800,7 @@ async def test_candidate_gating_delays_vector_lookup_until_keyword_ids_arrive() 
         hydrator=_hydrator({"a": _record("a")}),
         policy=RecordSearchPolicy(
             vector_candidate_ids=lambda ranking, filters: [
-                record_id for record_id, _score in ranking
+                hit.storage_key for hit in ranking
             ]
         ),
     )

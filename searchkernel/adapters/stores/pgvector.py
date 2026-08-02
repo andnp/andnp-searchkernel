@@ -42,8 +42,8 @@ from searchkernel.domain import (
     Vector,
 )
 from searchkernel.domain.vector_filters import (
+    candidate_storage_keys,
     filter_values,
-    identity_filter_values,
     status_values,
 )
 
@@ -196,14 +196,11 @@ def build_pgvector_filter_sql(
     if candidate_value is None:
         candidate_value = filters.get("candidate_storage_keys")
     if candidate_value is not None:
-        candidate_keys, candidate_sources = identity_filter_values(candidate_value)
-        if not candidate_keys and not candidate_sources:
+        candidate_keys = candidate_storage_keys(candidate_value)
+        if not candidate_keys:
             return ["FALSE"], []
-        clauses.append(
-            f"({record_alias}.record_id = ANY(%s) "
-            f"OR {record_alias}.source_id = ANY(%s))"
-        )
-        parameters.extend([sorted(candidate_keys), sorted(candidate_sources)])
+        clauses.append(f"{record_alias}.record_id = ANY(%s)")
+        parameters.append(sorted(candidate_keys))
 
     project_expr = f"{record_alias}.metadata->>'project_id'"
     project_values = _string_filter_values(

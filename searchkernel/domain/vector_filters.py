@@ -47,17 +47,18 @@ def status_values(filters: Mapping[str, Any] | None) -> set[str]:
     }
 
 
-def identity_filter_values(value: Any) -> tuple[set[str], set[str]]:
+def candidate_storage_keys(value: Any) -> set[str]:
+    """Return only canonical keys accepted by internal candidate filters."""
     storage_keys: set[str] = set()
-    source_ids: set[str] = set()
     for item in filter_values(value):
         if isinstance(item, RecordIdentity):
             storage_keys.add(item.storage_key)
         elif isinstance(item, str) and item.startswith("record:"):
-            storage_keys.add(item)
-        else:
-            source_ids.add(str(item))
-    return storage_keys, source_ids
+            try:
+                storage_keys.add(RecordIdentity.from_storage_key(item).storage_key)
+            except ValueError:
+                continue
+    return storage_keys
 
 
 def _string_values(
@@ -130,10 +131,10 @@ def record_matches_vector_filters(
     if candidate_value is None:
         candidate_value = filters.get("candidate_storage_keys")
     if candidate_value is not None:
-        candidate_keys, candidate_sources = identity_filter_values(candidate_value)
-        if not candidate_keys and not candidate_sources:
+        candidate_keys = candidate_storage_keys(candidate_value)
+        if not candidate_keys:
             return False
-        if storage_key not in candidate_keys and source_id not in candidate_sources:
+        if storage_key not in candidate_keys:
             return False
 
     project_id = metadata.get("project_id")
