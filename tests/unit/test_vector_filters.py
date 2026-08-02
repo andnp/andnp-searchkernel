@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 from searchkernel.domain import Record, RecordIdentity
+from searchkernel.domain.vector_filters import compile_vector_filters
 from searchkernel.indices import LocalRecordBackend
 
 
@@ -100,3 +101,40 @@ def test_local_vector_candidate_filter_rejects_bare_source_id(tmp_path) -> None:
         dim=2,
         filters={"candidate_ids": ["same"]},
     ) == []
+
+
+def test_compiled_vector_filter_reuses_normalized_constraints() -> None:
+    record = _record(
+        "guide/setup",
+        project_id="keep",
+        file_path="/docs/guide/setup.md",
+    )
+    predicate = compile_vector_filters(
+        {
+            "candidate_ids": [record.identity],
+            "workspace_id": "workspace",
+            "source_kind": "note",
+            "project_id": "keep",
+            "document_id": "guide/setup",
+            "metadata_equals": {"project_id": "keep"},
+        }
+    )
+
+    assert predicate.matches(
+        storage_key=record.storage_key,
+        source_id=record.source_id,
+        workspace_id=record.workspace_id,
+        source_kind=record.source_kind,
+        status=record.status,
+        metadata=record.metadata,
+        uri=record.uri,
+    )
+    assert not predicate.matches(
+        storage_key=record.storage_key,
+        source_id=record.source_id,
+        workspace_id="other",
+        source_kind=record.source_kind,
+        status=record.status,
+        metadata=record.metadata,
+        uri=record.uri,
+    )

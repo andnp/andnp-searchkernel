@@ -10,8 +10,8 @@ from typing import Any
 import numpy as np
 
 from searchkernel.domain.vector_filters import (
+    compile_vector_filters,
     metadata_mapping,
-    record_matches_vector_filters,
 )
 
 VECTOR_FORMAT_VERSION = 2
@@ -201,9 +201,10 @@ class VectorSnapshot:
         status_values: set[str],
         filter_values: Any,
     ) -> np.ndarray:
+        predicate = compile_vector_filters(filters)
         return np.asarray(
             [
-                record_matches_vector_filters(
+                predicate.matches(
                     storage_key=storage_key,
                     source_id=str(source_id),
                     workspace_id=(
@@ -213,7 +214,6 @@ class VectorSnapshot:
                     status=str(status),
                     metadata=metadata,
                     uri=uri,
-                    filters=filters,
                 )
                 for storage_key, source_id, workspace_id, source_kind, status, metadata, uri in zip(
                     self.storage_keys,

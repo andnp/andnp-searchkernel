@@ -14,8 +14,9 @@ import numpy as np
 
 from searchkernel.domain import Record, RecordHit, RecordIdentity, Vector
 from searchkernel.domain.vector_filters import (
+    CompiledVectorFilter,
+    compile_vector_filters,
     metadata_mapping,
-    record_matches_vector_filters,
 )
 from searchkernel.indices.local_vectors import (
     NORMALIZATION_POLICY,
@@ -260,6 +261,7 @@ class FAISSLocalVectorStore:
         if total == 0:
             return []
         scan = min(total, max(k, int(np.ceil(k * self._overfetch_multiplier))))
+        predicate = compile_vector_filters(filters)
         hits: dict[str, RecordHit] = {}
         for _ in range(self._max_scan_rounds):
             with self._state_lock:
@@ -270,7 +272,7 @@ class FAISSLocalVectorStore:
             valid_storage_keys = self._validated_storage_keys(
                 state,
                 (int(faiss_id) for faiss_id in ids[0]),
-                filters,
+                predicate,
             )
             for score, faiss_id in zip(scores[0], ids[0], strict=True):
                 storage_key = valid_storage_keys.get(int(faiss_id))
@@ -296,7 +298,7 @@ class FAISSLocalVectorStore:
     def _validated_storage_keys(
         state: _FAISSState,
         faiss_ids: Any,
-        filters: dict[str, Any] | None,
+        predicate: CompiledVectorFilter,
     ) -> dict[int, str]:
         valid: dict[int, str] = {}
         for faiss_id in faiss_ids:
@@ -309,7 +311,7 @@ class FAISSLocalVectorStore:
             if (
                 storage_key is not None
                 and metadata is not None
-                and record_matches_vector_filters(
+                and predicate.matches(
                     storage_key=storage_key,
                     source_id=metadata.source_id,
                     workspace_id=metadata.workspace_id,
@@ -317,7 +319,6 @@ class FAISSLocalVectorStore:
                     status=metadata.status,
                     metadata=metadata.metadata,
                     uri=metadata.uri,
-                    filters=filters,
                 )
             ):
                 valid[faiss_id] = storage_key

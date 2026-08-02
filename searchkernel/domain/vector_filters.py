@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from searchkernel.domain.models import RecordIdentity, RecordStatus
@@ -98,6 +99,153 @@ def _path_values(uri: str | None, metadata: Mapping[str, Any]) -> set[str]:
     return set()
 
 
+@dataclass(frozen=True, slots=True)
+class CompiledVectorFilter:
+    statuses: frozenset[str]
+    workspace_id: Any
+    source_kinds: frozenset[str] | None
+    candidate_keys: frozenset[str] | None
+    project_values: frozenset[str] | None
+    excluded_projects: frozenset[str] | None
+    included_paths: frozenset[str] | None
+    excluded_paths: frozenset[str] | None
+    document_values: frozenset[str] | None
+    excluded_documents: frozenset[str] | None
+    metadata_equals: tuple[tuple[str, str], ...] | None
+
+    def matches(
+        self,
+        *,
+        storage_key: str,
+        source_id: str,
+        workspace_id: str | None,
+        source_kind: str,
+        status: str | RecordStatus,
+        metadata: Mapping[str, Any] | None = None,
+        uri: str | None = None,
+    ) -> bool:
+        normalized_status = (
+            status.value if isinstance(status, RecordStatus) else str(status)
+        )
+        if normalized_status not in self.statuses:
+            return False
+        if self.workspace_id is not None and workspace_id != self.workspace_id:
+            return False
+        if self.source_kinds is not None and source_kind not in self.source_kinds:
+            return False
+        if self.candidate_keys is not None and storage_key not in self.candidate_keys:
+            return False
+
+        metadata = metadata_mapping(metadata)
+        project_id = metadata.get("project_id")
+        if self.project_values is not None and str(project_id) not in self.project_values:
+            return False
+        if (
+            self.excluded_projects is not None
+            and project_id is not None
+            and str(project_id) in self.excluded_projects
+        ):
+            return False
+
+        path_values = _path_values(uri, metadata)
+        if self.included_paths is not None and not path_values.intersection(
+            self.included_paths
+        ):
+            return False
+        if self.excluded_paths is not None and path_values.intersection(
+            self.excluded_paths
+        ):
+            return False
+
+        document_id = metadata.get("doc_id", source_id)
+        if self.document_values is not None and str(document_id) not in self.document_values:
+            return False
+        if self.excluded_documents is not None and (
+            str(document_id) in self.excluded_documents
+            or source_id in self.excluded_documents
+        ):
+            return False
+        if self.metadata_equals is not None:
+            for field, value in self.metadata_equals:
+                if str(metadata.get(field)) != value:
+                    return False
+        return True
+
+
+def compile_vector_filters(
+    filters: Mapping[str, Any] | None,
+) -> CompiledVectorFilter:
+    filters = filters or {}
+
+    def string_set(*names: str) -> frozenset[str] | None:
+        values = _string_values(filters, *names)
+        return None if values is None else frozenset(values)
+
+    included_paths = _string_values(
+        filters,
+        "paths",
+        "file_paths",
+        "source_files",
+        "path",
+        "file_path",
+        "source_file",
+    )
+    excluded_paths = _string_values(
+        filters,
+        "excluded_files",
+        "excluded_paths",
+        "excluded_file_paths",
+        "excluded_source_files",
+    )
+
+    def path_set(values: list[str] | None) -> frozenset[str] | None:
+        if values is None:
+            return None
+        return frozenset().union(*(_path_variants(value) for value in values))
+
+    document_values = string_set("document_ids", "document_id", "doc_ids", "doc_id")
+    excluded_documents = _string_values(
+        filters,
+        "excluded_documents",
+        "excluded_document_ids",
+        "excluded_doc_ids",
+    )
+    project_values = string_set("project_ids", "project_id", "project_filter")
+    if project_values == frozenset() and "project_filter" in filters:
+        project_values = None
+    metadata_equals = filters.get("metadata_equals")
+    compiled_metadata = (
+        tuple(
+            (field, str(value))
+            for field, value in metadata_equals.items()
+            if value is not None
+        )
+        if metadata_equals is not None
+        else None
+    )
+    candidate_value = filters.get("candidate_ids")
+    if candidate_value is None:
+        candidate_value = filters.get("candidate_storage_keys")
+    candidate_keys = (
+        frozenset(candidate_storage_keys(candidate_value))
+        if candidate_value is not None
+        else None
+    )
+    return CompiledVectorFilter(
+        statuses=frozenset(status_values(filters)),
+        workspace_id=filters.get("workspace_id"),
+        source_kinds=string_set("source_kinds", "source_kind", "source_filter"),
+        candidate_keys=candidate_keys,
+        project_values=project_values,
+        excluded_projects=string_set("excluded_projects", "excluded_project_ids"),
+        included_paths=path_set(included_paths),
+        excluded_paths=path_set(excluded_paths),
+        document_values=document_values,
+        excluded_documents=path_set(excluded_documents),
+        metadata_equals=compiled_metadata,
+    )
+
+
 def record_matches_vector_filters(
     *,
     storage_key: str,
@@ -109,102 +257,12 @@ def record_matches_vector_filters(
     uri: str | None = None,
     filters: Mapping[str, Any] | None = None,
 ) -> bool:
-    filters = filters or {}
-    metadata = metadata_mapping(metadata)
-    normalized_status = (
-        status.value if isinstance(status, RecordStatus) else str(status)
+    return compile_vector_filters(filters).matches(
+        storage_key=storage_key,
+        source_id=source_id,
+        workspace_id=workspace_id,
+        source_kind=source_kind,
+        status=status,
+        metadata=metadata,
+        uri=uri,
     )
-    if normalized_status not in status_values(filters):
-        return False
-
-    requested_workspace = filters.get("workspace_id")
-    if requested_workspace is not None and workspace_id != requested_workspace:
-        return False
-
-    source_kinds = _string_values(
-        filters, "source_kinds", "source_kind", "source_filter"
-    )
-    if source_kinds is not None and source_kind not in set(source_kinds):
-        return False
-
-    candidate_value = filters.get("candidate_ids")
-    if candidate_value is None:
-        candidate_value = filters.get("candidate_storage_keys")
-    if candidate_value is not None:
-        candidate_keys = candidate_storage_keys(candidate_value)
-        if not candidate_keys:
-            return False
-        if storage_key not in candidate_keys:
-            return False
-
-    project_id = metadata.get("project_id")
-    project_values = _string_values(
-        filters, "project_ids", "project_id", "project_filter"
-    )
-    if project_values == [] and "project_filter" in filters:
-        project_values = None
-    if project_values is not None and str(project_id) not in set(project_values):
-        return False
-    excluded_projects = _string_values(
-        filters, "excluded_projects", "excluded_project_ids"
-    )
-    if (
-        excluded_projects is not None
-        and project_id is not None
-        and str(project_id) in set(excluded_projects)
-    ):
-        return False
-
-    path_values = _path_values(uri, metadata)
-    included_paths = _string_values(
-        filters,
-        "paths",
-        "file_paths",
-        "source_files",
-        "path",
-        "file_path",
-        "source_file",
-    )
-    if included_paths is not None:
-        expected = set().union(*(_path_variants(value) for value in included_paths))
-        if not path_values.intersection(expected):
-            return False
-
-    excluded_paths = _string_values(
-        filters,
-        "excluded_files",
-        "excluded_paths",
-        "excluded_file_paths",
-        "excluded_source_files",
-    )
-    if excluded_paths is not None:
-        excluded = set().union(*(_path_variants(value) for value in excluded_paths))
-        if path_values.intersection(excluded):
-            return False
-
-    document_id = metadata.get("doc_id", source_id)
-    document_values = _string_values(
-        filters, "document_ids", "document_id", "doc_ids", "doc_id"
-    )
-    if document_values is not None and str(document_id) not in set(document_values):
-        return False
-    excluded_documents = _string_values(
-        filters,
-        "excluded_documents",
-        "excluded_document_ids",
-        "excluded_doc_ids",
-    )
-    if excluded_documents is not None:
-        excluded = set().union(
-            *(_path_variants(value) for value in excluded_documents)
-        )
-        if str(document_id) in excluded or source_id in excluded:
-            return False
-
-    metadata_equals = filters.get("metadata_equals")
-    if metadata_equals is not None:
-        for field, value in metadata_equals.items():
-            if value is not None and str(metadata.get(field)) != str(value):
-                return False
-
-    return True
