@@ -13,12 +13,15 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from searchkernel.domain import Record, RecordHit, RecordIdentity, Vector
+from searchkernel.domain.vector_filters import (
+    metadata_mapping,
+    record_matches_vector_filters,
+)
 from searchkernel.indices.local_vectors import (
     NORMALIZATION_POLICY,
     VECTOR_FORMAT_VERSION,
     PackedVectorCodec,
 )
-from searchkernel.domain.vector_filters import metadata_mapping, record_matches_vector_filters
 from searchkernel.utils.atomic_io import atomic_write_binary, atomic_write_json
 
 if TYPE_CHECKING:
