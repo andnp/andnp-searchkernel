@@ -29,6 +29,23 @@ from searchkernel.ports.embedding import (
     EmbeddingSink,
 )
 from searchkernel.ports.epochs import SearchEpochs
+from searchkernel.ports.federation import (
+    FEDERATION_CONTRACT_VERSION,
+    MAX_QUERY_LENGTH,
+    MAX_RERANK_TEXT_LENGTH,
+    MAX_SNIPPET_LENGTH,
+    MAX_TOP_K,
+    CallerAuthorizationContext,
+    SearchHit,
+    SearchHitProvenance,
+    SearchRequest,
+    SearchResponse,
+    SearchSource,
+    SourceIdentity,
+)
+from searchkernel.ports.federation import (
+    SourceCapabilities as FederationSourceCapabilities,
+)
 from searchkernel.ports.index_manager import IndexManagerPort
 from searchkernel.ports.llm import LLMProvider
 from searchkernel.ports.orchestrator_config import OrchestratorConfig
@@ -71,6 +88,11 @@ from searchkernel.ports.stores import (
 )
 
 __all__ = [
+    "FEDERATION_CONTRACT_VERSION",
+    "MAX_QUERY_LENGTH",
+    "MAX_RERANK_TEXT_LENGTH",
+    "MAX_SNIPPET_LENGTH",
+    "MAX_TOP_K",
     "ActiveModelStore",
     "AsyncEmbeddingProvider",
     "AsyncGraphStore",
@@ -82,6 +104,7 @@ __all__ = [
     "BatchGraphStore",
     "BatchRecordHydrator",
     "CacheStore",
+    "CallerAuthorizationContext",
     "CandidateFilterSupport",
     "CheckpointStore",
     "ChunkTuningConfig",
@@ -90,6 +113,7 @@ __all__ = [
     "EmbeddingProvider",
     "EmbeddingSink",
     "FailureStage",
+    "FederationSourceCapabilities",
     "GraphEdge",
     "GraphNeighbor",
     "GraphStore",
@@ -118,9 +142,15 @@ __all__ = [
     "SearchAPI",
     "SearchEpochs",
     "SearchFilters",
+    "SearchHit",
+    "SearchHitProvenance",
+    "SearchRequest",
+    "SearchResponse",
+    "SearchSource",
     "SearchTrace",
     "SourceBatch",
     "SourceCapabilities",
+    "SourceIdentity",
     "VectorStore",
     "extract_retrieval_fields",
 ]
