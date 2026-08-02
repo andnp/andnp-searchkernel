@@ -34,8 +34,6 @@ from searchkernel.indexing.stages import (
     StageResult,
 )
 from searchkernel.indices import LocalRecordBackend
-from searchkernel.indices.graph import GraphStore
-from searchkernel.indices.keyword import KeywordIndex
 from searchkernel.ports.content_source import (
     IngestionError,
     IngestionFailureMode,
@@ -43,7 +41,6 @@ from searchkernel.ports.content_source import (
     RecordIngestionResult,
     RecordIngestor,
 )
-from searchkernel.storage.db import DatabaseManager
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -130,17 +127,24 @@ class _Materializer:
         self.calls.append((source_id, semantic_input.content_hash))
 
 
+class _RecordingChunkWriter:
+    def __init__(self) -> None:
+        self.chunks: list[Chunk] = []
+
+    def add_chunks(self, chunks: list[Chunk]) -> None:
+        self.chunks.extend(chunks)
+
+
 class _BulkGraph:
-    def __init__(self, graph: GraphStore) -> None:
-        self.graph = graph
+    def __init__(self) -> None:
+        self.nodes: list[tuple[str, dict]] = []
+        self.edges: list[tuple[str, str, str, str]] = []
 
     def add_nodes(self, nodes: list[tuple[str, dict]]) -> None:
-        for node_id, metadata in nodes:
-            self.graph.add_node(node_id, metadata)
+        self.nodes.extend(nodes)
 
     def add_edges(self, edges: list[tuple[str, str, str, str]]) -> None:
-        for source, target, edge_type, context in edges:
-            self.graph.add_edge(source, target, edge_type, context)
+        self.edges.extend(edges)
 
 
 class _FailingStage:
@@ -271,8 +275,8 @@ def _checkpoint_for_batch(batch: PreparedIndexBatch) -> str:
 async def test_prepared_records_are_bounded_and_stage_progress_is_ordered(
     tmp_path: Path,
 ) -> None:
-    keyword = KeywordIndex(DatabaseManager(tmp_path / "keyword.db"))
-    graph = GraphStore(DatabaseManager(tmp_path / "graph.db"))
+    keyword = _RecordingChunkWriter()
+    graph = _BulkGraph()
     availability = SearchAvailability(
         lexical="complete",
         graph="complete",
@@ -281,7 +285,7 @@ async def test_prepared_records_are_bounded_and_stage_progress_is_ordered(
     )
     coordinator, cache, encoder, materializer = _coordinator(
         tmp_path,
-        stages=(KeywordStage(keyword), GraphStage(_BulkGraph(graph))),
+        stages=(KeywordStage(keyword), GraphStage(graph)),
         checkpoint_store=JsonCheckpointStore(tmp_path / "checkpoint.json"),
     )
     events: list[tuple[int, str]] = []
@@ -375,11 +379,11 @@ async def test_restart_uses_durable_checkpoint_without_repeating_completed_batch
     ]
     source = _CursorSource(records)
     checkpoint_store = JsonCheckpointStore(tmp_path / "checkpoint.json")
-    keyword = KeywordIndex(DatabaseManager(tmp_path / "keyword.db"))
-    graph = GraphStore(DatabaseManager(tmp_path / "graph.db"))
+    keyword = _RecordingChunkWriter()
+    graph = _BulkGraph()
     first, first_cache, first_encoder, _ = _coordinator(
         tmp_path,
-        stages=(KeywordStage(keyword), GraphStage(_BulkGraph(graph))),
+        stages=(KeywordStage(keyword), GraphStage(graph)),
         checkpoint_store=checkpoint_store,
     )
 
@@ -404,7 +408,7 @@ async def test_restart_uses_durable_checkpoint_without_repeating_completed_batch
 
     second, second_cache, second_encoder, _ = _coordinator(
         tmp_path,
-        stages=(KeywordStage(keyword), GraphStage(_BulkGraph(graph))),
+        stages=(KeywordStage(keyword), GraphStage(graph)),
         checkpoint_store=checkpoint_store,
     )
     receipt = await second.run_source(
@@ -418,7 +422,7 @@ async def test_restart_uses_durable_checkpoint_without_repeating_completed_batch
     assert receipt.checkpoint == "4"
     assert source.since_values == [None, "2"]
     assert second_encoder.calls == [("body for three", "body for four")]
-    assert len(keyword.search("body", top_k=10)) == 4
+    assert len(keyword.chunks) == 4
     second_cache.close()
 
 

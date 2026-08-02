@@ -59,10 +59,6 @@ from searchkernel.embeddings import (
     TEST_FAKE_EMBEDDINGS_ENV_VAR,
     DeterministicFakeEmbeddingModel,
 )
-from searchkernel.indices.graph import GraphStore
-from searchkernel.indices.keyword import KeywordIndex
-from searchkernel.indices.vector import VectorIndex
-from searchkernel.storage.db import DatabaseManager
 
 # ============================================================================
 # Test Fixture Factories
@@ -138,40 +134,6 @@ def shared_embedding_model():
     return model
 
 
-@pytest.fixture(scope="module")
-def module_vector_index(shared_embedding_model):
-    """
-    Module-scoped VectorIndex with shared embedding model.
-
-    Use this instead of creating VectorIndex() in function-scoped fixtures
-    to avoid redundant model loading (2-4s overhead per load).
-
-    Note: Module scope means tests share index state. Only use when tests
-    don't mutate the index or when using tmp_path for document isolation.
-    """
-    return VectorIndex(embedding_model=shared_embedding_model)
-
-
-@pytest.fixture(scope="module")
-def module_indices(shared_embedding_model, tmp_path_factory):
-    """
-    Module-scoped indices for integration tests.
-
-    Returns (vector, keyword, graph) tuple with shared embedding model.
-    Avoids redundant model loading across tests in the same module.
-
-    Note: Module scope means tests share index state. Ensure tests either:
-    1. Use separate tmp_path directories for document isolation, OR
-    2. Don't mutate index state, OR
-    3. Explicitly clear indices between tests
-    """
-    vector = VectorIndex(embedding_model=shared_embedding_model)
-    db_path = tmp_path_factory.mktemp("keyword_module") / "index.db"
-    keyword = KeywordIndex(DatabaseManager(db_path))
-    graph = GraphStore()
-    return vector, keyword, graph
-
-
 # ============================================================================
 # Persistent Storage Fixtures
 # ============================================================================
@@ -219,29 +181,6 @@ def persistent_index_path(persistent_storage_root: Path) -> Path:
 
 
 # ============================================================================
-# Function-Scoped Persistent Fixtures with Cleanup
-# ============================================================================
-
-
-@pytest.fixture
-def persistent_indices_isolated(
-    shared_embedding_model, tmp_path
-) -> Generator[tuple[VectorIndex, KeywordIndex, GraphStore]]:
-    """
-    Create function-scoped indices that can use persistent storage.
-
-    Fresh indices for each test but can persist to/load from disk.
-    Provides isolation while allowing persistence testing.
-
-    Yields tuple of (vector, keyword, graph) indices.
-    """
-    vector = VectorIndex(embedding_model=shared_embedding_model)
-    keyword = KeywordIndex(DatabaseManager(tmp_path / "index.db"))
-    graph = GraphStore()
-    yield vector, keyword, graph
-
-
-# ============================================================================
 # Cleanup Utilities
 # ============================================================================
 
@@ -256,14 +195,8 @@ def cleanup_persistent_indices(
     Use this fixture when you need guaranteed cleanup of persistent
     storage after a test, even if using session-scoped paths.
 
-    Example:
-        def test_with_cleanup(
-            persistent_indices_isolated,
-            cleanup_persistent_indices
-        ):
-            # Test code here
-            # Indices will be cleaned up after test
-            pass
+    Use this fixture when a test needs guaranteed cleanup of the persistent
+    index directory after execution.
     """
     yield
     # Cleanup after test
