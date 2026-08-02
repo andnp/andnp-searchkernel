@@ -474,6 +474,56 @@ async def test_strict_failure_raises_and_lenient_failure_continues_without_cross
 
 
 @pytest.mark.asyncio
+async def test_failed_batch_can_be_retried_without_crossing_checkpoint_gap(
+    tmp_path: Path,
+) -> None:
+    records = [
+        _record("one", cursor="1"),
+        _record("bad", cursor="2"),
+        _record("three", cursor="3"),
+    ]
+    source = _CursorSource(records)
+    checkpoint_store = JsonCheckpointStore(tmp_path / "checkpoint.json")
+    failing_stage = _FailingStage({"bad"})
+    coordinator, cache, _, _ = _coordinator(
+        tmp_path,
+        stages=(failing_stage,),
+        checkpoint_store=checkpoint_store,
+    )
+    prepare = lambda batch: PreparedIndexBatch.from_records(
+        [_prepared(record) for record in batch]
+    )
+
+    first = await coordinator.run_source(
+        source,
+        prepare_batch=prepare,
+        batch_size=1,
+        failure_mode="lenient",
+    )
+
+    assert first.failed == 1
+    assert first.committed == 2
+    assert first.checkpoint == "1"
+    assert await checkpoint_store.load("notes") == "1"
+
+    failing_stage.failed_ids.clear()
+    second = await coordinator.run_source(
+        source,
+        prepare_batch=prepare,
+        batch_size=1,
+        failure_mode="lenient",
+    )
+
+    assert [result.source_id for result in second.records] == ["bad", "three"]
+    assert second.failed == 0
+    assert second.committed == 2
+    assert second.checkpoint == "3"
+    assert await checkpoint_store.load("notes") == "3"
+    assert source.since_values == [None, "1"]
+    cache.close()
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_file_preserves_last_value_when_persistence_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
