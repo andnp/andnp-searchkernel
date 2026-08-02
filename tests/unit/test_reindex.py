@@ -484,7 +484,9 @@ def test_lifecycle_backfill_embeds_indexed_text_with_body_fallback(tmp_path: Pat
     routine.expand()
     routine.backfill()
 
-    assert provider.embedded_texts == [["indexed text", "local body 1"]]
+    assert provider.embedded_texts == [
+        ["Title: Local 0\n\nindexed text", "Title: Local 1\n\nlocal body 1"]
+    ]
 
 
 def test_backfill_failure_is_resumable_and_retryable(tmp_path: Path):
@@ -611,8 +613,8 @@ def test_checkpoint_keeps_body_fallback_identity_stable(tmp_path: Path):
 
     assert progress.complete
     assert restarted_provider.embedded_texts == [
-        ["local body 2", "local body 3"],
-        ["local body 4"],
+        ["Title: Local 2\n\nlocal body 2", "Title: Local 3\n\nlocal body 3"],
+        ["Title: Local 4\n\nlocal body 4"],
     ]
 
 

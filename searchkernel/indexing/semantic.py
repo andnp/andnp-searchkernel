@@ -81,8 +81,13 @@ def semantic_input_for_record(
     tier: SemanticTier = "fine",
     priority: int = 0,
 ) -> SemanticInput:
-    """Build the canonical semantic input for one source-agnostic record."""
-    text = record.indexed_text or record.body
+    """Build the canonical semantic input for one source-agnostic record.
+
+    Titled records use ``Title: <title>\n\n<indexed text or body>``. Records
+    without a title retain the existing text exactly for compatibility.
+    """
+    content = record.indexed_text or record.body
+    text = f"Title: {record.title}\n\n{content}" if record.title else content
     return SemanticInput(
         source_id=record.storage_key,
         text=text,

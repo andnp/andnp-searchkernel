@@ -187,21 +187,38 @@ class TestSemanticInputForRecord:
         input_item = semantic_input_for_record(record, "test-ns")
 
         assert input_item.source_id == record.storage_key
-        assert input_item.text == "Search text"
-        assert input_item.content_hash == embedding_identity("Search text", "test-ns")
+        assert input_item.text == "Title: Title\n\nSearch text"
+        assert input_item.content_hash == embedding_identity(
+            "Title: Title\n\nSearch text", "test-ns"
+        )
 
     def test_semantic_input_falls_back_to_body(self) -> None:
         timestamp = datetime(2026, 1, 1, tzinfo=UTC)
         record = Record(
             "note",
             "note-1",
-            "Title",
+            "",
             "Raw body",
             timestamp,
             timestamp,
         )
 
         assert semantic_input_for_record(record).text == "Raw body"
+
+    def test_title_changes_embedding_identity(self) -> None:
+        timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+        first = Record(
+            "note", "note-1", "First title", "Same body", timestamp, timestamp
+        )
+        second = Record(
+            "note", "note-2", "Second title", "Same body", timestamp, timestamp
+        )
+
+        first_input = semantic_input_for_record(first, "test-ns")
+        second_input = semantic_input_for_record(second, "test-ns")
+
+        assert first_input.text != second_input.text
+        assert first_input.content_hash != second_input.content_hash
 
     def test_record_inputs_share_work_for_duplicate_indexed_text(self) -> None:
         timestamp = datetime(2026, 1, 1, tzinfo=UTC)

@@ -78,6 +78,7 @@ class _VectorStore:
 def _record(
     source_id: str,
     *,
+    title: str | None = None,
     body: str | None = None,
     indexed_text: str | None = None,
     status: RecordStatus = RecordStatus.ACTIVE,
@@ -86,7 +87,7 @@ def _record(
     return Record(
         source_kind="notes",
         source_id=source_id,
-        title=source_id,
+        title=source_id if title is None else title,
         body=body or f"raw body for {source_id}",
         indexed_text=indexed_text,
         created_at=timestamp,
@@ -118,7 +119,7 @@ def _ingestor(
 
 
 @pytest.mark.asyncio
-async def test_duplicate_effective_text_reuses_embedding_and_preserves_raw_body(
+async def test_distinct_titled_texts_do_not_reuse_embedding_and_preserve_raw_body(
     tmp_path,
 ) -> None:
     provider = _Provider()
@@ -131,10 +132,16 @@ async def test_duplicate_effective_text_reuses_embedding_and_preserves_raw_body(
 
     assert receipt.records[0].source_id == "one"
     assert receipt.records[1].source_id == "two"
-    assert provider.calls == [["same indexed text"]]
+    expected_texts = [
+        "Title: one\n\nsame indexed text",
+        "Title: two\n\nsame indexed text",
+    ]
+    assert len(provider.calls) == 1
+    assert sorted(provider.calls[0]) == sorted(expected_texts)
     assert cache.metrics.hits == 0
-    assert cache.metrics.misses == 1
-    assert first.embedding == second.embedding == [17.0]
+    assert cache.metrics.misses == 2
+    assert first.embedding == [float(len(expected_texts[0]))]
+    assert second.embedding == [float(len(expected_texts[1]))]
     assert first.body == "raw one"
     assert second.body == "raw two"
     assert [record.storage_key for record in keyword.records] == [
@@ -163,7 +170,13 @@ async def test_batch_embedding_encodes_unique_texts_together(tmp_path) -> None:
 
     assert receipt.committed == 3
     assert len(provider.calls) == 1
-    assert sorted(provider.calls[0]) == ["first text", "second text"]
+    assert sorted(provider.calls[0]) == sorted(
+        [
+            "Title: one\n\nfirst text",
+            "Title: two\n\nsecond text",
+            "Title: three\n\nfirst text",
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -195,7 +208,9 @@ async def test_cache_hit_reuses_embedding_across_ingestor_instances(tmp_path) ->
         first_provider,
         cache=SQLiteEmbeddingCache(cache_path, "shared", 1),
     )
-    await first_ingestor.index_records([_record("one", indexed_text="cached text")])
+    await first_ingestor.index_records(
+        [_record("one", title="Shared title", indexed_text="cached text")]
+    )
 
     second_provider = _Provider()
     second_ingestor, _, _ = _ingestor(
@@ -203,7 +218,7 @@ async def test_cache_hit_reuses_embedding_across_ingestor_instances(tmp_path) ->
         cache=SQLiteEmbeddingCache(cache_path, "shared", 1),
     )
     receipt = await second_ingestor.index_records(
-        [_record("two", indexed_text="cached text")]
+        [_record("two", title="Shared title", indexed_text="cached text")]
     )
 
     assert receipt.committed == 1
