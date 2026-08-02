@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-test:
+  quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,8 +32,89 @@ jobs:
       - name: Check imports with import-linter
         run: uv run lint-imports
 
-      - name: Run unit tests
-        run: uv run pytest tests/unit --strict-markers -m "not slow and not real_embeddings" -v
+      - name: Run safe suite with coverage
+        run: >-
+          uv run pytest tests --strict-markers
+          -m "not slow and not real_embeddings"
+          --cov=searchkernel
+          --cov-report=term-missing
+          --cov-report=xml
+          -v
 
-      - name: Run integration tests
-        run: uv run pytest tests/integration --strict-markers -m "not slow and not real_embeddings" -v
+  supported-python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Sync locked dependencies
+        run: uv sync --locked
+
+      - name: Run safe suite
+        run: >-
+          uv run pytest tests --strict-markers
+          -m "not slow and not real_embeddings"
+          --no-cov -q
+
+  optional-dependencies:
+    name: Optional extra (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core
+            extra: ""
+            check: "import searchkernel.api"
+          - name: faiss
+            extra: faiss
+            check: "import faiss; from searchkernel.indices.faiss_local import FAISSLocalVectorStore"
+          - name: pgvector
+            extra: pgvector
+            check: "import psycopg2; from searchkernel.adapters.stores.pgvector import PGVectorStore"
+          - name: huggingface
+            extra: huggingface
+            check: "import sentence_transformers; from searchkernel.adapters.embedding.huggingface import HuggingFaceEmbeddingProvider"
+          - name: ollama
+            extra: ollama
+            check: "import httpx; from searchkernel.adapters.embedding.ollama import OllamaEmbeddingProvider"
+          - name: markdown
+            extra: markdown
+            check: "import tree_sitter; import tree_sitter_markdown; from searchkernel.chunking.header_chunker import HeaderBasedChunker"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install core or selected extra from lockfile
+        env:
+          UV_EXTRA: ${{ matrix.extra }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$UV_EXTRA" ]]; then
+            uv sync --locked --no-dev --extra "$UV_EXTRA"
+          else
+            uv sync --locked --no-dev
+          fi
+
+      - name: Import selected dependency surface
+        run: uv run --no-dev python -c "${{ matrix.check }}"

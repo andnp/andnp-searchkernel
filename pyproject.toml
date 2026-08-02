@@ -8,6 +8,11 @@ version = "0.5.0"
 description = "Source-agnostic search/indexing kernel: domain-agnostic content ingestion, hybrid vector+keyword+graph search, pluggable embedding/LLM/reranker providers."
 readme = "README.md"
 requires-python = ">=3.13"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
 dependencies = [
     "numpy>=2.0.0",
 ]
@@ -92,6 +97,7 @@ packages = ["searchkernel"]
 
 [tool.pytest.ini_options]
 pythonpath = "."
+testpaths = ["tests"]
 addopts = "-n 4 --dist worksteal"
 markers = [
     "serial: marks tests that must run serially (not in parallel)",
@@ -101,6 +107,15 @@ markers = [
     "slow: marks slow tests (>5s, load models or process large datasets)",
     "real_embeddings: marks tests that require real embedding models (not fake deterministic embeddings)",
 ]
+
+[tool.coverage.run]
+branch = true
+source = ["searchkernel"]
+
+[tool.coverage.report]
+fail_under = 75
+show_missing = true
+skip_empty = true
 
 [tool.importlinter]
 root_packages = ["searchkernel"]
