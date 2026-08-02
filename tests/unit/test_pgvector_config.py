@@ -1,10 +1,54 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from searchkernel.adapters.stores.pgvector import (
     PGVectorFeatureSupport,
     PGVectorStore,
+    Psycopg3Connection,
     bounded_scan_limits,
 )
+from searchkernel.domain import Record
+
+
+class _BulkCursor:
+    def __init__(self) -> None:
+        self.executed: list[tuple[object, object]] = []
+        self.executemany_calls: list[tuple[object, object]] = []
+
+    def execute(self, statement: object, params: object = None) -> None:
+        self.executed.append((statement, params))
+
+    def executemany(self, statement: object, params: object) -> None:
+        self.executemany_calls.append((statement, params))
+
+    def fetchall(self) -> list[object]:
+        return []
+
+    def close(self) -> None:
+        pass
+
+
+class _BulkConnection:
+    def __init__(self, cursor: _BulkCursor) -> None:
+        self.cursor_value = cursor
+
+    def cursor(self) -> _BulkCursor:
+        return self.cursor_value
+
+    def commit(self) -> None:
+        pass
+
+
+class _Psycopg3Pool(Psycopg3Connection):
+    def __init__(self, connection: _BulkConnection) -> None:
+        self.connection = connection
+
+    def get_connection(self) -> _BulkConnection:
+        return self.connection
+
+    def put_connection(self, conn: _BulkConnection) -> None:
+        pass
 
 
 class _Cursor:
@@ -58,6 +102,38 @@ def test_iterative_scan_support_comes_from_server_extension_version() -> None:
     assert PGVectorFeatureSupport.from_extension_version("0.7.4").iterative_scan is False
     assert PGVectorFeatureSupport.from_extension_version("0.8.0").iterative_scan is True
     assert PGVectorFeatureSupport.from_extension_version(None).iterative_scan is False
+
+
+def test_upsert_submits_records_with_one_psycopg3_bulk_call() -> None:
+    cursor = _BulkCursor()
+    pool = _Psycopg3Pool(_BulkConnection(cursor))
+    store = PGVectorStore(pool)
+    now = datetime.now(UTC)
+    records = [
+        Record(
+            source_kind="test",
+            source_id=f"test:{index}",
+            title=f"Title {index}",
+            body=f"Body {index}",
+            created_at=now,
+            updated_at=now,
+            metadata={"index": index},
+        )
+        for index in range(2)
+    ]
+
+    store.upsert(records, model_name="test-model", dim=3)
+
+    assert len(cursor.executemany_calls) == 1
+    statement, rows = cursor.executemany_calls[0]
+    assert "INSERT INTO records" in str(statement)
+    assert len(rows) == len(records)
+    assert rows[0][0] == records[0].storage_key
+    assert rows[0][10] == '{"index": 0}'
+    assert (
+        sum("INSERT INTO records" in str(statement) for statement, _ in cursor.executed)
+        == 0
+    )
 
 
 def test_bounded_scan_limits_grow_without_exceeding_hard_bounds() -> None:

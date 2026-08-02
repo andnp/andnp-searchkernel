@@ -965,38 +965,14 @@ class PGVectorStore:
 
             table_name = self._ensure_vector_table(cursor, model_name, dim)
 
-            # Upsert records table
+            # Upsert records table in one driver-native bulk operation.
+            record_rows = []
             for record in records:
                 metadata_json = json.dumps(record.metadata)
                 indexed_text = record.indexed_text or record.body
                 tsvector_text = f"{record.title} {indexed_text}"
                 record_key = record.storage_key
-
-                cursor.execute(
-                    """
-                    INSERT INTO records
-                    (record_id, workspace_id, source_kind, source_id, title, body,
-                     indexed_text, tsvector_body, created_at, updated_at, metadata, uri, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s,
-                            to_tsvector('english', %s), %s, %s, %s, %s, %s)
-                    ON CONFLICT (record_id) DO UPDATE SET
-                        workspace_id = EXCLUDED.workspace_id,
-                        source_kind = EXCLUDED.source_kind,
-                        source_id = EXCLUDED.source_id,
-                        title = EXCLUDED.title,
-                        body = EXCLUDED.body,
-                        indexed_text = EXCLUDED.indexed_text,
-                        tsvector_body = to_tsvector(
-                            'english',
-                            EXCLUDED.title || ' ' ||
-                            COALESCE(NULLIF(EXCLUDED.indexed_text, ''), EXCLUDED.body)
-                        ),
-                        created_at = EXCLUDED.created_at,
-                        updated_at = EXCLUDED.updated_at,
-                        metadata = EXCLUDED.metadata,
-                        uri = EXCLUDED.uri,
-                        status = EXCLUDED.status;
-                    """,
+                record_rows.append(
                     (
                         record_key,
                         record.workspace_id,
@@ -1011,6 +987,47 @@ class PGVectorStore:
                         metadata_json,
                         record.uri,
                         record.status.value,
+                    )
+                )
+
+            record_insert_sql = """
+                INSERT INTO records
+                (record_id, workspace_id, source_kind, source_id, title, body,
+                 indexed_text, tsvector_body, created_at, updated_at, metadata, uri, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s,
+                        to_tsvector('english', %s), %s, %s, %s, %s, %s)
+                ON CONFLICT (record_id) DO UPDATE SET
+                    workspace_id = EXCLUDED.workspace_id,
+                    source_kind = EXCLUDED.source_kind,
+                    source_id = EXCLUDED.source_id,
+                    title = EXCLUDED.title,
+                    body = EXCLUDED.body,
+                    indexed_text = EXCLUDED.indexed_text,
+                    tsvector_body = to_tsvector(
+                        'english',
+                        EXCLUDED.title || ' ' ||
+                        COALESCE(NULLIF(EXCLUDED.indexed_text, ''), EXCLUDED.body)
+                    ),
+                    created_at = EXCLUDED.created_at,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata,
+                    uri = EXCLUDED.uri,
+                    status = EXCLUDED.status;
+                """
+            if isinstance(self.conn_pool, Psycopg3Connection):
+                cursor.executemany(record_insert_sql, record_rows)
+            else:
+                psycopg2.extras.execute_values(
+                    cursor,
+                    record_insert_sql.replace(
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s,\n"
+                        "                        to_tsvector('english', %s), %s, %s, %s, %s, %s)",
+                        "VALUES %s",
+                    ),
+                    record_rows,
+                    template=(
+                        "(%s, %s, %s, %s, %s, %s, %s, "
+                        "to_tsvector('english', %s), %s, %s, %s, %s, %s)"
                     ),
                 )
 
