@@ -147,6 +147,35 @@ class SemanticRecordIngestor:
         *,
         failure_mode: IngestionFailureMode,
     ) -> list[RecordIngestionResult]:
+        # Local stores can commit a whole batch in one SQLite transaction. If
+        # a backend rejects the batch, fall back to per-record writes so the
+        # receipt still reports precise failures.
+        try:
+            await asyncio.to_thread(self.keyword_store.index, list(records))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - preserve per-record attribution
+            return await self._index_keyword_records_individually(
+                records,
+                failure_mode=failure_mode,
+            )
+
+        return [
+            RecordIngestionResult(
+                source_kind=record.source_kind,
+                source_id=record.source_id,
+                workspace_id=record.workspace_id,
+                status="committed",
+            )
+            for record in records
+        ]
+
+    async def _index_keyword_records_individually(
+        self,
+        records: Sequence[Record],
+        *,
+        failure_mode: IngestionFailureMode,
+    ) -> list[RecordIngestionResult]:
         outcomes: list[RecordIngestionResult] = []
         for record in records:
             try:
