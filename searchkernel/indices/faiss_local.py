@@ -267,27 +267,14 @@ class FAISSLocalVectorStore:
                     np.asarray(query[None, :], dtype=np.float32),
                     scan,
                 )
+            valid_storage_keys = self._validated_storage_keys(
+                state,
+                (int(faiss_id) for faiss_id in ids[0]),
+                filters,
+            )
             for score, faiss_id in zip(scores[0], ids[0], strict=True):
-                storage_key = state.id_to_storage_key.get(int(faiss_id))
-                metadata = (
-                    state.candidate_metadata.get(storage_key)
-                    if storage_key is not None
-                    else None
-                )
-                if (
-                    storage_key is None
-                    or metadata is None
-                    or not record_matches_vector_filters(
-                        storage_key=storage_key,
-                        source_id=metadata.source_id,
-                        workspace_id=metadata.workspace_id,
-                        source_kind=metadata.source_kind,
-                        status=metadata.status,
-                        metadata=metadata.metadata,
-                        uri=metadata.uri,
-                        filters=filters,
-                    )
-                ):
+                storage_key = valid_storage_keys.get(int(faiss_id))
+                if storage_key is None:
                     continue
                 if storage_key in hits:
                     continue
@@ -304,6 +291,37 @@ class FAISSLocalVectorStore:
             hits.values(),
             key=lambda hit: (-hit.score, hit.storage_key),
         )[:k]
+
+    @staticmethod
+    def _validated_storage_keys(
+        state: _FAISSState,
+        faiss_ids: Any,
+        filters: dict[str, Any] | None,
+    ) -> dict[int, str]:
+        valid: dict[int, str] = {}
+        for faiss_id in faiss_ids:
+            storage_key = state.id_to_storage_key.get(faiss_id)
+            metadata = (
+                state.candidate_metadata.get(storage_key)
+                if storage_key is not None
+                else None
+            )
+            if (
+                storage_key is not None
+                and metadata is not None
+                and record_matches_vector_filters(
+                    storage_key=storage_key,
+                    source_id=metadata.source_id,
+                    workspace_id=metadata.workspace_id,
+                    source_kind=metadata.source_kind,
+                    status=metadata.status,
+                    metadata=metadata.metadata,
+                    uri=metadata.uri,
+                    filters=filters,
+                )
+            ):
+                valid[faiss_id] = storage_key
+        return valid
 
     def _paths(self, model_name: str, dim: int) -> tuple[Path, Path]:
         if self._index_path is None:
