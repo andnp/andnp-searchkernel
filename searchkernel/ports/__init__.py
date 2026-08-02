@@ -28,7 +28,7 @@ from searchkernel.ports.embedding import (
     EmbeddingProvider,
     EmbeddingSink,
 )
-from searchkernel.ports.epochs import SearchEpochProvider, SearchEpochs
+from searchkernel.ports.epochs import SearchEpochs
 from searchkernel.ports.index_manager import IndexManagerPort
 from searchkernel.ports.llm import LLMProvider
 from searchkernel.ports.orchestrator_config import OrchestratorConfig
@@ -105,7 +105,6 @@ __all__ = [
     "RetrievalFieldExtractor",
     "RetrievalFields",
     "SearchAPI",
-    "SearchEpochProvider",
     "SearchEpochs",
     "SearchFilters",
     "SourceBatch",

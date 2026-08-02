@@ -18,7 +18,6 @@ from searchkernel.domain import (
     ModelDimensionMismatchError,
     ModelNamespace,
     Record,
-    RecordHit,
     RollbackMetadata,
     ValidationResult,
 )
@@ -53,48 +52,6 @@ class FakeProvider:
             [float(len(text)), *[float(value) for value in range(2, self.dim + 1)]]
             for text in texts
         ]
-
-
-class FakeStore:
-    def __init__(self):
-        self.calls: list[tuple[list[Record], str, int]] = []
-
-    def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
-        self.calls.append((records, model_name, dim))
-
-    def search(
-        self,
-        query_vector: list[float],
-        k: int,
-        *,
-        model_name: str,
-        dim: int,
-        filters: dict[str, object] | None = None,
-    ) -> list[RecordHit | tuple[str, float]]:
-        return []
-
-    def delete(self, record_ids: list[str]) -> None:
-        return None
-
-    def epoch(self) -> int:
-        return 0
-
-
-def make_records() -> list[Record]:
-    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
-    return [
-        Record(
-            source_kind="note",
-            source_id=f"note-{index}",
-            title=f"Note {index}",
-            body=f"body {index}",
-            created_at=timestamp,
-            updated_at=timestamp,
-            embedding=[9.0],
-            embedding_model="old-model",
-        )
-        for index in range(3)
-    ]
 
 
 class LocalLifecycleStore:
@@ -413,93 +370,6 @@ def _assert_records_are_preserved(
     assert all(backend.hydrate_record(record.storage_key) is not None for record in records)
 
 
-def test_unsupported_lifecycle_operations_are_explicit():
-    routine = ReindexRoutine(make_records(), FakeProvider(), FakeStore())
-
-    with pytest.raises(ReindexError, match="expand is unavailable"):
-        routine.expand()
-    with pytest.raises(ReindexError, match="flip is unavailable"):
-        routine.flip()
-    with pytest.raises(ReindexError, match="contract is unavailable"):
-        routine.contract("old-model")
-    with pytest.raises(ReindexError, match="rollback is unavailable"):
-        routine.rollback("old-model")
-
-    assert routine.stage == "init"
-
-
-def test_backfill_writes_target_records_without_mutating_source_records():
-    records = make_records()
-    store = FakeStore()
-    routine = ReindexRoutine(
-        records,
-        FakeProvider(),
-        store,
-        batch_size=2,
-        truncate_dim=2,
-    )
-
-    progress = routine.backfill()
-
-    assert progress.records_processed == 3
-    assert progress.total_records == 3
-    assert routine.stage == "backfill"
-    assert [record.embedding for record in records] == [[9.0]] * 3
-    assert [record.embedding for record in store.calls[0][0]] == [[6.0, 2.0]] * 2
-    assert [record.embedding for record in store.calls[1][0]] == [[6.0, 2.0]]
-    assert all(record.embedding_model == "target-model" for batch, _, _ in store.calls for record in batch)
-
-
-def test_legacy_backfill_embeds_indexed_text_with_body_fallback():
-    records = make_records()
-    records[0].indexed_text = "indexed text"
-    provider = FakeProvider()
-
-    ReindexRoutine(records, provider, FakeStore(), batch_size=3).backfill()
-
-    assert provider.embedded_texts == [["indexed text", "body 1", "body 2"]]
-
-
-def test_backfill_failure_preserves_completed_batches_for_retry():
-    store = FakeStore()
-    routine = ReindexRoutine(
-        make_records(),
-        FakeProvider(fail_on_call=2),
-        store,
-        batch_size=2,
-    )
-
-    with pytest.raises(ReindexError, match="Batch 1 failed"):
-        routine.backfill()
-
-    assert routine.stage == "backfill"
-    assert len(store.calls) == 1
-
-
-def test_backfill_is_retryable_and_idempotent_for_upsert_store():
-    store = FakeStore()
-    routine = ReindexRoutine(make_records(), FakeProvider(), store, batch_size=3)
-
-    first = routine.backfill()
-    second = routine.backfill()
-
-    assert first.records_processed == second.records_processed == 3
-    assert len(store.calls) == 2
-    assert store.calls[0][0][0].embedding == store.calls[1][0][0].embedding
-
-
-def test_empty_backfill_does_not_call_provider_or_index():
-    provider = FakeProvider()
-    store = FakeStore()
-    routine = ReindexRoutine([], provider, store)
-
-    progress = routine.backfill()
-
-    assert progress.records_processed == 0
-    assert provider.calls == 0
-    assert store.calls == []
-
-
 def test_local_lifecycle_keeps_old_namespace_during_target_backfill(tmp_path: Path):
     records, backend, store, source = _local_migration(tmp_path)
     routine = _routine(records, backend, store, source)
@@ -725,46 +595,6 @@ def test_checkpoint_rejects_replaced_record_with_same_corpus_length(
 
     assert restarted_provider.calls == 0
     assert backend.vector_count("new-model", 3) == 2
-
-
-def test_legacy_checkpoint_resets_before_resume(tmp_path: Path):
-    records, backend, store, source = _local_migration(tmp_path, count=5)
-    first = _routine(
-        records,
-        backend,
-        store,
-        source,
-        provider=FakeProvider(model_name="new-model", fail_on_call=2),
-    )
-    first.expand()
-    with pytest.raises(ReindexError):
-        first.backfill()
-
-    saved = store.load_migration("local-migration")
-    assert saved is not None
-    legacy_data = saved.to_dict()
-    legacy_data.pop("corpus_fingerprint")
-    atomic_write_json(store.migration_dir / "local-migration.json", legacy_data)
-
-    restarted_provider = FakeProvider(model_name="new-model")
-    restarted = _routine(
-        records,
-        backend,
-        store,
-        source,
-        provider=restarted_provider,
-    )
-
-    retried = restarted.retry()
-    assert retried.checkpoint == 0
-    assert retried.corpus_fingerprint is not None
-    assert retried.phase is MigrationPhase.BACKFILL
-
-    progress = restarted.backfill()
-
-    assert progress.complete
-    assert restarted_provider.calls == 3
-    assert backend.vector_count("new-model", 3) == len(records)
 
 
 def test_validation_failure_does_not_flip_or_lose_source_data(tmp_path: Path):

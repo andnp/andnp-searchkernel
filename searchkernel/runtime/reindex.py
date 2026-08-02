@@ -75,9 +75,8 @@ class ReindexProgress:
 class ReindexRoutine:
     """Coordinate a resumable expand/backfill/validate/flip/contract flow.
 
-    A lifecycle store is required for destructive or serving-changing stages.
-    The legacy vector-only constructor remains supported for backfill callers,
-    but it deliberately rejects those lifecycle stages.
+    A lifecycle store is required for every migration stage so checkpoints,
+    validation, serving changes, and rollback share one durable contract.
     """
 
     def __init__(
@@ -88,7 +87,7 @@ class ReindexRoutine:
         batch_size: int = 64,
         truncate_dim: int | None = None,
         *,
-        lifecycle_store: ModelLifecycleStore | None = None,
+        lifecycle_store: ModelLifecycleStore,
         migration_id: str | None = None,
         source_namespace: ModelNamespace | None = None,
     ) -> None:
@@ -115,8 +114,6 @@ class ReindexRoutine:
     @property
     def stage(self) -> str:
         """Return the current durable phase when lifecycle state is available."""
-        if self.lifecycle_store is None:
-            return self._current_stage
         state = self.lifecycle_store.load_migration(self.migration_id)
         return state.phase.value if state is not None else self._current_stage
 
@@ -136,8 +133,6 @@ class ReindexRoutine:
     @property
     def state(self) -> MigrationState | None:
         """Return the persisted migration state, if lifecycle support is enabled."""
-        if self.lifecycle_store is None:
-            return None
         return self.lifecycle_store.load_migration(self.migration_id)
 
     @property
@@ -148,7 +143,6 @@ class ReindexRoutine:
 
     def expand(self) -> MigrationState | None:
         """Create the target namespace without changing the active model."""
-        self._require_lifecycle("expand")
         store = self._lifecycle()
         state = self._load_or_create_state()
         self._reject_failed(state)
@@ -177,9 +171,6 @@ class ReindexRoutine:
 
     def backfill(self) -> ReindexProgress:
         """Embed and persist target batches from the last durable checkpoint."""
-        if self.lifecycle_store is None:
-            return self._legacy_backfill()
-
         state = self._load_or_create_state()
         self._reject_failed(state)
         if state.phase is MigrationPhase.INIT:
@@ -278,7 +269,6 @@ class ReindexRoutine:
 
     def validate(self) -> ValidationResult:
         """Validate every target record before any serving-model change."""
-        self._require_lifecycle("validate")
         store = self._lifecycle()
         state = self._load_or_create_state()
         self._reject_failed(state)
@@ -336,7 +326,6 @@ class ReindexRoutine:
 
     def flip(self) -> MigrationState:
         """Atomically select the validated target model for new queries."""
-        self._require_lifecycle("flip")
         with self._transition_lock() as store:
             state = self._load_or_create_state()
             self._reject_failed(state)
@@ -398,7 +387,6 @@ class ReindexRoutine:
 
     def contract(self, old_model_name: str | None = None) -> MigrationState:
         """Backup and delete the old namespace after a validated flip."""
-        self._require_lifecycle("contract")
         with self._transition_lock() as store:
             state = self._load_or_create_state()
             self._check_old_model_name(state, old_model_name)
@@ -459,7 +447,6 @@ class ReindexRoutine:
 
     def rollback(self, old_model_name: str | None = None) -> MigrationState:
         """Restore the source model or remove an unflipped target namespace."""
-        self._require_lifecycle("rollback")
         with self._transition_lock() as store:
             state = self._load_or_create_state()
             self._check_old_model_name(state, old_model_name)
@@ -546,7 +533,6 @@ class ReindexRoutine:
 
     def retry(self) -> MigrationState:
         """Clear a durable failure and expose the exact stage to retry."""
-        self._require_lifecycle("retry")
         state = self._load_or_create_state()
         if state.phase is not MigrationPhase.FAILED:
             raise ReindexError("migration is not failed")
@@ -580,54 +566,6 @@ class ReindexRoutine:
             raise ReindexError("migration state was not persisted")
         return state
 
-    def _legacy_backfill(self) -> ReindexProgress:
-        self._current_stage = MigrationPhase.BACKFILL.value
-        progress = ReindexProgress(
-            stage=MigrationPhase.BACKFILL.value,
-            total_records=len(self.records),
-        )
-        for offset in range(0, len(self.records), self.batch_size):
-            batch = self.records[offset : offset + self.batch_size]
-            try:
-                embeddings = self.target_provider.embed(
-                    [semantic_input_for_record(record).text for record in batch]
-                )
-                if len(embeddings) != len(batch):
-                    raise ReindexError(
-                        f"provider returned {len(embeddings)} embeddings for "
-                        f"{len(batch)} records"
-                    )
-                target_records: list[Record] = []
-                for record, embedding in zip(batch, embeddings, strict=True):
-                    if len(embedding) != self.target_provider.dim:
-                        raise ReindexError(
-                            f"provider returned dimension {len(embedding)}; "
-                            f"expected {self.target_provider.dim}"
-                        )
-                    target_records.append(
-                        replace(
-                            record,
-                            embedding=embedding[: self.target_dim],
-                            embedding_model=self.target_provider.model_name,
-                        )
-                    )
-                self.vector_store.upsert(
-                    target_records,
-                    model_name=self.target_provider.model_name,
-                    dim=self.target_dim,
-                )
-            except ReindexError as exc:
-                message = f"Batch {offset // self.batch_size} failed: {exc}"
-                progress.errors.append(message)
-                raise ReindexError(message) from exc
-            except Exception as exc:
-                message = f"Batch {offset // self.batch_size} failed: {exc}"
-                progress.errors.append(message)
-                raise ReindexError(message) from exc
-            progress.records_processed += len(batch)
-            progress.checkpoint = offset + len(batch)
-        return progress
-
     def _load_or_create_state(self) -> MigrationState:
         store = self._lifecycle()
         saved = store.load_migration(self.migration_id)
@@ -643,7 +581,9 @@ class ReindexRoutine:
             if self.source_namespace is not None and saved.source != self.source_namespace:
                 raise ReindexError("migration source namespace does not match")
             if saved.corpus_fingerprint is None:
-                return self._migrate_legacy_state(saved, corpus_fingerprint)
+                raise ReindexError(
+                    "migration checkpoint is missing corpus identity"
+                )
             if saved.corpus_fingerprint != corpus_fingerprint:
                 raise ReindexError(
                     "migration checkpoint corpus identity does not match "
@@ -675,51 +615,6 @@ class ReindexRoutine:
             total_records=len(self.records),
             corpus_fingerprint=corpus_fingerprint,
         )
-
-    def _migrate_legacy_state(
-        self,
-        saved: MigrationState,
-        corpus_fingerprint: str,
-    ) -> MigrationState:
-        if saved.checkpoint == 0:
-            migrated = replace(
-                saved,
-                total_records=len(self.records),
-                corpus_fingerprint=corpus_fingerprint,
-            )
-            self._save(migrated)
-            return migrated
-        if saved.phase in {
-            MigrationPhase.FLIP,
-            MigrationPhase.CONTRACT,
-            MigrationPhase.COMPLETE,
-            MigrationPhase.ROLLBACK,
-        }:
-            raise ReindexError(
-                "legacy migration checkpoint lacks corpus identity; "
-                "refusing to resume a completed serving transition"
-            )
-
-        migrated = replace(
-            saved,
-            checkpoint=0,
-            total_records=len(self.records),
-            corpus_fingerprint=corpus_fingerprint,
-            validation=None,
-            phase=(
-                MigrationPhase.FAILED
-                if saved.phase is MigrationPhase.FAILED
-                else MigrationPhase.BACKFILL
-            ),
-            resume_phase=(
-                MigrationPhase.BACKFILL
-                if saved.phase is MigrationPhase.FAILED
-                else None
-            ),
-            error=saved.error if saved.phase is MigrationPhase.FAILED else None,
-        )
-        self._save(migrated)
-        return migrated
 
     def _corpus_fingerprint(self) -> str:
         payload = [
@@ -827,13 +722,5 @@ class ReindexRoutine:
         if store.get_active_model() != expected:
             raise ReindexError(error_message)
 
-    def _require_lifecycle(self, operation: str) -> None:
-        if self.lifecycle_store is None:
-            raise ReindexError(
-                f"{operation} is unavailable: a ModelLifecycleStore is required"
-            )
-
     def _lifecycle(self) -> ModelLifecycleStore:
-        if self.lifecycle_store is None:
-            raise ReindexError("a ModelLifecycleStore is required")
         return self.lifecycle_store

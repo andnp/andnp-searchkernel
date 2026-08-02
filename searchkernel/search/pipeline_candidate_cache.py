@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, TypeVar
 
-from searchkernel.ports import SearchEpochProvider
 from searchkernel.runtime import (
     CandidateCacheKey,
     CandidateResultCache,
@@ -226,22 +225,6 @@ class CandidateCachePolicy[CandidateT]:
 
 def _read_lane_epoch(store: object | None, lane: str) -> int | None:
     if store is None:
-        return None
-    if isinstance(store, SearchEpochProvider):
-        try:
-            values = store.epochs()
-        except Exception:  # noqa: BLE001 - cache key reads must be best effort
-            return None
-        if isinstance(values, SearchEpochs):
-            try:
-                return values.for_lane(lane)
-            except ValueError:
-                return None
-        if isinstance(values, Mapping):
-            try:
-                return SearchEpochs.from_mapping(values).for_lane(lane)
-            except (TypeError, ValueError):
-                return None
         return None
     lane_epoch = getattr(store, f"{lane}_epoch", None)
     if callable(lane_epoch):
