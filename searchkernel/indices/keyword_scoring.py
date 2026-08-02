@@ -15,8 +15,9 @@ def sanitize_fts_query(query: str) -> str:
         raw = match.group(1) if quoted else match.group(2)
         if raw is None:
             continue
+        raw = raw.rstrip(".,;!?")
         prefix = not quoted and raw.rstrip().endswith("*")
-        sanitized = re.sub(r"[\"\'*\^(){}[\]<>|~!:\-+&]", " ", raw)
+        sanitized = re.sub(r"[\"\'*\^(){}[\]<>|~!?:,;/\\\-+&]", " ", raw)
         words = sanitized.split()
         if not words:
             continue
@@ -105,7 +106,10 @@ def looks_like_artifact_query(query: str) -> bool:
     normalized = query.strip()
     if not normalized:
         return False
-    return _ARTIFACT_QUERY_RE.search(normalized) is not None
+    return (
+        len(normalized.split()) == 1
+        and _ARTIFACT_QUERY_RE.search(normalized) is not None
+    )
 
 
 def score_field_aware_match(

@@ -17,12 +17,21 @@ def test_sanitize_fts_query_removes_match_operators():
     assert sanitize_fts_query("alph*") == "alph*"
     assert sanitize_fts_query("alpha OR beta") == 'alpha "OR" beta'
     assert sanitize_fts_query("C++") == "C"
+    assert sanitize_fts_query("how do I authenticate API requests?") == (
+        "how do I authenticate API requests"
+    )
+    assert sanitize_fts_query(
+        "The MCP server has a method called list_tools that returns Tool objects."
+    ) == "The MCP server has a method called list_tools that returns Tool objects"
     assert sanitize_fts_query("   ") == '""'
 
 
 def test_looks_like_artifact_query_detects_path_like_values():
     assert looks_like_artifact_query("bootstrap.checkpoint.json")
     assert looks_like_artifact_query("docs/runtime_state")
+    assert not looks_like_artifact_query(
+        "The MCP server exposes list_tools and inputSchema"
+    )
     assert not looks_like_artifact_query("authentication")
 
 
