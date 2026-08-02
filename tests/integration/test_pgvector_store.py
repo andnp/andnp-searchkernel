@@ -19,7 +19,14 @@ from searchkernel.adapters.stores.pgvector import (
     _create_schema,
     _vector_table_name,
 )
-from searchkernel.domain import GraphEdge, Record, RecordIdentity, RecordStatus, Vector
+from searchkernel.domain import (
+    GraphEdge,
+    GraphNeighbor,
+    Record,
+    RecordIdentity,
+    RecordStatus,
+    Vector,
+)
 from searchkernel.indices import LocalRecordBackend
 from tests.integration.conftest import pg_dsn_for_schema, pg_worker_schema
 
@@ -258,30 +265,28 @@ class TestVectorStore:
         with pytest.raises(ValueError, match="canonical storage key"):
             store.delete([fixture_records[0].source_id])
 
-    def test_schema_migrates_legacy_record_identity(self, pg_conn):
-        conn = pg_conn.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
+    def test_schema_declares_canonical_record_and_graph_fields(self, pg_conn):
+        assert pg_conn.execute_one(
             """
-            INSERT INTO records (
-                record_id, source_kind, source_id, title, body, status
-            ) VALUES (%s, %s, %s, %s, %s, %s);
-            """,
-            ("legacy-id", "note", "note-1", "Legacy", "Body", "active"),
-        )
-        conn.commit()
-        cursor.close()
-        pg_conn.put_connection(conn)
-
-        _create_schema(pg_conn)
-
-        migrated = pg_conn.execute_one(
-            "SELECT record_id FROM records WHERE source_id = %s;",
-            ("note-1",),
-        )
-        assert migrated == (
-            'record:[null,"note","note-1"]',
-        )
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'records' AND column_name = 'indexed_text';
+            """
+        ) == ("indexed_text",)
+        assert pg_conn.execute_one(
+            """
+            SELECT column_default
+            FROM information_schema.columns
+            WHERE table_name = 'graph_edges' AND column_name = 'source_kind';
+            """
+        ) == (None,)
+        assert pg_conn.execute_one(
+            """
+            SELECT column_default
+            FROM information_schema.columns
+            WHERE table_name = 'graph_edges' AND column_name = 'target_kind';
+            """
+        ) == (None,)
 
     def test_epoch_tracking(self, pg_conn, fixture_records):
         """Test that epoch is incremented on upsert/delete."""
@@ -843,18 +848,24 @@ class TestGraphStore:
     def test_upsert_and_retrieve_edges(self, pg_conn):
         """Test edge upsert and neighbor retrieval."""
         store = PGGraphStore(pg_conn)
+        identities = {
+            source_id: RecordIdentity(None, "test", source_id)
+            for source_id in ("test:1", "test:2", "test:3")
+        }
 
         edges = [
-            ("test:1", "test:2", "related", 0.9),
-            ("test:1", "test:3", "related", 0.5),
-            ("test:2", "test:3", "derived_from", 0.7),
+            GraphEdge(identities["test:1"], identities["test:2"], "related", 0.9),
+            GraphEdge(identities["test:1"], identities["test:3"], "related", 0.5),
+            GraphEdge(
+                identities["test:2"], identities["test:3"], "derived_from", 0.7
+            ),
         ]
 
         store.upsert_edges(edges)
 
         # Get neighbors of test:1
-        neighbors = store.neighbors("test:1")
-        neighbor_ids = [n[0] for n in neighbors]
+        neighbors = store.neighbors(identities["test:1"])
+        neighbor_ids = [neighbor.source_id for neighbor in neighbors]
 
         assert "test:2" in neighbor_ids
         assert "test:3" in neighbor_ids
@@ -862,28 +873,36 @@ class TestGraphStore:
     def test_edge_upsert_updates_weight_and_missing_neighbors_are_empty(self, pg_conn):
         """Test graph edge conflict updates and empty lookups."""
         store = PGGraphStore(pg_conn)
-        store.upsert_edges([("source", "target", "related", 0.9)])
-        store.upsert_edges([("source", "target", "related", 0.2)])
+        source = RecordIdentity(None, "test", "source")
+        target = RecordIdentity(None, "test", "target")
+        store.upsert_edges([GraphEdge(source, target, "related", 0.9)])
+        store.upsert_edges([GraphEdge(source, target, "related", 0.2)])
 
-        assert store.neighbors("source", depth=3) == [
-            ("target", "related", pytest.approx(0.2))
+        assert store.neighbors(source, depth=3) == [
+            GraphNeighbor(target, "related", pytest.approx(0.2))
         ]
-        assert store.neighbors("missing") == []
+        assert store.neighbors(RecordIdentity(None, "test", "missing")) == []
 
     def test_neighbors_with_edge_type_filter(self, pg_conn):
         """Test neighbor retrieval with edge type filter."""
         store = PGGraphStore(pg_conn)
+        identities = {
+            source_id: RecordIdentity(None, "test", source_id)
+            for source_id in ("test:1", "test:2", "test:3")
+        }
 
         edges = [
-            ("test:1", "test:2", "related", 0.9),
-            ("test:1", "test:3", "derived_from", 0.5),
+            GraphEdge(identities["test:1"], identities["test:2"], "related", 0.9),
+            GraphEdge(
+                identities["test:1"], identities["test:3"], "derived_from", 0.5
+            ),
         ]
 
         store.upsert_edges(edges)
 
         # Get neighbors only of type "related"
-        neighbors = store.neighbors("test:1", edge_types=["related"])
-        neighbor_ids = [n[0] for n in neighbors]
+        neighbors = store.neighbors(identities["test:1"], edge_types=["related"])
+        neighbor_ids = [neighbor.source_id for neighbor in neighbors]
 
         assert "test:2" in neighbor_ids
         assert "test:3" not in neighbor_ids
@@ -941,42 +960,6 @@ class TestGraphStore:
             earlier,
             later,
         ]
-
-    def test_schema_migrates_legacy_graph_edges(self, pg_conn):
-        conn = pg_conn.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DROP TABLE graph_edges;")
-        cursor.execute(
-            """
-            CREATE TABLE graph_edges (
-                source_id TEXT NOT NULL,
-                target_id TEXT NOT NULL,
-                edge_type TEXT NOT NULL,
-                weight REAL DEFAULT 1.0,
-                updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (source_id, target_id, edge_type)
-            );
-            """
-        )
-        cursor.execute(
-            "INSERT INTO graph_edges (source_id, target_id, edge_type, weight) "
-            "VALUES ('source', 'target', 'related', 0.7);"
-        )
-        conn.commit()
-        cursor.close()
-        pg_conn.put_connection(conn)
-
-        _create_schema(pg_conn)
-
-        assert pg_conn.execute_one(
-            "SELECT source_kind FROM graph_edges WHERE source_id = %s;",
-            ("source",),
-        ) == ("legacy",)
-        assert pg_conn.execute_one(
-            "SELECT target_kind FROM graph_edges WHERE target_id = %s;",
-            ("target",),
-        ) == ("legacy",)
-
 
 class TestCacheStore:
     """Tests for CacheStore port implementation."""

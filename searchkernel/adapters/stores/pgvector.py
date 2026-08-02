@@ -29,7 +29,6 @@ from searchkernel.domain import (
     RecordHit,
     RecordIdentity,
     Vector,
-    canonical_storage_key,
 )
 from searchkernel.domain.vector_filters import (
     filter_values,
@@ -113,7 +112,7 @@ def _vector_table_name(model_name: str, dim: int) -> str:
 
     Each embedding model/dimension pair gets its own typed `vector(dim)`
     column and its own HNSW index, so ANN search stays index-compatible
-    even as multiple models coexist (e.g. during a model migration).
+    while multiple models coexist.
     """
     return f"vectors__{_sanitize_model_name(model_name)}__{dim}"
 
@@ -321,19 +320,13 @@ def _canonical_ids(values: list[str | RecordIdentity]) -> list[str]:
 
 def _delete_graph_edges_for_identities(
     cursor: Any,
-    identities: Sequence[RecordIdentity | tuple[str | None, str, str]],
+    identities: Sequence[RecordIdentity],
 ) -> bool:
     """Delete graph edges incident to the supplied record identities."""
     if not identities:
         return False
     rows = [
-        (
-            identity.workspace_id or "",
-            identity.source_kind,
-            identity.source_id,
-        )
-        if isinstance(identity, RecordIdentity)
-        else (identity[0] or "", identity[1], identity[2])
+        (identity.workspace_id or "", identity.source_kind, identity.source_id)
         for identity in identities
     ]
     psycopg2.extras.execute_values(
@@ -351,66 +344,7 @@ def _delete_graph_edges_for_identities(
     return bool(cursor.rowcount)
 
 
-def _migrate_records_schema(cursor) -> None:
-    """Upgrade legacy records in the same transaction as schema creation."""
-    cursor.execute(
-        "ALTER TABLE records ADD COLUMN IF NOT EXISTS workspace_id TEXT;"
-    )
-    cursor.execute(
-        "ALTER TABLE records ADD COLUMN IF NOT EXISTS indexed_text TEXT;"
-    )
-    cursor.execute(
-        "SELECT record_id, workspace_id, source_kind, source_id FROM records;"
-    )
-    rows = cursor.fetchall()
-    cursor.execute("SELECT table_name FROM vector_tables;")
-    vector_tables = [row[0] for row in cursor.fetchall()]
-
-    for old_key, workspace_id, source_kind, source_id in rows:
-        new_key = canonical_storage_key(workspace_id, source_kind, source_id)
-        if old_key == new_key:
-            continue
-        cursor.execute(
-            "SELECT 1 FROM records WHERE record_id = %s;",
-            (new_key,),
-        )
-        if cursor.fetchone() is not None:
-            raise ValueError(
-                f"cannot migrate duplicate record identity {new_key!r}"
-            )
-        for table_name in vector_tables:
-            cursor.execute(
-                sql.SQL("UPDATE {table} SET record_id = %s WHERE record_id = %s;").format(
-                    table=sql.Identifier(table_name)
-                ),
-                (new_key, old_key),
-            )
-        cursor.execute(
-            "UPDATE records SET record_id = %s WHERE record_id = %s;",
-            (new_key, old_key),
-        )
-
-    cursor.execute(
-        """
-        SELECT 1
-        FROM pg_constraint c
-        JOIN pg_attribute a
-          ON a.attrelid = c.conrelid
-         AND a.attnum = ANY(c.conkey)
-        WHERE c.conrelid = 'records'::regclass
-          AND c.contype = 'u'
-        GROUP BY c.oid
-        HAVING array_agg(
-            a.attname::text ORDER BY array_position(c.conkey, a.attnum)
-        )
-            = ARRAY['workspace_id', 'source_kind', 'source_id'];
-        """
-    )
-    if cursor.fetchone() is None:
-        cursor.execute(
-            "ALTER TABLE records ADD CONSTRAINT records_identity_unique "
-            "UNIQUE (workspace_id, source_kind, source_id);"
-        )
+def _create_record_indexes(cursor) -> None:
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_records_workspace "
         "ON records (workspace_id);"
@@ -438,77 +372,7 @@ def _migrate_records_schema(cursor) -> None:
     )
 
 
-def _migrate_graph_schema(cursor) -> None:
-    """Upgrade legacy graph IDs to endpoint composite identities."""
-    for column in (
-        "source_workspace_id",
-        "source_kind",
-        "target_workspace_id",
-        "target_kind",
-    ):
-        cursor.execute(
-            sql.SQL(
-                "ALTER TABLE graph_edges ADD COLUMN IF NOT EXISTS {} TEXT "
-                "DEFAULT '';"
-            ).format(
-                sql.Identifier(column)
-            )
-        )
-    cursor.execute(
-        """
-        UPDATE graph_edges
-        SET source_kind = COALESCE(NULLIF(source_kind, ''), 'legacy'),
-            target_kind = COALESCE(NULLIF(target_kind, ''), 'legacy')
-        WHERE source_kind IS NULL OR source_kind = ''
-           OR target_kind IS NULL OR target_kind = '';
-        """
-    )
-    cursor.execute(
-        """
-        UPDATE graph_edges
-        SET source_workspace_id = COALESCE(source_workspace_id, ''),
-            target_workspace_id = COALESCE(target_workspace_id, '');
-        """
-    )
-    cursor.execute(
-        "ALTER TABLE graph_edges ALTER COLUMN source_workspace_id SET NOT NULL;"
-    )
-    cursor.execute(
-        "ALTER TABLE graph_edges ALTER COLUMN target_workspace_id SET NOT NULL;"
-    )
-    cursor.execute(
-        """
-        SELECT conname
-        FROM pg_constraint
-        WHERE conrelid = 'graph_edges'::regclass
-          AND contype = 'p';
-        """
-    )
-    primary = cursor.fetchone()
-    if primary is not None and primary[0] != "graph_edges_identity_pkey":
-        cursor.execute(
-            sql.SQL("ALTER TABLE graph_edges DROP CONSTRAINT {};").format(
-                sql.Identifier(primary[0])
-            )
-        )
-    cursor.execute(
-        """
-        SELECT 1
-        FROM pg_constraint
-        WHERE conrelid = 'graph_edges'::regclass
-          AND conname = 'graph_edges_identity_unique';
-        """
-    )
-    if cursor.fetchone() is None:
-        cursor.execute(
-            """
-            ALTER TABLE graph_edges
-            ADD CONSTRAINT graph_edges_identity_unique UNIQUE (
-                source_workspace_id, source_kind, source_id,
-                target_workspace_id, target_kind, target_id, edge_type
-            );
-            """
-        )
+def _create_graph_indexes(cursor) -> None:
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_identity "
         "ON graph_edges (source_workspace_id, source_kind, source_id);"
@@ -669,7 +533,7 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
         # model/dimension pair gets its own typed `vector(dim)` table with
         # a dedicated HNSW index (see PGVectorStore._ensure_vector_table),
         # so ANN search is always index-compatible even with multiple
-        # models coexisting (e.g. during a model migration).
+        # models coexisting.
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS vector_tables (
                 model_name TEXT NOT NULL,
@@ -689,6 +553,7 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
                 title TEXT NOT NULL,
                 body TEXT NOT NULL,
                 tsvector_body tsvector,
+                indexed_text TEXT,
                 workspace_id TEXT,
                 created_at TIMESTAMPTZ,
                 updated_at TIMESTAMPTZ,
@@ -699,7 +564,7 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
                     UNIQUE (workspace_id, source_kind, source_id)
             );
         """)
-        _migrate_records_schema(cursor)
+        _create_record_indexes(cursor)
 
         # Full-text search index
         cursor.execute("""
@@ -711,10 +576,10 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS graph_edges (
                 source_workspace_id TEXT NOT NULL DEFAULT '',
-                source_kind TEXT NOT NULL DEFAULT 'legacy',
+                source_kind TEXT NOT NULL,
                 source_id TEXT NOT NULL,
                 target_workspace_id TEXT NOT NULL DEFAULT '',
-                target_kind TEXT NOT NULL DEFAULT 'legacy',
+                target_kind TEXT NOT NULL,
                 target_id TEXT NOT NULL,
                 edge_type TEXT NOT NULL,
                 weight REAL DEFAULT 1.0,
@@ -725,7 +590,7 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
                 )
             );
         """)
-        _migrate_graph_schema(cursor)
+        _create_graph_indexes(cursor)
 
         # Graph edges index
         cursor.execute("""
@@ -799,8 +664,7 @@ class PGVectorStore:
     `vector(dim)` column and a dedicated HNSW index, so ANN search is
     always index-compatible -- pgvector's HNSW requires a fixed
     dimension per indexed column, which an untyped `vector` column
-    cannot provide. Multiple models can coexist (e.g. during a model
-    migration); each lives in its own table.
+    cannot provide. Multiple models can coexist; each lives in its own table.
 
     `search()` takes `model_name`/`dim` explicitly (rather than relying on
     instance "active model" state) so concurrent callers can query
@@ -1109,7 +973,7 @@ class PGVectorStore:
             filters: Optional filters (source-kind filtering, etc.)
 
         Returns:
-            List of (record_id, similarity_score) tuples, sorted descending
+            List of RecordHit values, sorted descending
         """
         if k < 1:
             return []
@@ -1296,7 +1160,10 @@ class PGVectorStore:
                     ).format(remaining_clause),
                     (storage_ids,),
                 )
-                deleted_identities = cursor.fetchall()
+                deleted_identities = [
+                    RecordIdentity(workspace_id or None, source_kind, source_id)
+                    for workspace_id, source_kind, source_id in cursor.fetchall()
+                ]
                 graph_changed = _delete_graph_edges_for_identities(
                     cursor, deleted_identities
                 )
@@ -1406,7 +1273,7 @@ class PGKeywordStore:
             filters: Optional filters
 
         Returns:
-            List of (record_id, relevance_score) tuples, sorted descending
+            List of RecordHit values, sorted descending
         """
         conn = self.conn_pool.get_connection()
         cursor = None
@@ -1474,12 +1341,12 @@ class PGGraphStore:
 
     def upsert_edges(
         self,
-        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        edges: Sequence[GraphEdge],
     ) -> None:
         """Upsert edges in the graph.
 
         Args:
-            edges: List of (source_id, target_id, edge_type, weight) tuples
+            edges: GraphEdge values with complete endpoint identities
         """
         if not edges:
             return
@@ -1499,17 +1366,6 @@ class PGGraphStore:
                     edge.target.source_id,
                     edge.edge_type,
                     edge.weight,
-                )
-                if isinstance(edge, GraphEdge)
-                else (
-                    "",
-                    "legacy",
-                    edge[0],
-                    "",
-                    "legacy",
-                    edge[1],
-                    edge[2],
-                    edge[3],
                 )
                 for edge in edges
             ]
@@ -1539,7 +1395,7 @@ class PGGraphStore:
 
     def delete_edges(
         self,
-        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        edges: Sequence[GraphEdge],
     ) -> None:
         if not edges:
             return
@@ -1557,8 +1413,6 @@ class PGGraphStore:
                     edge.target.source_id,
                     edge.edge_type,
                 )
-                if isinstance(edge, GraphEdge)
-                else ("", "legacy", edge[0], "", "legacy", edge[1], edge[2])
                 for edge in edges
             ]
             cursor.executemany(
@@ -1590,19 +1444,19 @@ class PGGraphStore:
 
     def neighbors(
         self,
-        record_id: str | RecordIdentity,
+        record_id: RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> Sequence[GraphNeighbor | tuple[str, str, float]]:
+    ) -> Sequence[GraphNeighbor]:
         """Retrieve neighbors of a record.
 
         Args:
-            record_id: Starting record ID
+            record_id: Starting record identity
             edge_types: Optional filter by edge type
             depth: Traversal depth (default 1 for one-hop)
 
         Returns:
-            List of (neighbor_id, edge_type, cumulative_weight) tuples
+            GraphNeighbor values with complete neighbor identities
         """
         if depth < 1:
             raise ValueError("depth must be positive")
@@ -1611,16 +1465,11 @@ class PGGraphStore:
         try:
             cursor = conn.cursor()
 
-            identity = (
-                record_id
-                if isinstance(record_id, RecordIdentity)
-                else RecordIdentity(None, "legacy", record_id)
-            )
             edge_filter = ""
             params: list[Any] = [
-                identity.workspace_id or "",
-                identity.source_kind,
-                identity.source_id,
+                record_id.workspace_id or "",
+                record_id.source_kind,
+                record_id.source_id,
             ]
             if edge_types:
                 placeholders = ",".join(["%s"] * len(edge_types))
@@ -1700,16 +1549,14 @@ class PGGraphStore:
 
             cursor.execute(sql, params)
             results = cursor.fetchall()
-            if isinstance(record_id, RecordIdentity):
-                return [
-                    GraphNeighbor(
-                        RecordIdentity(row[0] or None, row[1], row[2]),
-                        row[3],
-                        float(row[4]),
-                    )
-                    for row in results
-                ]
-            return [(row[2], row[3], float(row[4])) for row in results]
+            return [
+                GraphNeighbor(
+                    RecordIdentity(row[0] or None, row[1], row[2]),
+                    row[3],
+                    float(row[4]),
+                )
+                for row in results
+            ]
         finally:
             if cursor is not None:
                 cursor.close()
