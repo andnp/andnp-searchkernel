@@ -34,3 +34,62 @@ def test_pgvector_filter_sql_rejects_empty_candidate_filter() -> None:
 
     assert clauses == ["FALSE"]
     assert parameters == []
+
+
+def test_pgvector_filter_sql_supports_single_metadata_field() -> None:
+    clauses, parameters = build_pgvector_filter_sql(
+        {"metadata_equals": {"issue_type": "Bug"}}
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert "metadata->>'issue_type' = %s" in sql_text
+    assert "Bug" in parameters
+
+
+def test_pgvector_filter_sql_supports_multiple_metadata_fields() -> None:
+    clauses, parameters = build_pgvector_filter_sql(
+        {
+            "metadata_equals": {
+                "issue_type": "Bug",
+                "component": "core",
+                "team": "backend",
+            }
+        }
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert "metadata->>'issue_type' = %s" in sql_text
+    assert "metadata->>'component' = %s" in sql_text
+    assert "metadata->>'team' = %s" in sql_text
+    assert "Bug" in parameters
+    assert "core" in parameters
+    assert "backend" in parameters
+
+
+def test_pgvector_filter_sql_metadata_equals_with_project_id() -> None:
+    clauses, parameters = build_pgvector_filter_sql(
+        {
+            "project_id": "proj-123",
+            "metadata_equals": {"issue_type": "Feature", "component": "api"},
+        }
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert "metadata->>'project_id' = ANY(%s)" in sql_text
+    assert "metadata->>'issue_type' = %s" in sql_text
+    assert "metadata->>'component' = %s" in sql_text
+    # project_id uses ANY so it's wrapped in a list
+    assert ["proj-123"] in parameters
+    assert "Feature" in parameters
+    assert "api" in parameters
+
+
+def test_pgvector_filter_sql_metadata_equals_ignores_none_values() -> None:
+    clauses, parameters = build_pgvector_filter_sql(
+        {"metadata_equals": {"issue_type": "Bug", "component": None}}
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert "metadata->>'issue_type' = %s" in sql_text
+    assert "metadata->>'component'" not in sql_text
+    assert "Bug" in parameters
