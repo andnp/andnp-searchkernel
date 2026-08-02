@@ -52,8 +52,6 @@ _LOCAL_KEYWORD_SCHEMA_VERSION = 2
 _LOCAL_FTS_TABLE = "local_records_fts"
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
-_LEGACY_GRAPH_TIMESTAMP = datetime.fromtimestamp(0, UTC)
-
 logger = logging.getLogger(__name__)
 
 
@@ -198,13 +196,6 @@ class LocalRecordBackend:
                 ON local_records (status);
             CREATE INDEX IF NOT EXISTS idx_local_records_workspace
                 ON local_records (workspace_id);
-            CREATE TABLE IF NOT EXISTS local_vectors (
-                storage_key TEXT NOT NULL,
-                model_name TEXT NOT NULL,
-                dim INTEGER NOT NULL,
-                embedding TEXT NOT NULL,
-                PRIMARY KEY (storage_key, model_name, dim)
-            );
             CREATE TABLE IF NOT EXISTS local_vectors_v2 (
                 storage_key TEXT NOT NULL,
                 encoder_namespace TEXT NOT NULL,
@@ -218,10 +209,6 @@ class LocalRecordBackend:
             );
             CREATE INDEX IF NOT EXISTS idx_local_vectors_v2_namespace
                 ON local_vectors_v2 (encoder_namespace, dim);
-            CREATE TABLE IF NOT EXISTS local_vector_schema (
-                name TEXT PRIMARY KEY,
-                version INTEGER NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS local_graph_edges (
                 source_id TEXT NOT NULL,
                 target_id TEXT NOT NULL,
@@ -242,115 +229,8 @@ class LocalRecordBackend:
         self._ensure_local_record_column(conn, "keywords", "TEXT NOT NULL DEFAULT ''")
         self._ensure_local_record_column(conn, "indexed_text", "TEXT")
         self._initialize_keyword_schema(conn)
-        self._migrate_legacy_vectors(conn)
         self._initialize_graph_schema(conn)
         conn.commit()
-
-    @staticmethod
-    def _legacy_graph_identity(node_id: str) -> RecordIdentity:
-        try:
-            return RecordIdentity.from_storage_key(node_id)
-        except (TypeError, ValueError):
-            return RecordIdentity(None, "legacy", node_id)
-
-    def migrate_legacy_graph_json(self, index_path: Path) -> None:
-        """Upgrade a persisted chunk-era ``graph.json`` into record storage."""
-        graph_file = index_path / "graph.json"
-        if not graph_file.exists():
-            return
-
-        try:
-            with graph_file.open() as stream:
-                graph_data = json.load(stream)
-        except (json.JSONDecodeError, OSError):
-            logger.warning("Could not read legacy graph.json for migration, skipping")
-            return
-
-        if not isinstance(graph_data, dict):
-            logger.warning(
-                "Legacy graph.json has unexpected type %s, skipping migration",
-                type(graph_data).__name__,
-            )
-            return
-
-        node_records: dict[str, Record] = {}
-        identities: dict[str, RecordIdentity] = {}
-
-        def ensure_node(node_id: object, metadata: dict[str, Any] | None = None) -> None:
-            if not isinstance(node_id, str) or not node_id:
-                return
-            identity = identities.setdefault(
-                node_id, self._legacy_graph_identity(node_id)
-            )
-            if identity.storage_key in node_records:
-                return
-            node_metadata = dict(metadata or {})
-            node_records[identity.storage_key] = Record(
-                workspace_id=identity.workspace_id,
-                source_kind=identity.source_kind,
-                source_id=identity.source_id,
-                title=str(node_metadata.get("title", "")),
-                body=str(node_metadata.get("content", "")),
-                created_at=_LEGACY_GRAPH_TIMESTAMP,
-                updated_at=_LEGACY_GRAPH_TIMESTAMP,
-                metadata=node_metadata,
-            )
-
-        for node in graph_data.get("nodes", []):
-            if not isinstance(node, dict):
-                continue
-            node_id = node.get("id")
-            metadata = {key: value for key, value in node.items() if key != "id"}
-            ensure_node(node_id, metadata)
-
-        edges: list[GraphEdge] = []
-        for link in graph_data.get("links", []):
-            if not isinstance(link, dict):
-                continue
-            source = link.get("source")
-            target = link.get("target")
-            if not isinstance(source, str) or not isinstance(target, str):
-                continue
-            if not source or not target:
-                continue
-            ensure_node(source)
-            ensure_node(target)
-            source_identity = identities[source]
-            target_identity = identities[target]
-            try:
-                weight = float(link.get("weight", 1.0))
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(weight):
-                continue
-            edges.append(
-                GraphEdge(
-                    source=source_identity,
-                    target=target_identity,
-                    edge_type=str(link.get("edge_type", "related_to")),
-                    weight=weight,
-                )
-            )
-
-        if node_records:
-            self.index(list(node_records.values()))
-        if edges:
-            self.upsert_edges(edges)
-
-        for name in ("graph.json", "communities.json"):
-            source = index_path / name
-            if not source.exists():
-                continue
-            try:
-                source.rename(source.with_suffix(source.suffix + ".bak"))
-            except OSError:
-                logger.warning("Could not archive legacy %s", source)
-
-        logger.info(
-            "Migrated legacy graph JSON into local records (%d nodes, %d edges)",
-            len(node_records),
-            len(edges),
-        )
 
     @staticmethod
     def _canonical_graph_storage_key(storage_key: str) -> str:
@@ -370,66 +250,8 @@ class LocalRecordBackend:
             raise ValueError(f"non-canonical graph storage key: {storage_key!r}")
         return storage_key
 
-    @classmethod
-    def _initialize_graph_schema(cls, conn: sqlite3.Connection) -> None:
-        foreign_keys = {
-            (row[3], row[6].upper())
-            for row in conn.execute("PRAGMA foreign_key_list(local_graph_edges)")
-        }
-        if foreign_keys != {
-            ("source_id", "CASCADE"),
-            ("target_id", "CASCADE"),
-        }:
-            conn.execute("DROP INDEX IF EXISTS idx_local_graph_source")
-            conn.execute("DROP INDEX IF EXISTS idx_local_graph_target")
-            conn.execute("DROP INDEX IF EXISTS idx_local_graph_source_type")
-            conn.execute(
-                "ALTER TABLE local_graph_edges RENAME TO local_graph_edges_legacy"
-            )
-            conn.execute(
-                """
-                CREATE TABLE local_graph_edges (
-                    source_id TEXT NOT NULL,
-                    target_id TEXT NOT NULL,
-                    edge_type TEXT NOT NULL,
-                    weight REAL NOT NULL,
-                    PRIMARY KEY (source_id, target_id, edge_type),
-                    FOREIGN KEY (source_id) REFERENCES local_records(storage_key)
-                        ON DELETE CASCADE,
-                    FOREIGN KEY (target_id) REFERENCES local_records(storage_key)
-                        ON DELETE CASCADE
-                )
-                """
-            )
-            record_keys = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT storage_key FROM local_records"
-                ).fetchall()
-            }
-            legacy_rows = conn.execute(
-                """
-                SELECT e.source_id, e.target_id, e.edge_type, e.weight
-                FROM local_graph_edges_legacy
-                """
-            ).fetchall()
-            for row in legacy_rows:
-                try:
-                    source_id = cls._canonical_graph_storage_key(row[0])
-                    target_id = cls._canonical_graph_storage_key(row[1])
-                except ValueError:
-                    continue
-                if source_id not in record_keys or target_id not in record_keys:
-                    continue
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO local_graph_edges
-                        (source_id, target_id, edge_type, weight)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (source_id, target_id, row[2], row[3]),
-                )
-            conn.execute("DROP TABLE local_graph_edges_legacy")
+    @staticmethod
+    def _initialize_graph_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_local_graph_source "
             "ON local_graph_edges (source_id)"
@@ -441,65 +263,6 @@ class LocalRecordBackend:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_local_graph_source_type "
             "ON local_graph_edges (source_id, edge_type)"
-        )
-
-    @staticmethod
-    def _migrate_legacy_vectors(conn: sqlite3.Connection) -> None:
-        columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(local_vectors)")
-        }
-        if not columns:
-            return
-        rows = conn.execute(
-            "SELECT storage_key, model_name, dim, embedding FROM local_vectors"
-        ).fetchall()
-        if not rows:
-            conn.execute(
-                """
-                INSERT INTO local_vector_schema (name, version)
-                VALUES ('local_vectors', ?)
-                ON CONFLICT(name) DO UPDATE SET version = excluded.version
-                """,
-                (VECTOR_FORMAT_VERSION,),
-            )
-            return
-        for row in rows:
-            packed = PackedVectorCodec.migrate_json(
-                row["embedding"],
-                int(row["dim"]),
-                context=(
-                    f"legacy embedding for {row['storage_key']} "
-                    f"namespace {row['model_name']!r}"
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO local_vectors_v2 (
-                    storage_key, encoder_namespace, dim, embedding,
-                    format_version, normalization_policy
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(storage_key, encoder_namespace, dim) DO UPDATE SET
-                    embedding = excluded.embedding,
-                    format_version = excluded.format_version,
-                    normalization_policy = excluded.normalization_policy
-                """,
-                (
-                    row["storage_key"],
-                    row["model_name"],
-                    int(row["dim"]),
-                    packed,
-                    VECTOR_FORMAT_VERSION,
-                    NORMALIZATION_POLICY,
-                ),
-            )
-        conn.execute("DELETE FROM local_vectors")
-        conn.execute(
-            """
-            INSERT INTO local_vector_schema (name, version)
-            VALUES ('local_vectors', ?)
-            ON CONFLICT(name) DO UPDATE SET version = excluded.version
-            """,
-            (VECTOR_FORMAT_VERSION,),
         )
 
     @staticmethod
@@ -1413,12 +1176,9 @@ class LocalRecordBackend:
                             SELECT EXISTS(
                                 SELECT 1 FROM local_vectors_v2
                                 WHERE storage_key = ?
-                            ) OR EXISTS(
-                                SELECT 1 FROM local_vectors
-                                WHERE storage_key = ?
                             )
                             """,
-                            (record.storage_key, record.storage_key),
+                            (record.storage_key,),
                         ).fetchone()[0]
                     )
                     old_row = conn.execute(
@@ -1433,10 +1193,6 @@ class LocalRecordBackend:
                         self._delete_fts_row(conn, old_row)
                     conn.execute(
                         "DELETE FROM local_vectors_v2 WHERE storage_key = ?",
-                        (record.storage_key,),
-                    )
-                    conn.execute(
-                        "DELETE FROM local_vectors WHERE storage_key = ?",
                         (record.storage_key,),
                     )
                     deleted_graph_edges += conn.execute(
@@ -2066,10 +1822,6 @@ class LocalGraphStore:
         edges: Sequence[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
         self._backend.upsert_edges(edges)
-
-    def migrate_legacy_json(self, index_path: Path) -> None:
-        """Upgrade a persisted chunk-era graph snapshot into local records."""
-        self._backend.migrate_legacy_graph_json(index_path)
 
     def graph_epoch(self) -> int:
         return self._backend.graph_epoch()
