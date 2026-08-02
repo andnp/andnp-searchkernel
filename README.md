@@ -1,120 +1,119 @@
 # `andnp-searchkernel`
 
-A domain-agnostic search and indexing kernel for hybrid keyword, vector, and
-graph retrieval with pluggable embedding, LLM, and reranker providers.
+`andnp-searchkernel` is a source-agnostic Python library for building hybrid
+keyword, vector, and graph search systems. Applications map their native data
+to canonical `Record` values, choose the storage and provider adapters they
+need, and keep source-specific lifecycle logic outside the kernel.
 
-## Status
+The current release is `0.6.0`. It supports canonical record search,
+checkpointed record ingestion, optional local/Postgres/FAISS/provider
+integrations, and bounded federation across compatible search sources. The
+API is still evolving before the first stable major release.
 
-**0.5.0, pre-alpha: canonical record architecture.** Record ingestion,
-candidate retrieval, fusion, graph expansion, and hydration use the
-record-oriented contracts. The package is still evolving, and the validation
-limits below are important when assessing production readiness.
+## Install
 
-## Canonical record contracts
-
-Records are identified by the composite tuple
-`(workspace_id, source_kind, source_id)`. The canonical `storage_key` is the
-serialized form of that tuple and is the identity used by local and Postgres
-stores, fusion, graph expansion, caches, and hydration. A bare `source_id` is
-not a safe identity because different sources or workspaces may reuse it.
-
-The search path also preserves these invariants:
-
-- `RecordHit` carries the complete `RecordIdentity` across every backend
-  boundary.
-- Search is read-only. Source lifecycle, checkpoints, access state, and
-  supersession state are not changed by a query.
-- Status, workspace, source-kind, and candidate-storage-key filters are
-  applied as retrieval constraints. Candidate-ID filtering is an explicit
-  adapter capability; an adapter must not silently ignore a requested filter.
-- Equal scores are ordered by canonical `storage_key`, so scalar, batch, and
-  concurrent execution remain deterministic.
-- Record results retain `SearchResultProvenance`, including contributing
-  strategies, rank/raw-score details, score adjustments, and parent-expansion
-  identity where applicable. Degraded-mode failures are reported explicitly.
-
-## Compose canonical search
-
-Compose a local record pipeline from the record hydrator and store ports:
-
-```python
-from searchkernel.api import SearchOrchestrator
-
-search = SearchOrchestrator(
-    hydrator=record_hydrator,
-    keyword_store=keyword_store,
-    vector_store=vector_store,
-    graph_store=graph_store,
-    embedding_provider=embedding_provider,
-)
-```
-
-`SearchOrchestrator` is the canonical record query boundary. Source adapters
-map native data into `Record`; the core keeps source-specific fields in opaque
-metadata and uses injected policy objects for filtering and ranking.
-
-## Ingest canonical records
-
-`SemanticRecordIngestor` is the canonical keyword-and-vector ingestor. It
-returns an `IngestionReceipt` with one outcome per record and leaves checkpoint
-persistence to the caller. `ResumableSemanticCoordinator` adds bounded source
-iteration and persists a source checkpoint only after the batch completes
-successfully:
-
-- Strict ingestion stops at the first failed record or stage and the
-  coordinator raises `IngestionError`; it does not roll back work already
-  committed to another store.
-- Lenient ingestion retains successful records, reports failed records with
-  stage errors, and does not advance the checkpoint for a failed batch.
-- Once a batch fails, later source batches may still be processed in lenient
-  mode, but their checkpoints remain blocked until the failed work is retried.
-
-These are partial-failure guarantees, not a cross-store transaction. A source
-can therefore be queryable with a partial index; readiness snapshots expose
-`indexing`, `partial`, and `ready` states.
-
-## Retired compatibility boundary
-
-The former chunk-oriented query pipeline and federated query execution were
-retired before 0.5.0 and are not supported APIs. Chunks may still be produced
-during ingestion, but query callers use `Record`, `RecordIdentity`, `RecordHit`,
-the record store ports, and the canonical record pipeline. `SearchKernel`
-remains an ingestion and composition facade; its query method returns
-canonical record outcomes only.
-
-## Optional backends
-
-The core package provides source-agnostic domain models, ports, record search,
-and evaluation primitives. Install only the integrations an application uses:
+The core package supports Python 3.13 and newer:
 
 ```bash
-pip install andnp-searchkernel[pgvector,huggingface,markdown]
+pip install andnp-searchkernel
 ```
 
-Available extras are `faiss`, `pgvector`, `huggingface`, `ollama`, and
-`markdown`. FAISS and pgvector implement the same record-oriented backend
-contracts and can be selected independently. Importing the core does not
-require any optional provider or backend.
+Install optional integrations only when you need them:
 
-## Validation limits
+```bash
+pip install "andnp-searchkernel[faiss]"
+pip install "andnp-searchkernel[pgvector]"
+pip install "andnp-searchkernel[pgvector-psycopg3]"
+pip install "andnp-searchkernel[huggingface]"
+pip install "andnp-searchkernel[ollama]"
+pip install "andnp-searchkernel[markdown]"
+```
 
-The CI quality gate runs Ruff, Pyrefly, import-linter, and the complete
-collected suite while excluding `slow` and `real_embeddings` tests. Pyrefly is
-the only type checker. This gate does not prove production relevance, latency,
-memory use, or parity across every backend. The pgvector tests need Docker or
-`SEARCHKERNEL_PG_DSN`; real-embedding tests need locally cached models and are
-not part of the default offline gate. Use the benchmark artifacts and [the
-performance roadmap](docs/search-performance-roadmap.md) for the measured
-scope and remaining limits.
+## First local search
 
-## Releases
+The local composition helper creates durable SQLite-backed stores. This small
+example uses a deterministic provider so it can run without downloading a
+model; replace it with a real provider for semantic retrieval.
 
-Merges to `main` with `feat`, `fix`, or breaking Conventional Commits are
-released automatically. The release workflow bumps the SemVer version,
-updates `pyproject.toml` and `uv.lock`, pushes a `v*` tag, and dispatches the
-PyPI publishing workflow. Documentation, chore, and test-only commits do not
-create releases.
+```python
+import asyncio
+from datetime import UTC, datetime
+from pathlib import Path
+
+from searchkernel import Record, build_local_record_kernel
+
+
+class DemoEmbeddingProvider:
+    model_name = "demo"
+    dim = 2
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _ in texts]
+
+
+async def main() -> None:
+    timestamp = datetime.now(UTC)
+    composition = build_local_record_kernel(
+        Path("records.db"),
+        embedding_provider=DemoEmbeddingProvider(),
+    )
+    record = Record(
+        workspace_id="demo",
+        source_kind="notes",
+        source_id="welcome",
+        title="Welcome",
+        body="Canonical records can be searched locally.",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    composition.keyword_store.index([record])
+
+    outcome = await composition.kernel.search("canonical records", limit=5)
+    for result in outcome.results:
+        print(result.record.title, result.score)
+
+
+asyncio.run(main())
+```
+
+The result is a `RecordSearchOutcome`. Each result retains the complete
+workspace/source identity and search provenance; degraded execution is
+reported through `outcome.failures` and `outcome.diagnostics`.
+
+## Documentation
+
+Start with the [documentation map](docs/index.md) to choose the right guide:
+
+- [Getting started](docs/getting-started.md) — install the package and build a
+  first local index.
+- [Core concepts](docs/concepts.md) — records, identity, ingestion, querying,
+  stores, providers, and readiness.
+- [Federated search](docs/guides/federated-search.md) — combine local or HTTP
+  search sources with bounded concurrency and explicit partial-result
+  diagnostics.
+- [Performance and retrieval roadmap](docs/search-performance-roadmap.md) —
+  developer-facing validation evidence, constraints, and future work.
+
+## Optional integrations
+
+The core import surface does not require optional providers or backends. The
+available extras are `faiss`, `pgvector`, `pgvector-psycopg3`, `huggingface`,
+`ollama`, and `markdown`. See the [getting-started guide](docs/getting-started.md)
+for the selection rule and the [federation guide](docs/guides/federated-search.md)
+for the HTTP source adapter.
+
+## Validation and releases
+
+CI runs Ruff, Pyrefly, import-linter, the safe test suite, supported Python
+versions, and selected optional-import checks. Pgvector integration tests need
+Docker or `SEARCHKERNEL_PG_DSN`; real-embedding tests are outside the default
+offline gate. The performance roadmap records what those checks do and do not
+prove.
+
+Merges to `main` with release-worthy Conventional Commits are released by
+the repository workflows. The package and runtime `__version__` are checked
+against each other in CI and before semantic release.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT. See [LICENSE](LICENSE).
