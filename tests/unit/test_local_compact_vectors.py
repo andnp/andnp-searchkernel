@@ -21,6 +21,7 @@ def _record(
     *,
     workspace_id: str | None = "workspace",
     status: RecordStatus = RecordStatus.ACTIVE,
+    metadata: dict[str, object] | None = None,
 ) -> Record:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
     return Record(
@@ -32,6 +33,7 @@ def _record(
         created_at=timestamp,
         updated_at=timestamp,
         status=status,
+        metadata=metadata or {},
         embedding=embedding,
     )
 
@@ -212,6 +214,41 @@ def test_optional_faiss_recall_reload_and_corruption_fallback(tmp_path: Path) ->
     assert fallback.search(
         [1.0, 0.0], 2, model_name="model", dim=2
     )[0].source_id == "one"
+
+
+def test_faiss_batches_candidate_validation_and_preserves_filters(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("faiss")
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record("blocked", [1.0, 0.0], workspace_id="other"),
+        _record("allowed", [0.9, 0.1], metadata={"project_id": "project-a"}),
+        _record("other-project", [0.8, 0.2], metadata={"project_id": "project-b"}),
+    ]
+    store = FAISSLocalVectorStore(backend, index_path=tmp_path / "faiss")
+    store.upsert(records, "model", 2)
+
+    # Build and persist the state before tracing the search itself.
+    assert store.search([1.0, 0.0], 1, model_name="model", dim=2)
+    queries: list[str] = []
+    connection = backend.db_manager.get_connection()
+    connection.set_trace_callback(queries.append)
+
+    hits = store.search(
+        [1.0, 0.0],
+        1,
+        model_name="model",
+        dim=2,
+        filters={
+            "workspace_id": "workspace",
+            "metadata_equals": {"project_id": "project-a"},
+        },
+    )
+
+    connection.set_trace_callback(None)
+    assert [hit.source_id for hit in hits] == ["allowed"]
+    assert not any("WHERE r.storage_key = ?" in query for query in queries)
 
 
 @pytest.mark.asyncio
