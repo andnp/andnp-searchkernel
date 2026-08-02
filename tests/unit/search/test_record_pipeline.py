@@ -14,6 +14,7 @@ from searchkernel.domain import (
     RecordHit,
     RecordIdentity,
 )
+from searchkernel.runtime import CandidateResultCache
 from searchkernel.search.record_pipeline import (
     RecordSearchConfig,
     RecordSearchError,
@@ -22,7 +23,6 @@ from searchkernel.search.record_pipeline import (
     RecordSearchPolicy,
     RecordSearchQueryContext,
 )
-from searchkernel.runtime import CandidateResultCache
 
 pytestmark = pytest.mark.asyncio
 
