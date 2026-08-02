@@ -1,6 +1,7 @@
 """Embedding ports for providers and source-owned embedding sinks."""
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from searchkernel.domain import Vector
@@ -29,6 +30,19 @@ class StreamingEmbeddingProvider(EmbeddingBatchProvider, Protocol):
         """Yield validated embedding batches without retaining prior vectors."""
         ...
 
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingWrite:
+    """One source-owned embedding passed to a persistence sink."""
+
+    source_kind: str
+    source_id: str
+    workspace_id: str | None
+    model_name: str
+    embedding: Vector
+    source_updated_at: str | None = None
+
+
 @runtime_checkable
 class EmbeddingSink(Protocol):
     """Persists one source embedding with source-owned write policy."""
@@ -44,6 +58,15 @@ class EmbeddingSink(Protocol):
         source_updated_at: str | None = None,
     ) -> bool:
         """Persist an embedding and report whether the write was accepted."""
+        ...
+
+
+@runtime_checkable
+class EmbeddingBatchSink(Protocol):
+    """Optional sink capability for persisting a provider-sized batch."""
+
+    def upsert_batch(self, writes: Sequence[EmbeddingWrite]) -> Sequence[bool]:
+        """Persist writes in order and report acceptance for each write."""
         ...
 
 

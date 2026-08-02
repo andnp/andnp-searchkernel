@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import pytest
 
 from searchkernel.ingestion import EmbeddingInput, embed_and_upsert
+from searchkernel.ports.embedding import EmbeddingWrite
 
 
 @dataclass
@@ -25,6 +26,15 @@ class _Sink:
     def upsert(self, **kwargs: object) -> bool:
         self.rows.append(kwargs)
         return str(kwargs["source_id"]) not in self.rejected
+
+
+class _BatchSink:
+    def __init__(self) -> None:
+        self.batches: list[list[EmbeddingWrite]] = []
+
+    def upsert_batch(self, writes: list[EmbeddingWrite]) -> list[bool]:
+        self.batches.append(writes)
+        return [True] * len(writes)
 
 
 def _inputs(count: int) -> list[EmbeddingInput]:
@@ -59,6 +69,28 @@ def test_embed_and_upsert_batches_inputs_and_preserves_source_metadata() -> None
         "embedding": [6.0],
         "source_updated_at": "version-0",
     }
+
+
+def test_embed_and_upsert_passes_provider_batches_to_batch_sink() -> None:
+    sink = _BatchSink()
+
+    result = embed_and_upsert(_inputs(5), provider=_Provider(), sink=sink, batch_size=2)
+
+    assert result.stored == 5
+    assert result.rejected == 0
+    assert [[write.source_id for write in batch] for batch in sink.batches] == [
+        ["memory-0", "memory-1"],
+        ["memory-2", "memory-3"],
+        ["memory-4"],
+    ]
+    assert sink.batches[0][0] == EmbeddingWrite(
+        source_kind="memory",
+        source_id="memory-0",
+        workspace_id="workspace",
+        model_name="test-model",
+        embedding=[6.0],
+        source_updated_at="version-0",
+    )
 
 
 def test_embed_and_upsert_counts_rejected_writes() -> None:

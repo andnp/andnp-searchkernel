@@ -25,8 +25,10 @@ from searchkernel.ports.content_source import (
 from searchkernel.ports.embedding import (
     AsyncEmbeddingProvider,
     EmbeddingBatchProvider,
+    EmbeddingBatchSink,
     EmbeddingProvider,
     EmbeddingSink,
+    EmbeddingWrite,
 )
 from searchkernel.ports.epochs import SearchEpochs
 from searchkernel.ports.federation import (
@@ -110,8 +112,10 @@ __all__ = [
     "ChunkTuningConfig",
     "ContentSource",
     "EmbeddingBatchProvider",
+    "EmbeddingBatchSink",
     "EmbeddingProvider",
     "EmbeddingSink",
+    "EmbeddingWrite",
     "FailureStage",
     "FederationSourceCapabilities",
     "GraphEdge",

@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from itertools import islice
 
 from searchkernel.domain import Vector
-from searchkernel.ports.embedding import EmbeddingBatchProvider, EmbeddingSink
+from searchkernel.ports.embedding import (
+    EmbeddingBatchProvider,
+    EmbeddingBatchSink,
+    EmbeddingSink,
+    EmbeddingWrite,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,33 +54,68 @@ def embed_and_upsert(
     if not inputs:
         return EmbeddingBatchResult(attempted=0, stored=0, rejected=0, batches=0)
 
-    vectors = embed_in_batches(
-        [item.text for item in inputs],
-        provider=provider,
-        batch_size=batch_size,
+    embedded_batches = list(
+        iter_embed_batches(
+            [item.text for item in inputs],
+            provider=provider,
+            batch_size=batch_size,
+        )
     )
+    input_batches = _batches(inputs, batch_size)
+    batch_sink = sink if isinstance(sink, EmbeddingBatchSink) else None
     stored = 0
     rejected = 0
-    for item, embedding in zip(inputs, vectors, strict=True):
-        accepted = sink.upsert(
-            source_kind=item.source_kind,
-            source_id=item.source_id,
-            workspace_id=item.workspace_id,
-            model_name=provider.model_name,
-            embedding=list(embedding),
-            source_updated_at=item.source_updated_at,
-        )
-        if accepted is False:
-            rejected += 1
+    for input_batch, embedding_batch in zip(
+        input_batches, embedded_batches, strict=True
+    ):
+        writes = [
+            EmbeddingWrite(
+                source_kind=item.source_kind,
+                source_id=item.source_id,
+                workspace_id=item.workspace_id,
+                model_name=provider.model_name,
+                embedding=embedding,
+                source_updated_at=item.source_updated_at,
+            )
+            for item, embedding in zip(input_batch, embedding_batch, strict=True)
+        ]
+        if batch_sink is not None:
+            accepted_batch = list(batch_sink.upsert_batch(writes))
         else:
-            stored += 1
+            accepted_batch = [
+                sink.upsert(
+                    source_kind=write.source_kind,
+                    source_id=write.source_id,
+                    workspace_id=write.workspace_id,
+                    model_name=write.model_name,
+                    embedding=write.embedding,
+                    source_updated_at=write.source_updated_at,
+                )
+                for write in writes
+            ]
+        if len(accepted_batch) != len(writes):
+            raise ValueError(
+                f"Embedding sink returned {len(accepted_batch)} acceptance results "
+                f"for {len(writes)} writes"
+            )
+        rejected += sum(accepted is False for accepted in accepted_batch)
+        stored += sum(accepted is not False for accepted in accepted_batch)
 
     return EmbeddingBatchResult(
         attempted=len(inputs),
         stored=stored,
         rejected=rejected,
-        batches=(len(inputs) + batch_size - 1) // batch_size,
+        batches=len(embedded_batches),
     )
+
+
+def _batches(
+    inputs: list[EmbeddingInput], batch_size: int
+) -> Iterator[list[EmbeddingInput]]:
+    """Yield source inputs in the same batches sent to the provider."""
+    iterator = iter(inputs)
+    while batch := list(islice(iterator, batch_size)):
+        yield batch
 
 
 def embed_in_batches(
