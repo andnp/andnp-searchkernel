@@ -23,6 +23,9 @@ jobs:
       - name: Sync dependencies
         run: uv sync --locked
 
+      - name: Check package version consistency
+        run: python scripts/check_version.py
+
       - name: Lint with ruff
         run: uv run ruff check .
 
