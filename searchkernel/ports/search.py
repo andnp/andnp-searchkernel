@@ -3,9 +3,9 @@
 This is the main entry point for running a unified search across all sources.
 """
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
-from searchkernel.domain import SearchResult
+from searchkernel.domain import SearchFilters, SearchResult
 
 
 @runtime_checkable
@@ -25,7 +25,7 @@ class SearchAPI(Protocol):
         query: str,
         *,
         sources: list[str] | None = None,
-        filters: dict[str, Any] | None = None,
+        filters: SearchFilters | None = None,
         k: int = 10,
     ) -> list[SearchResult]:
         """

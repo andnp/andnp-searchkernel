@@ -6,6 +6,16 @@ They are purely abstract (Protocol or ABC); implementations live in adapters/.
 Dependency rule: ports import only from domain/ and stdlib/typing.
 """
 
+from searchkernel.domain import (
+    Filters,
+    GraphEdgeLike,
+    GraphNeighborLike,
+    LegacyGraphEdge,
+    LegacyGraphNeighbor,
+    LegacyRecordHit,
+    RecordHitLike,
+    SearchFilters,
+)
 from searchkernel.ports.candidate_filter import CandidateFilterSupport
 from searchkernel.ports.chunking_config import ChunkTuningConfig
 from searchkernel.ports.content_source import (
@@ -88,7 +98,10 @@ __all__ = [
     "EmbeddingBatchProvider",
     "EmbeddingProvider",
     "EmbeddingSink",
+    "Filters",
+    "GraphEdgeLike",
     "GraphIndexPort",
+    "GraphNeighborLike",
     "GraphStore",
     "HierarchicalSearchableSource",
     "IndexManagerPort",
@@ -98,12 +111,16 @@ __all__ = [
     "KeywordIndexPort",
     "KeywordStore",
     "LLMProvider",
+    "LegacyGraphEdge",
+    "LegacyGraphNeighbor",
+    "LegacyRecordHit",
     "ModelBackupStore",
     "ModelLifecycleStore",
     "ModelNamespaceStore",
     "ModelValidationStore",
     "OrchestratorConfig",
     "ParentRecordExpander",
+    "RecordHitLike",
     "RecordIngestionResult",
     "RecordIngestionStatus",
     "RecordIngestor",
@@ -113,6 +130,7 @@ __all__ = [
     "SearchAPI",
     "SearchEpochProvider",
     "SearchEpochs",
+    "SearchFilters",
     "SearchableSource",
     "SourceBatch",
     "SourceCapabilities",

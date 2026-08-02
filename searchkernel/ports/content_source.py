@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
-from searchkernel.domain import ChangeSignal, Cursor, Record, ScoredRef
+from searchkernel.domain import ChangeSignal, Cursor, Record, ScoredRef, SearchFilters
 from searchkernel.ports.retrieval import SourceCapabilities
 
 IngestionFailureMode = Literal["strict", "lenient"]
@@ -162,7 +162,7 @@ class SearchableSource(Protocol):
     source_kind: str
 
     async def search(
-        self, query: str, k: int, filters: dict[str, Any] | None = None
+        self, query: str, k: int, filters: SearchFilters | None = None
     ) -> Iterable[ScoredRef]:
         ...
 
@@ -175,7 +175,7 @@ class HierarchicalSearchableSource(Protocol):
     capabilities: SourceCapabilities
 
     async def search_parents(
-        self, query: str, k: int, filters: dict[str, Any] | None = None
+        self, query: str, k: int, filters: SearchFilters | None = None
     ) -> Iterable[ScoredRef]:
         ...
 
@@ -184,7 +184,7 @@ class HierarchicalSearchableSource(Protocol):
         query: str,
         parent_ids: Sequence[str],
         k: int,
-        filters: dict[str, Any] | None = None,
+        filters: SearchFilters | None = None,
     ) -> Iterable[ScoredRef]:
         """Search children for canonical parent storage keys.
 

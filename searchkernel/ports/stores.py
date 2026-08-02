@@ -8,11 +8,12 @@ from collections.abc import Awaitable, Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from searchkernel.domain import (
-    GraphEdge,
-    GraphNeighbor,
+    GraphEdgeLike,
+    GraphNeighborLike,
     Record,
-    RecordHit,
+    RecordHitLike,
     RecordIdentity,
+    SearchFilters,
     Vector,
 )
 
@@ -46,8 +47,8 @@ class VectorStore(Protocol):
         *,
         model_name: str,
         dim: int,
-        filters: dict[str, Any] | None = None,
-    ) -> Sequence[RecordHit | tuple[str, float]]:
+        filters: SearchFilters | None = None,
+    ) -> Sequence[RecordHitLike]:
         """
         Search for the k nearest neighbors to a query vector.
 
@@ -97,8 +98,8 @@ class KeywordStore(Protocol):
         ...
 
     def search(
-        self, query: str, k: int, filters: dict[str, Any] | None = None
-    ) -> Sequence[RecordHit | tuple[str, float]]:
+        self, query: str, k: int, filters: SearchFilters | None = None
+    ) -> Sequence[RecordHitLike]:
         """
         Search for top-k records matching the query.
 
@@ -119,7 +120,7 @@ class GraphStore(Protocol):
 
     def upsert_edges(
         self,
-        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        edges: Sequence[GraphEdgeLike],
     ) -> None:
         """
         Upsert edges in the graph.
@@ -132,7 +133,7 @@ class GraphStore(Protocol):
 
     def delete_edges(
         self,
-        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+        edges: Sequence[GraphEdgeLike],
     ) -> None:
         """Delete graph edges and advance the graph mutation epoch."""
         ...
@@ -142,7 +143,7 @@ class GraphStore(Protocol):
         record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> Sequence[GraphNeighbor | tuple[str, str, float]]:
+    ) -> Sequence[GraphNeighborLike]:
         """
         Retrieve neighbors of a record in the graph.
 
@@ -192,8 +193,8 @@ class AsyncVectorStore(Protocol):
         *,
         model_name: str,
         dim: int,
-        filters: dict[str, Any] | None = None,
-    ) -> Sequence[RecordHit | tuple[str, float]]:
+        filters: SearchFilters | None = None,
+    ) -> Sequence[RecordHitLike]:
         ...
 
 
@@ -201,8 +202,8 @@ class AsyncKeywordStore(Protocol):
     """Async boundary for record-oriented keyword retrieval."""
 
     async def search(
-        self, query: str, k: int, filters: dict[str, Any] | None = None
-    ) -> Sequence[RecordHit | tuple[str, float]]:
+        self, query: str, k: int, filters: SearchFilters | None = None
+    ) -> Sequence[RecordHitLike]:
         ...
 
 
@@ -214,7 +215,7 @@ class AsyncGraphStore(Protocol):
         record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> Sequence[GraphNeighbor | tuple[str, str, float]]:
+    ) -> Sequence[GraphNeighborLike]:
         ...
 
 
@@ -228,11 +229,11 @@ class BatchGraphStore(Protocol):
         depth: int,
     ) -> Mapping[
         str,
-        Sequence[GraphNeighbor | tuple[str, str, float]],
+        Sequence[GraphNeighborLike],
     ] | Awaitable[
         Mapping[
             str,
-            Sequence[GraphNeighbor | tuple[str, str, float]],
+            Sequence[GraphNeighborLike],
         ]
     ]:
         ...

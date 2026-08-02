@@ -31,7 +31,11 @@ class Tier(str, Enum):
 # Type aliases for clarity in port signatures
 Vector = list[float]  # Embedding vector
 Cursor = str | None  # Watermark for incremental sync (e.g., commit SHA, timestamp)
-Filters = Mapping[str, Any]  # Read-only query filters (source-specific, opaque to core)
+SearchFilters = Mapping[str, Any]
+"""Read-only search filters; source-specific keys remain opaque to the kernel."""
+
+Filters = SearchFilters
+"""Compatibility name for ``SearchFilters`` during the API migration."""
 ChangeSignal = dict[str, Any]  # Source change info: {"watch": bool, "poll_interval": int}
 
 
@@ -193,6 +197,13 @@ class GraphNeighbor:
         return 3
 
 
+LegacyGraphNeighbor = tuple[str, str, float]
+"""Legacy graph tuple retained until all stores return ``GraphNeighbor``."""
+
+GraphNeighborLike = GraphNeighbor | LegacyGraphNeighbor
+"""Canonical graph result plus the temporary tuple compatibility boundary."""
+
+
 @dataclass(frozen=True, slots=True)
 class GraphEdge:
     """A weighted graph edge retaining both endpoint identities."""
@@ -218,6 +229,13 @@ class GraphEdge:
 
     def __len__(self) -> int:
         return 4
+
+
+LegacyGraphEdge = tuple[str, str, str, float]
+"""Legacy graph edge tuple retained during adapter migration."""
+
+GraphEdgeLike = GraphEdge | LegacyGraphEdge
+"""Canonical graph edge plus the temporary tuple compatibility boundary."""
 
 
 # ===== Core domain types =====

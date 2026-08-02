@@ -43,7 +43,9 @@ PORT_EXPORTS = {
     "ContentSource": content_source.ContentSource,
     "EmbeddingProvider": embedding.EmbeddingProvider,
     "GraphIndexPort": live_indices.GraphIndexPort,
+    "RecordHitLike": models.RecordHitLike,
     "SearchAPI": search.SearchAPI,
+    "SearchFilters": models.SearchFilters,
     "VectorStore": stores.VectorStore,
     "extract_retrieval_fields": retrieval.extract_retrieval_fields,
 }
