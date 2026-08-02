@@ -340,13 +340,15 @@ def _merge_stage_outcomes(
             keyword_by_id.get(record_key),
             semantic_by_id.get(record_key),
         )
-        errors = [
-            result.error
-            for result in stage_results
-            if result is not None and result.status == "failed" and result.error
-        ]
-        if any(result is None for result in stage_results):
-            errors.append("index stage did not report an outcome")
+        errors: list[str] = []
+        for stage_name, result in zip(
+            ("keyword", "semantic"), stage_results, strict=True
+        ):
+            if result is None:
+                errors.append(f"{stage_name} stage did not report an outcome")
+            elif not result.successful:
+                detail = result.error or f"status={result.status}"
+                errors.append(f"{stage_name} stage: {detail}")
         if errors:
             outcomes.append(
                 RecordIngestionResult(

@@ -12,6 +12,8 @@ from searchkernel.api import SemanticRecordIngestor as ApiRecordIngestor
 from searchkernel.domain import Record, RecordStatus
 from searchkernel.indexing.embedding_cache import SQLiteEmbeddingCache
 from searchkernel.ingestion import SemanticRecordIngestor
+from searchkernel.ingestion.records import _merge_stage_outcomes
+from searchkernel.ports.content_source import RecordIngestionResult
 
 
 @dataclass
@@ -298,6 +300,34 @@ async def test_lenient_failures_continue_and_report_each_record() -> None:
         "committed",
     ]
     assert [record.source_id for record in keyword.records] == ["first", "last"]
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_does_not_promote_cancelled_stage_to_committed() -> None:
+    records = [_record("one")]
+    receipt = _merge_stage_outcomes(
+        records,
+        checkpoint=None,
+        failure_mode="lenient",
+        keyword_outcomes=[
+            RecordIngestionResult("notes", "one", "workspace", "committed")
+        ],
+        semantic_outcomes=[
+            RecordIngestionResult(
+                "notes",
+                "one",
+                "workspace",
+                "cancelled",
+                error="semantic worker stopped",
+            )
+        ],
+    )
+
+    assert receipt.committed == 0
+    assert receipt.failed == 1
+    assert receipt.records[0].error == (
+        "semantic stage: semantic worker stopped"
+    )
 
 
 def test_public_import_exposes_the_composable_ingestor() -> None:
