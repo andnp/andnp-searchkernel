@@ -55,6 +55,7 @@ from searchkernel.search.record_pipeline import (
     QueryEmbeddingProvider,
     RecordHydrator,
     RecordSearchConfig,
+    RecordSearchOutcome,
     RecordSearchPolicy,
 )
 
@@ -66,6 +67,7 @@ class SearchKernel:
         self,
         *,
         registry: SourceRegistry,
+        orchestrator: SearchOrchestrator | None = None,
         ingestor: RecordIngestor | None = None,
         content_sources: Iterable[ContentSource] = (),
         reranker: Reranker | None = None,
@@ -76,6 +78,7 @@ class SearchKernel:
         hierarchical_config: HierarchicalRetrievalConfig | None = None,
     ) -> None:
         self._registry = registry
+        self._orchestrator = orchestrator
         self._ingestor = ingestor
         self._content_sources: dict[str, ContentSource] = {}
         for source in content_sources:
@@ -199,6 +202,7 @@ class SearchKernel:
 
         return cls(
             registry=source_registry,
+            orchestrator=orchestrator,
             ingestor=ingestor,
             content_sources=content_sources,
             reranker=effective_reranker,
@@ -453,6 +457,20 @@ class SearchKernel:
             hierarchical_config=self._hierarchical_config,
         )
         return [self._to_search_result(ref) for ref in scored_refs]
+
+    async def search(
+        self,
+        query: str,
+        *,
+        filters: dict[str, Any] | None = None,
+        limit: int = 10,
+    ) -> RecordSearchOutcome:
+        """Search the composed canonical record pipeline."""
+        if self._orchestrator is None:
+            raise RuntimeError(
+                "Cannot search records: no record orchestrator was wired into SearchKernel"
+            )
+        return await self._orchestrator.search(query, limit=limit, filters=filters)
 
     @staticmethod
     def _to_search_result(ref: ScoredRef) -> SearchResult:

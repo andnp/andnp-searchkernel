@@ -38,10 +38,10 @@ The search path also preserves these invariants:
 Compose a local record pipeline from the record hydrator and store ports:
 
 ```python
-from searchkernel.api import SearchKernel
+from searchkernel.api import SearchOrchestrator
 
-kernel = SearchKernel.build(
-    record_hydrator=record_hydrator,
+search = SearchOrchestrator(
+    hydrator=record_hydrator,
     keyword_store=keyword_store,
     vector_store=vector_store,
     graph_store=graph_store,
@@ -49,11 +49,9 @@ kernel = SearchKernel.build(
 )
 ```
 
-`SearchKernel.build` creates the canonical `SearchOrchestrator` when record
-dependencies are supplied. Callers that already own one may pass
-`orchestrator=` instead. Source adapters map native data into `Record`; the
-core keeps source-specific fields in opaque metadata and uses injected policy
-objects for filtering and ranking.
+`SearchOrchestrator` is the canonical record query boundary. Source adapters
+map native data into `Record`; the core keeps source-specific fields in opaque
+metadata and uses injected policy objects for filtering and ranking.
 
 ## Ingest canonical records
 

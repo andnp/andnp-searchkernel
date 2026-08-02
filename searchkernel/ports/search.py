@@ -1,47 +1,35 @@
-"""SearchAPI port: the primary driving port for executing searches.
+"""SearchAPI port for the canonical record-oriented search path."""
 
-This is the main entry point for running a unified search across all sources.
-"""
+from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from searchkernel.domain import SearchFilters, SearchResult
+from searchkernel.domain import SearchFilters
+
+if TYPE_CHECKING:
+    from searchkernel.search.record_pipeline import RecordSearchOutcome
 
 
 @runtime_checkable
 class SearchAPI(Protocol):
-    """Unified search endpoint spanning the kernel index and federated sources.
+    """Primary driving interface for record-oriented retrieval."""
 
-    This is the primary driving interface of the kernel. It orchestrates:
-    - Fanning out to registered ContentSources (ingestible)
-    - Querying the kernel's unified index (VectorStore + KeywordStore + GraphStore)
-    - Federating to registered SearchableSources (federated)
-    - Merging candidates, then applying the late rerank defined by the
-      federation entrypoint
-    """
-
-    async def search_anything(
+    async def search(
         self,
         query: str,
         *,
-        sources: list[str] | None = None,
         filters: SearchFilters | None = None,
-        k: int = 10,
-    ) -> list[SearchResult]:
+        limit: int = 10,
+    ) -> RecordSearchOutcome:
         """
-        Execute a unified search across kernel and federated sources.
+        Execute the canonical record search pipeline.
 
         Args:
             query: The search query string.
-            sources: Optional list of source_kind names to search.
-                     If None, searches all registered sources.
             filters: Optional source-specific filters (opaque to core).
-            k: Maximum number of results to return.
+            limit: Maximum number of hydrated record results to return.
 
         Returns:
-            Ranked list of SearchResults. Source-local scores are retained as
-            provenance metadata rather than assumed comparable across sources.
-            Candidate merging and optional or required late reranking are
-            defined by ``runtime.federation.search_anything``.
+            Record results, provenance, and explicit degradation diagnostics.
         """
         ...
