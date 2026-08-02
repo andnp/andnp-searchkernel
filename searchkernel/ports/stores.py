@@ -1,17 +1,17 @@
 """Store ports: unified storage backends for vectors, keywords, graphs, and cache.
 
 These ports unify the various storage needs of the kernel. Default implementation
-uses Postgres + pgvector; legacy FAISS/SQLite adapters are kept as fallbacks.
+uses Postgres + pgvector or the canonical local record stores.
 """
 
 from collections.abc import Awaitable, Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from searchkernel.domain import (
-    GraphEdgeLike,
-    GraphNeighborLike,
+    GraphEdge,
+    GraphNeighbor,
     Record,
-    RecordHitLike,
+    RecordHit,
     RecordIdentity,
     SearchFilters,
     Vector,
@@ -48,7 +48,7 @@ class VectorStore(Protocol):
         model_name: str,
         dim: int,
         filters: SearchFilters | None = None,
-    ) -> Sequence[RecordHitLike]:
+    ) -> Sequence[RecordHit]:
         """
         Search for the k nearest neighbors to a query vector.
 
@@ -62,7 +62,7 @@ class VectorStore(Protocol):
             filters: Optional filters (source-specific, opaque to core).
 
         Returns:
-            List of (record_id, similarity_score) tuples, sorted descending.
+            Canonical record hits sorted by descending score.
         """
         ...
 
@@ -99,7 +99,7 @@ class KeywordStore(Protocol):
 
     def search(
         self, query: str, k: int, filters: SearchFilters | None = None
-    ) -> Sequence[RecordHitLike]:
+    ) -> Sequence[RecordHit]:
         """
         Search for top-k records matching the query.
 
@@ -109,7 +109,7 @@ class KeywordStore(Protocol):
             filters: Optional filters (source-specific).
 
         Returns:
-            List of (record_id, relevance_score) tuples, sorted descending.
+            Canonical record hits sorted by descending score.
         """
         ...
 
@@ -120,7 +120,7 @@ class GraphStore(Protocol):
 
     def upsert_edges(
         self,
-        edges: Sequence[GraphEdgeLike],
+        edges: Sequence[GraphEdge],
     ) -> None:
         """
         Upsert edges in the graph.
@@ -133,7 +133,7 @@ class GraphStore(Protocol):
 
     def delete_edges(
         self,
-        edges: Sequence[GraphEdgeLike],
+        edges: Sequence[GraphEdge],
     ) -> None:
         """Delete graph edges and advance the graph mutation epoch."""
         ...
@@ -143,7 +143,7 @@ class GraphStore(Protocol):
         record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> Sequence[GraphNeighborLike]:
+    ) -> Sequence[GraphNeighbor]:
         """
         Retrieve neighbors of a record in the graph.
 
@@ -153,7 +153,7 @@ class GraphStore(Protocol):
             depth: Number of hops to traverse (default 1 for one-hop).
 
         Returns:
-            List of (neighbor_id, edge_type, cumulative_weight) tuples.
+            Canonical graph neighbors sorted by the store's stable ordering.
         """
         ...
 
@@ -194,7 +194,7 @@ class AsyncVectorStore(Protocol):
         model_name: str,
         dim: int,
         filters: SearchFilters | None = None,
-    ) -> Sequence[RecordHitLike]:
+    ) -> Sequence[RecordHit]:
         ...
 
 
@@ -203,7 +203,7 @@ class AsyncKeywordStore(Protocol):
 
     async def search(
         self, query: str, k: int, filters: SearchFilters | None = None
-    ) -> Sequence[RecordHitLike]:
+    ) -> Sequence[RecordHit]:
         ...
 
 
@@ -215,7 +215,7 @@ class AsyncGraphStore(Protocol):
         record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
-    ) -> Sequence[GraphNeighborLike]:
+    ) -> Sequence[GraphNeighbor]:
         ...
 
 
@@ -229,11 +229,11 @@ class BatchGraphStore(Protocol):
         depth: int,
     ) -> Mapping[
         str,
-        Sequence[GraphNeighborLike],
+        Sequence[GraphNeighbor],
     ] | Awaitable[
         Mapping[
             str,
-            Sequence[GraphNeighborLike],
+            Sequence[GraphNeighbor],
         ]
     ]:
         ...
