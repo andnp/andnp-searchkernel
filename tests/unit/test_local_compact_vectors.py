@@ -112,6 +112,51 @@ def test_exact_search_has_cosine_parity_deterministic_ties_and_filters() -> None
     )[0].source_id == "archived"
 
 
+def test_vector_metadata_and_snapshot_cache_follow_vector_epoch() -> None:
+    backend = LocalRecordBackend()
+    vector = LocalVectorStore(backend, engine="auto")
+    record = _record("one", [1.0, 0.0])
+    backend.upsert([record], "model", 2)
+
+    queries: list[str] = []
+    connection = backend.db_manager.get_connection()
+    connection.set_trace_callback(queries.append)
+
+    def stats_query_count() -> int:
+        return sum(
+            "COALESCE(SUM(length(embedding))" in query for query in queries
+        )
+
+    vector.search([1.0, 0.0], 1, model_name="model", dim=2)
+    snapshot = backend._vector_snapshots[("model", 2)]
+    vector.search([1.0, 0.0], 1, model_name="model", dim=2)
+
+    assert stats_query_count() == 1
+    assert backend._vector_snapshots[("model", 2)] is snapshot
+
+    keyword_only = _record("keyword-only", [0.0, 1.0])
+    backend.index([keyword_only])
+    vector.search([1.0, 0.0], 1, model_name="model", dim=2)
+    assert stats_query_count() == 1
+    assert backend._vector_snapshots[("model", 2)] is snapshot
+
+    record.embedding = [0.0, 1.0]
+    backend.upsert([record], "model", 2)
+    vector.search([0.0, 1.0], 1, model_name="model", dim=2)
+    assert stats_query_count() == 2
+    assert backend._vector_snapshots[("model", 2)] is not snapshot
+    assert connection.execute(
+        "SELECT COUNT(*) FROM local_vectors_v2"
+    ).fetchone()[0] == 1
+    vector.delete([record.storage_key])
+    assert backend.vector_count("model", 2) == 0
+    vector.search([0.0, 1.0], 1, model_name="model", dim=2)
+    assert stats_query_count() == 3
+    assert backend._vector_snapshots[("model", 2)] is not snapshot
+    assert vector.search([0.0, 1.0], 1, model_name="model", dim=2) == []
+    connection.set_trace_callback(None)
+
+
 def test_snapshot_reload_corruption_and_deletion(tmp_path: Path) -> None:
     db_path = tmp_path / "records.db"
     backend = LocalRecordBackend(db_path)

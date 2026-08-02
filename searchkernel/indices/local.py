@@ -58,6 +58,18 @@ _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
+class _VectorSnapshotCache(dict[tuple[str, int], VectorSnapshot]):
+    """Clear metadata alongside snapshots when storage is externally reset."""
+
+    def __init__(self, storage_stats: dict[tuple[str, int], tuple[int, int, int]]):
+        super().__init__()
+        self._storage_stats = storage_stats
+
+    def clear(self) -> None:
+        super().clear()
+        self._storage_stats.clear()
+
+
 class _EphemeralDatabase:
     def __init__(self, tuning: SQLiteTuning | None = None) -> None:
         self._connection = sqlite3.connect(":memory:", check_same_thread=False)
@@ -160,7 +172,10 @@ class LocalRecordBackend:
         )
         self._lock = threading.RLock()
         self._snapshot_lock = threading.RLock()
-        self._vector_snapshots: dict[tuple[str, int], VectorSnapshot] = {}
+        self._vector_storage_stats: dict[tuple[str, int], tuple[int, int, int]] = {}
+        self._vector_snapshots: dict[tuple[str, int], VectorSnapshot] = (
+            _VectorSnapshotCache(self._vector_storage_stats)
+        )
         self._epoch_lane = _LocalEpochLane()
         self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
         self._vector_engine = vector_engine
@@ -568,8 +583,9 @@ class LocalRecordBackend:
         with self._lock:
             conn = self._db.get_connection()
             try:
+                vector_affected = self._records_have_vectors(conn, rows)
                 self._write_records(conn, rows)
-                self._epoch_lane.bump(conn, keyword=True)
+                self._epoch_lane.bump(conn, keyword=True, vector=vector_affected)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -619,6 +635,9 @@ class LocalRecordBackend:
                                 ),
                             )
                         )
+                vector_affected = bool(packed_vectors) or self._records_have_vectors(
+                    conn, rows
+                )
                 self._write_records(conn, rows)
                 conn.executemany(
                     """
@@ -646,12 +665,26 @@ class LocalRecordBackend:
                 self._epoch_lane.bump(
                     conn,
                     keyword=True,
-                    vector=bool(packed_vectors),
+                    vector=vector_affected,
                 )
                 conn.commit()
             except Exception:
                 conn.rollback()
                 raise
+
+    @staticmethod
+    def _records_have_vectors(
+        conn: sqlite3.Connection, records: Sequence[Record]
+    ) -> bool:
+        keys = list(dict.fromkeys(record.storage_key for record in records))
+        if not keys:
+            return False
+        placeholders = ",".join("?" for _ in keys)
+        row = conn.execute(
+            f"SELECT 1 FROM local_vectors_v2 WHERE storage_key IN ({placeholders}) LIMIT 1",
+            keys,
+        ).fetchone()
+        return row is not None
 
     @staticmethod
     def _status_values(filters: SearchFilters | None) -> set[str]:
@@ -1028,8 +1061,15 @@ class LocalRecordBackend:
         return row_count
 
     def vector_storage_stats(self, model_name: str, dim: int) -> tuple[int, int]:
+        key = (model_name, dim)
         with self._lock:
             conn = self._db.get_connection()
+            vector_epoch = self._epoch_lane.read(
+                conn, _LocalEpochLane._LANE_KEYS["vector"]
+            )
+            cached = self._vector_storage_stats.get(key)
+            if cached is not None and cached[0] == vector_epoch:
+                return cached[1], cached[2]
             row = conn.execute(
                 """
                 SELECT COUNT(*), COALESCE(SUM(length(embedding)), 0)
@@ -1038,7 +1078,9 @@ class LocalRecordBackend:
                 """,
                 (model_name, dim),
             ).fetchone()
-            return (int(row[0]), int(row[1])) if row else (0, 0)
+            stats = (int(row[0]), int(row[1])) if row else (0, 0)
+            self._vector_storage_stats[key] = (vector_epoch, *stats)
+            return stats
 
     def _vector_batch_limit(self, dim: int) -> int:
         bytes_per_vector = dim * _VECTOR_EMBEDDING_BYTES
@@ -1125,7 +1167,7 @@ class LocalRecordBackend:
             with self._lock:
                 conn = self._db.get_connection()
                 current_epoch = self._epoch_lane.read(
-                    conn, _LocalEpochLane._RECORD_KEY
+                    conn, _LocalEpochLane._LANE_KEYS["vector"]
                 )
                 cached = self._vector_snapshots.get(key)
                 if cached is not None and cached.epoch == current_epoch:
@@ -1143,7 +1185,7 @@ class LocalRecordBackend:
                     (model_name, dim),
                 ).fetchall()
                 snapshot_epoch = self._epoch_lane.read(
-                    conn, _LocalEpochLane._RECORD_KEY
+                    conn, _LocalEpochLane._LANE_KEYS["vector"]
                 )
             snapshot = VectorSnapshot.from_rows(
                 rows,
@@ -1152,6 +1194,11 @@ class LocalRecordBackend:
                 epoch=snapshot_epoch,
             )
             self._vector_snapshots[key] = snapshot
+            self._vector_storage_stats[key] = (
+                snapshot_epoch,
+                len(rows),
+                sum(len(row["embedding"]) for row in rows),
+            )
             return snapshot
 
     @staticmethod
