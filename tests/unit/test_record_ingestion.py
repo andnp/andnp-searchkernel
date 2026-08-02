@@ -61,7 +61,9 @@ class _VectorStore:
     def upsert(self, records, model_name, dim) -> None:
         if any(record.source_id in self.failures for record in records):
             raise RuntimeError("vector write failed")
-        self.records.extend(records)
+        by_key = {record.storage_key: record for record in self.records}
+        by_key.update({record.storage_key: record for record in records})
+        self.records = list(by_key.values())
 
     def search(self, query_vector, k, *, model_name, dim, filters=None):
         return []
@@ -300,6 +302,31 @@ async def test_lenient_failures_continue_and_report_each_record() -> None:
         "committed",
     ]
     assert [record.source_id for record in keyword.records] == ["first", "last"]
+
+
+@pytest.mark.asyncio
+async def test_failed_record_can_be_retried_after_other_records_commit() -> None:
+    provider = _Provider()
+    keyword = _KeywordStore({"retry-me"})
+    ingestor, keyword, vector = _ingestor(
+        provider,
+        cache=SQLiteEmbeddingCache(":memory:", "retry", 1),
+        keyword=keyword,
+    )
+    records = [_record("kept"), _record("retry-me")]
+
+    first = await ingestor.index_records(records, failure_mode="lenient")
+
+    assert [result.status for result in first.records] == ["committed", "failed"]
+    assert [record.source_id for record in keyword.records] == ["kept"]
+
+    keyword.failures.clear()
+    second = await ingestor.index_records([records[1]], failure_mode="lenient")
+
+    assert second.committed == 1
+    assert second.failures == ()
+    assert [record.source_id for record in keyword.records] == ["kept", "retry-me"]
+    assert [record.source_id for record in vector.records] == ["kept", "retry-me"]
 
 
 @pytest.mark.asyncio
