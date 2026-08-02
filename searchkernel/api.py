@@ -11,7 +11,8 @@ exposed only where they are reusable parts of the indexing seam; optional
 backend providers remain in their adapter modules.
 """
 
-from searchkernel.chunking import ChunkingStrategy, HeaderBasedChunker, get_chunker
+from typing import TYPE_CHECKING, Any
+
 from searchkernel.compression import truncate_delta
 from searchkernel.domain import (
     ActiveModelMetadata,
@@ -42,11 +43,6 @@ from searchkernel.domain import (
     ValidationResult,
     Vector,
     canonical_storage_key,
-)
-from searchkernel.embeddings import (
-    TEST_FAKE_EMBEDDING_MODEL_NAME,
-    TEST_FAKE_EMBEDDINGS_ENV_VAR,
-    should_use_test_fake_embeddings,
 )
 from searchkernel.indexing.async_ingestion import (
     AsyncIndexIngestor,
@@ -247,6 +243,43 @@ from searchkernel.utils import (
     should_include_file,
 )
 from searchkernel.utils.atomic_io import atomic_write_json
+
+if TYPE_CHECKING:
+    from searchkernel.chunking import (
+        ChunkingStrategy,
+        HeaderBasedChunker,
+        get_chunker,
+    )
+    from searchkernel.embeddings import (
+        TEST_FAKE_EMBEDDING_MODEL_NAME,
+        TEST_FAKE_EMBEDDINGS_ENV_VAR,
+        should_use_test_fake_embeddings,
+    )
+
+
+def __getattr__(name: str) -> Any:
+    if name in {
+        "TEST_FAKE_EMBEDDING_MODEL_NAME",
+        "TEST_FAKE_EMBEDDINGS_ENV_VAR",
+        "should_use_test_fake_embeddings",
+    }:
+        from searchkernel import embeddings
+
+        return getattr(embeddings, name)
+    if name == "ChunkingStrategy":
+        from searchkernel.chunking import ChunkingStrategy
+
+        return ChunkingStrategy
+    if name == "HeaderBasedChunker":
+        from searchkernel.chunking import HeaderBasedChunker
+
+        return HeaderBasedChunker
+    if name == "get_chunker":
+        from searchkernel.chunking import get_chunker
+
+        return get_chunker
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "BOOTSTRAP_CHECKPOINT_FILE_NAME",

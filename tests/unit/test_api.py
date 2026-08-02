@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 import pytest
 
 from searchkernel import api, ports
@@ -56,3 +59,27 @@ def test_api_exports_required_app_symbols(name: str, expected: object) -> None:
 def test_ports_exports_required_app_symbols(name: str, expected: object) -> None:
     assert name in ports.__all__
     assert getattr(ports, name) is expected
+
+
+def test_api_import_does_not_require_markdown_dependencies() -> None:
+    script = """
+import builtins
+
+real_import = builtins.__import__
+
+def reject_markdown_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "tree_sitter" or name.startswith("tree_sitter."):
+        raise ModuleNotFoundError("tree-sitter intentionally blocked")
+    if name == "tree_sitter_markdown" or name.startswith("tree_sitter_markdown."):
+        raise ModuleNotFoundError("tree-sitter-markdown intentionally blocked")
+    if name == "llama_index" or name.startswith("llama_index."):
+        raise ModuleNotFoundError("llama-index intentionally blocked")
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = reject_markdown_import
+
+from searchkernel.api import SearchKernel
+
+assert SearchKernel is not None
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
