@@ -42,13 +42,12 @@ Issues = "https://github.com/andnp/andnp-searchkernel/issues"
 [dependency-groups]
 dev = [
     "faiss-cpu>=1.9.0",
-    "pyright>=1.1.407",
+    "pyrefly>=0.60.0",
     "pytest>=9.0.2",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
     "pytest-xdist>=3.5.0",
     "ruff>=0.14.10",
-    "ty>=0.0.12",
     "import-linter>=2.0",
     "docker>=7.1.0",
     "httpx>=0.28.0",
@@ -63,6 +62,11 @@ dev = [
 
 [tool.uv]
 package = true
+
+[tool.pyrefly]
+project-includes = ["searchkernel"]
+preset = "basic"
+python-version = "3.13"
 
 [tool.semantic_release]
 allow_zero_version = true

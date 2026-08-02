@@ -27,7 +27,7 @@ jobs:
         run: uv run ruff check .
 
       - name: Type check
-        run: uv run pyright
+        run: uv run pyrefly check
 
       - name: Check imports with import-linter
         run: uv run lint-imports
