@@ -213,6 +213,14 @@ def build_pgvector_filter_sql(
         clauses.append(f"({project_expr} IS NULL OR {project_expr} <> ALL(%s))")
         parameters.append(excluded_projects)
 
+    metadata_equals = filters.get("metadata_equals")
+    if metadata_equals is not None:
+        for field, value in metadata_equals.items():
+            if value is not None:
+                field_expr = f"{record_alias}.metadata->>'%s'" % field
+                clauses.append(f"{field_expr} = %s")
+                parameters.append(str(value))
+
     path_expr = (
         f"COALESCE(NULLIF({record_alias}.metadata->>'file_path', ''), "
         f"NULLIF({record_alias}.metadata->>'path', ''), "
