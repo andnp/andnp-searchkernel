@@ -859,6 +859,48 @@ async def test_artifact_keyword_results_bound_vector_acquisition() -> None:
     }
 
 
+async def test_exact_artifact_query_keeps_empty_keyword_candidates_bounded() -> None:
+    class OrderedVectorStore(FakeVectorStore):
+        def search(
+            self,
+            query_vector: list[float],
+            k: int,
+            *,
+            model_name: str,
+            dim: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit]:
+            assert keyword_store.queries
+            return super().search(
+                query_vector,
+                k,
+                model_name=model_name,
+                dim=dim,
+                filters=filters,
+            )
+
+    keyword_store = FakeKeywordStore([])
+    vector_store = OrderedVectorStore([("vector", 0.9)])
+
+    class AnyEmbedder(FakeEmbedder):
+        def embed_query(self, query: str) -> list[float]:
+            return [1.0, 0.0]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=keyword_store,
+        vector_store=vector_store,
+        embedding_provider=AnyEmbedder(),
+        hydrator=_hydrator({"vector": _record("vector")}),
+    )
+
+    await pipeline.async_search('"src/search_kernel.py"', limit=1)
+
+    assert vector_store.filters[0] == {
+        "statuses": ["active"],
+        "candidate_storage_keys": [],
+    }
+
+
 async def test_artifact_vector_only_search_falls_back_to_unbounded_acquisition() -> None:
     class AnyEmbedder(FakeEmbedder):
         def embed_query(self, query: str) -> list[float]:
