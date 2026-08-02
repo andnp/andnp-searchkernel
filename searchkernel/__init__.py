@@ -60,6 +60,14 @@ from searchkernel.ports import (
     SourceBatch,
     SourceIdentity,
 )
+from searchkernel.runtime.federation import (
+    FederatedSearchExecutor,
+    FederatedSearchResponse,
+    FederationConfig,
+    FederationDiagnostic,
+    FederationExecutor,
+    RegisteredSearchSource,
+)
 from searchkernel.runtime.validated_read_cache import (
     ValidatedCacheEntry,
     ValidatedCacheStore,
@@ -104,6 +112,11 @@ __all__ = [
     "CoordinatorProgress",
     "CoordinatorReceipt",
     "EmbeddingProvider",
+    "FederatedSearchExecutor",
+    "FederatedSearchResponse",
+    "FederationConfig",
+    "FederationDiagnostic",
+    "FederationExecutor",
     "FederationSourceCapabilities",
     "LocalRecordKernel",
     "MigrationPhase",
@@ -132,6 +145,7 @@ __all__ = [
     "RecordSearchPolicy",
     "RecordSearchQueryContext",
     "RecordSearchResult",
+    "RegisteredSearchSource",
     "ResumableSemanticCoordinator",
     "RollbackMetadata",
     "SearchAPI",

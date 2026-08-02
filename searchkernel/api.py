@@ -189,6 +189,14 @@ from searchkernel.ports import (
     VectorStore,
     extract_retrieval_fields,
 )
+from searchkernel.runtime.federation import (
+    FederatedSearchExecutor,
+    FederatedSearchResponse,
+    FederationConfig,
+    FederationDiagnostic,
+    FederationExecutor,
+    RegisteredSearchSource,
+)
 from searchkernel.runtime.reindex import (
     ReindexError,
     ReindexProgress,
@@ -315,6 +323,11 @@ __all__ = [
     "EmbeddingProvider",
     "EmbeddingSink",
     "EncoderFingerprint",
+    "FederatedSearchExecutor",
+    "FederatedSearchResponse",
+    "FederationConfig",
+    "FederationDiagnostic",
+    "FederationExecutor",
     "FederationSourceCapabilities",
     "GraphEdge",
     "GraphNeighbor",
@@ -365,6 +378,7 @@ __all__ = [
     "RecordSearchPolicy",
     "RecordSearchResult",
     "RecordStatus",
+    "RegisteredSearchSource",
     "ReindexError",
     "ReindexProgress",
     "ReindexRoutine",
