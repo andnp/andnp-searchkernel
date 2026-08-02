@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import re
 import sqlite3
 import threading
 from collections.abc import Iterable, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
 
@@ -50,6 +51,9 @@ _LOCAL_KEYWORD_SCHEMA_VERSION = 2
 _LOCAL_FTS_TABLE = "local_records_fts"
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
+_LEGACY_GRAPH_TIMESTAMP = datetime.fromtimestamp(0, UTC)
+
+logger = logging.getLogger(__name__)
 
 
 class _EphemeralDatabase:
@@ -240,6 +244,112 @@ class LocalRecordBackend:
         self._migrate_legacy_vectors(conn)
         self._initialize_graph_schema(conn)
         conn.commit()
+
+    @staticmethod
+    def _legacy_graph_identity(node_id: str) -> RecordIdentity:
+        try:
+            return RecordIdentity.from_storage_key(node_id)
+        except (TypeError, ValueError):
+            return RecordIdentity(None, "legacy", node_id)
+
+    def migrate_legacy_graph_json(self, index_path: Path) -> None:
+        """Upgrade a persisted chunk-era ``graph.json`` into record storage."""
+        graph_file = index_path / "graph.json"
+        if not graph_file.exists():
+            return
+
+        try:
+            with graph_file.open() as stream:
+                graph_data = json.load(stream)
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Could not read legacy graph.json for migration, skipping")
+            return
+
+        if not isinstance(graph_data, dict):
+            logger.warning(
+                "Legacy graph.json has unexpected type %s, skipping migration",
+                type(graph_data).__name__,
+            )
+            return
+
+        node_records: dict[str, Record] = {}
+        identities: dict[str, RecordIdentity] = {}
+
+        def ensure_node(node_id: object, metadata: dict[str, Any] | None = None) -> None:
+            if not isinstance(node_id, str) or not node_id:
+                return
+            identity = identities.setdefault(
+                node_id, self._legacy_graph_identity(node_id)
+            )
+            if identity.storage_key in node_records:
+                return
+            node_metadata = dict(metadata or {})
+            node_records[identity.storage_key] = Record(
+                workspace_id=identity.workspace_id,
+                source_kind=identity.source_kind,
+                source_id=identity.source_id,
+                title=str(node_metadata.get("title", "")),
+                body=str(node_metadata.get("content", "")),
+                created_at=_LEGACY_GRAPH_TIMESTAMP,
+                updated_at=_LEGACY_GRAPH_TIMESTAMP,
+                metadata=node_metadata,
+            )
+
+        for node in graph_data.get("nodes", []):
+            if not isinstance(node, dict):
+                continue
+            node_id = node.get("id")
+            metadata = {key: value for key, value in node.items() if key != "id"}
+            ensure_node(node_id, metadata)
+
+        edges: list[GraphEdge] = []
+        for link in graph_data.get("links", []):
+            if not isinstance(link, dict):
+                continue
+            source = link.get("source")
+            target = link.get("target")
+            if not isinstance(source, str) or not isinstance(target, str):
+                continue
+            if not source or not target:
+                continue
+            ensure_node(source)
+            ensure_node(target)
+            source_identity = identities[source]
+            target_identity = identities[target]
+            try:
+                weight = float(link.get("weight", 1.0))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(weight):
+                continue
+            edges.append(
+                GraphEdge(
+                    source=source_identity,
+                    target=target_identity,
+                    edge_type=str(link.get("edge_type", "related_to")),
+                    weight=weight,
+                )
+            )
+
+        if node_records:
+            self.index(list(node_records.values()))
+        if edges:
+            self.upsert_edges(edges)
+
+        for name in ("graph.json", "communities.json"):
+            source = index_path / name
+            if not source.exists():
+                continue
+            try:
+                source.rename(source.with_suffix(source.suffix + ".bak"))
+            except OSError:
+                logger.warning("Could not archive legacy %s", source)
+
+        logger.info(
+            "Migrated legacy graph JSON into local records (%d nodes, %d edges)",
+            len(node_records),
+            len(edges),
+        )
 
     @staticmethod
     def _canonical_graph_storage_key(storage_key: str) -> str:
@@ -1955,6 +2065,10 @@ class LocalGraphStore:
         edges: Sequence[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
         self._backend.upsert_edges(edges)
+
+    def migrate_legacy_json(self, index_path: Path) -> None:
+        """Upgrade a persisted chunk-era graph snapshot into local records."""
+        self._backend.migrate_legacy_graph_json(index_path)
 
     def graph_epoch(self) -> int:
         return self._backend.graph_epoch()
