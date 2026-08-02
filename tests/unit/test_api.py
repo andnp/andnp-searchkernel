@@ -13,11 +13,12 @@ from searchkernel.ports import (
     embedding,
     retrieval,
     search,
+    search_results,
     stores,
 )
+from searchkernel.ports.search_results import RecordSearchOutcome, RecordSearchResult
 from searchkernel.runtime import reindex
 from searchkernel.search import orchestrator, query_plan
-from searchkernel.search.record_pipeline import RecordSearchOutcome, RecordSearchResult
 from searchkernel.storage import db
 from searchkernel.utils import similarity
 
@@ -48,6 +49,8 @@ PORT_EXPORTS = {
     "EmbeddingProvider": embedding.EmbeddingProvider,
     "RecordHit": models.RecordHit,
     "SearchAPI": search.SearchAPI,
+    "RecordSearchOutcome": search_results.RecordSearchOutcome,
+    "RecordSearchResult": search_results.RecordSearchResult,
     "SearchFilters": models.SearchFilters,
     "VectorStore": stores.VectorStore,
     "extract_retrieval_fields": retrieval.extract_retrieval_fields,

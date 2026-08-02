@@ -14,11 +14,11 @@ from searchkernel.domain import (
     RecordHit,
     RecordIdentity,
 )
+from searchkernel.ports.search_results import RecordSearchOutcome
 from searchkernel.runtime import CandidateResultCache
 from searchkernel.search.record_pipeline import (
     RecordSearchConfig,
     RecordSearchError,
-    RecordSearchOutcome,
     RecordSearchPipeline,
     RecordSearchPolicy,
     RecordSearchQueryContext,

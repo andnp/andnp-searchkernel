@@ -52,6 +52,13 @@ from searchkernel.ports.retrieval import (
     extract_retrieval_fields,
 )
 from searchkernel.ports.search import SearchAPI
+from searchkernel.ports.search_results import (
+    FailureStage,
+    RecordSearchFailure,
+    RecordSearchOutcome,
+    RecordSearchResult,
+    SearchTrace,
+)
 from searchkernel.ports.stores import (
     AsyncGraphStore,
     AsyncKeywordStore,
@@ -82,6 +89,7 @@ __all__ = [
     "EmbeddingBatchProvider",
     "EmbeddingProvider",
     "EmbeddingSink",
+    "FailureStage",
     "GraphEdge",
     "GraphNeighbor",
     "GraphStore",
@@ -101,12 +109,16 @@ __all__ = [
     "RecordIngestionResult",
     "RecordIngestionStatus",
     "RecordIngestor",
+    "RecordSearchFailure",
+    "RecordSearchOutcome",
+    "RecordSearchResult",
     "Reranker",
     "RetrievalFieldExtractor",
     "RetrievalFields",
     "SearchAPI",
     "SearchEpochs",
     "SearchFilters",
+    "SearchTrace",
     "SourceBatch",
     "SourceCapabilities",
     "VectorStore",

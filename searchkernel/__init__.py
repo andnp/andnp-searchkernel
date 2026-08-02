@@ -42,6 +42,9 @@ from searchkernel.ports import (
     ModelNamespaceStore,
     ModelValidationStore,
     RecordIngestor,
+    RecordSearchFailure,
+    RecordSearchOutcome,
+    RecordSearchResult,
     SearchAPI,
     SourceBatch,
 )
@@ -65,12 +68,9 @@ from searchkernel.search.record_pipeline import (
     RecordSearchCandidate,
     RecordSearchConfig,
     RecordSearchError,
-    RecordSearchFailure,
-    RecordSearchOutcome,
     RecordSearchPipeline,
     RecordSearchPolicy,
     RecordSearchQueryContext,
-    RecordSearchResult,
 )
 from searchkernel.search.utils import classify_query_type, truncate_content
 

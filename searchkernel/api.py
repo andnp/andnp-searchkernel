@@ -164,6 +164,9 @@ from searchkernel.ports import (
     RecordIngestionResult,
     RecordIngestionStatus,
     RecordIngestor,
+    RecordSearchFailure,
+    RecordSearchOutcome,
+    RecordSearchResult,
     Reranker,
     RetrievalFieldExtractor,
     RetrievalFields,
@@ -202,10 +205,7 @@ from searchkernel.search.record_pipeline import (
     RecordSearchCandidate,
     RecordSearchConfig,
     RecordSearchError,
-    RecordSearchFailure,
-    RecordSearchOutcome,
     RecordSearchPolicy,
-    RecordSearchResult,
 )
 from searchkernel.search.utils import classify_query_type, truncate_content
 from searchkernel.storage import DatabaseManager, SQLiteTuning

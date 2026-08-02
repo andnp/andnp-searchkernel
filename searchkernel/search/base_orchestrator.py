@@ -3,8 +3,8 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from searchkernel.ports.search_results import RecordSearchOutcome
 from searchkernel.search.record_pipeline import (
-    RecordSearchOutcome,
     RecordSearchPipeline,
 )
 

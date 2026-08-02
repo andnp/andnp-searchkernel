@@ -16,12 +16,12 @@ from searchkernel.ports import (
     VectorStore,
 )
 from searchkernel.ports.rerank import Reranker
+from searchkernel.ports.search_results import RecordSearchOutcome
 from searchkernel.search.base_orchestrator import BaseSearchOrchestrator
 from searchkernel.search.record_pipeline import (
     QueryEmbeddingProvider,
     RecordHydrator,
     RecordSearchConfig,
-    RecordSearchOutcome,
     RecordSearchPipeline,
     RecordSearchPolicy,
 )

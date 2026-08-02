@@ -33,6 +33,7 @@ from searchkernel.ports.embedding import (
     EmbeddingProvider,
 )
 from searchkernel.ports.rerank import Reranker
+from searchkernel.ports.search_results import RecordSearchOutcome
 from searchkernel.ports.stores import (
     AsyncGraphStore,
     AsyncKeywordStore,
@@ -46,7 +47,6 @@ from searchkernel.search.record_pipeline import (
     QueryEmbeddingProvider,
     RecordHydrator,
     RecordSearchConfig,
-    RecordSearchOutcome,
     RecordSearchPolicy,
 )
 

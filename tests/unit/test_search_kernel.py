@@ -4,10 +4,7 @@ from typing import Any
 import pytest
 
 from searchkernel import Record, RecordHit, RecordIdentity, SearchAPI, SearchKernel
-from searchkernel.search.record_pipeline import (
-    RecordSearchOutcome,
-    RecordSearchResult,
-)
+from searchkernel.ports.search_results import RecordSearchOutcome, RecordSearchResult
 
 
 @pytest.mark.asyncio
