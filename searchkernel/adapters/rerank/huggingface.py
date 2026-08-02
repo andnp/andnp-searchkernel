@@ -18,13 +18,15 @@ if TYPE_CHECKING:
 class _TokenizedInputs(Protocol):
     def items(self) -> ItemsView[str, object]: ...
 
+    def __getitem__(self, key: str) -> object: ...
+
     def to(self, device: str, /) -> Self: ...
 
 
 class _Tokenizer(Protocol):
     def __call__(
         self,
-        text: str,
+        text: str | list[str],
         *,
         return_tensors: str,
         padding: bool,
@@ -145,42 +147,39 @@ class HuggingFaceReranker:
         """
         import torch
 
+        prompts = [self._build_prompt(query, doc) for doc in documents]
+        inputs = self._tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=512,
+        ).to(self._device)
+
+        # Use inference_mode when available, while remaining compatible with
+        # older torch versions that only provide no_grad.
+        inference_context = getattr(torch, "inference_mode", torch.no_grad)
+        with inference_context():
+            outputs = self._model(
+                **dict(inputs.items()),
+                output_hidden_states=False,
+            )
+            logits = outputs.logits
+            attention_mask = inputs["attention_mask"]
+            if not isinstance(attention_mask, torch.Tensor):
+                raise TypeError("HuggingFace tokenizer must return an attention mask tensor")
+            final_positions = attention_mask.sum(dim=1) - 1
+            row_indices = torch.arange(logits.shape[0], device=logits.device)
+            final_logits = logits[row_indices, final_positions, :]
+
+        # Softmax over yes/no tokens for every document in the batch.
+        yes_logits = final_logits[:, self._yes_token_id]
+        no_logits = final_logits[:, self._no_token_id]
+        prob_yes = torch.exp(yes_logits) / (torch.exp(yes_logits) + torch.exp(no_logits))
+
         scores = []
-
-        for doc in documents:
-            # Build prompt in Qwen3-Reranker instruct format:
-            # System: You are a helpful document evaluator...
-            # User: [Query] [Document] Does this document answer the query? Answer Yes or No.
-            # Assistant: <yes_or_no>
-            prompt = self._build_prompt(query, doc)
-
-            # Tokenize
-            inputs = self._tokenizer(
-                prompt,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=512,
-            ).to(self._device)
-
-            # Forward pass; get logits at final position
-            with torch.no_grad():
-                outputs = self._model(
-                    **dict(inputs.items()),
-                    output_hidden_states=False,
-                )
-                logits = outputs.logits[0, -1, :]  # (vocab_size,)
-
-            # Softmax over yes/no tokens
-            yes_logit = logits[self._yes_token_id]
-            no_logit = logits[self._no_token_id]
-
-            # Compute P(yes)
-            exp_yes = torch.exp(yes_logit)
-            exp_no = torch.exp(no_logit)
-            prob_yes = exp_yes / (exp_yes + exp_no)
-
-            score = prob_yes.item()
+        for score_value in prob_yes.tolist():
+            score = float(score_value)
             if not isinstance(score, float) or not 0.0 <= score <= 1.0:
                 raise RuntimeError("HuggingFace reranker returned a score outside [0, 1]")
             scores.append(score)
