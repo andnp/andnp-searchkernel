@@ -50,6 +50,7 @@ from searchkernel.domain.vector_filters import (
 logger = logging.getLogger(__name__)
 
 _IDENT_RE = re.compile(r"[^a-z0-9_]+")
+_METADATA_FIELD_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 # Default HNSW query-time recall knob. Higher = better recall, more latency.
 DEFAULT_HNSW_EF_SEARCH = 100
@@ -224,7 +225,12 @@ def build_pgvector_filter_sql(
     if metadata_equals is not None:
         for field, value in metadata_equals.items():
             if value is not None:
-                field_expr = f"{record_alias}.metadata->>'%s'" % field
+                if not _METADATA_FIELD_RE.match(field):
+                    raise ValueError(
+                        f"metadata_equals field {field!r} must match "
+                        f"{_METADATA_FIELD_RE.pattern!r}"
+                    )
+                field_expr = f"{record_alias}.metadata->>'{field}'"
                 clauses.append(f"{field_expr} = %s")
                 parameters.append(str(value))
 

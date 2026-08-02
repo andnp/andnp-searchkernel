@@ -74,6 +74,15 @@ def test_pgvector_filter_sql_supports_multiple_metadata_fields() -> None:
     assert "backend" in parameters
 
 
+def test_pgvector_filter_sql_rejects_unsafe_metadata_field_name() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="metadata_equals field"):
+        build_pgvector_filter_sql(
+            {"metadata_equals": {"issue_type' = 'x'; DROP TABLE records; --": "Bug"}}
+        )
+
+
 def test_pgvector_filter_sql_metadata_equals_with_project_id() -> None:
     clauses, parameters = build_pgvector_filter_sql(
         {
