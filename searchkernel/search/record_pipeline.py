@@ -32,6 +32,12 @@ from searchkernel.ports import (
     VectorStore,
 )
 from searchkernel.ports.rerank import Reranker
+from searchkernel.ports.search_results import (
+    FailureStage,
+    RecordSearchFailure,
+    RecordSearchOutcome,
+    RecordSearchResult,
+)
 from searchkernel.runtime import (
     CandidateResultCache,
     HydrationCache,
@@ -63,16 +69,6 @@ ParentIdentityResolver = Callable[
     RecordIdentity | None | Awaitable[RecordIdentity | None],
 ]
 QueryEmbeddingCallable = Callable[[str], Vector | Awaitable[Vector]]
-FailureStage = Literal[
-    "keyword",
-    "vector",
-    "graph",
-    "parent_expansion",
-    "hydration",
-    "rerank",
-]
-
-
 class RecordHydrator(Protocol):
     """Hydrate a record without mutating source state."""
 
@@ -164,47 +160,6 @@ class RecordSearchCandidate:
     @property
     def storage_key(self) -> str:
         return self.identity.storage_key
-
-
-@dataclass(frozen=True, slots=True)
-class RecordSearchResult:
-    """A ranked, hydrated record with reusable kernel provenance."""
-
-    record: Record
-    score: float
-    provenance: SearchResultProvenance
-
-    @property
-    def record_id(self) -> str:
-        return self.record.source_id
-
-    @property
-    def storage_key(self) -> str:
-        return self.record.storage_key
-
-@dataclass(frozen=True, slots=True)
-class RecordSearchFailure:
-    """A source or hydration failure captured in degraded mode."""
-
-    stage: FailureStage
-    message: str
-    exception_type: str = "Exception"
-
-
-@dataclass(frozen=True, slots=True)
-class RecordSearchOutcome:
-    """Search results plus explicit degradation diagnostics."""
-
-    results: tuple[RecordSearchResult, ...] = ()
-    failures: tuple[RecordSearchFailure, ...] = ()
-    missing_record_ids: tuple[str, ...] = ()
-    cache_diagnostics: tuple[str, ...] = ()
-    diagnostics: tuple[str, ...] = ()
-    trace: QueryTrace | None = None
-
-    @property
-    def degraded(self) -> bool:
-        return bool(self.failures or self.missing_record_ids)
 
 
 class RecordSearchError(RuntimeError):

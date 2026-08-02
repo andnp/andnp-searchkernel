@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from searchkernel.domain import SearchFilters
-
-if TYPE_CHECKING:
-    from searchkernel.search.record_pipeline import RecordSearchOutcome
+from searchkernel.ports.search_results import RecordSearchOutcome
 
 
 @runtime_checkable
