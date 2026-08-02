@@ -73,14 +73,14 @@ These are partial-failure guarantees, not a cross-store transaction. A source
 can therefore be queryable with a partial index; readiness snapshots expose
 `indexing`, `partial`, and `ready` states.
 
-## Removed legacy paths
+## Retired compatibility boundary
 
-The old chunk-oriented query pipeline and federated query execution are not
-part of the supported architecture. Chunks may still be produced during
-ingestion, but query callers use `Record`, `RecordIdentity`, `RecordHit`, the
-record store ports, and the canonical record pipeline. `SearchKernel` remains
-as an ingestion and composition facade; its query method returns canonical
-record outcomes only.
+The former chunk-oriented query pipeline and federated query execution were
+retired before 0.5.0 and are not supported APIs. Chunks may still be produced
+during ingestion, but query callers use `Record`, `RecordIdentity`, `RecordHit`,
+the record store ports, and the canonical record pipeline. `SearchKernel`
+remains an ingestion and composition facade; its query method returns
+canonical record outcomes only.
 
 ## Optional backends
 

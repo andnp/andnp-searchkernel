@@ -58,9 +58,9 @@ may legitimately use the same source ID. Deterministic tie-breaking uses the
 canonical storage key, so parallel and scalar implementations return the same
 order.
 
-The legacy read-cache v1 token is not semantic identity. It may remain a
-cache/deduplication token at its compatibility boundary, but it must not be
-used for cross-backend equality, stale checks, revision tokens, or restore
+The historical read-cache v1 token is not semantic identity. At its retired
+compatibility boundary it may identify cache entries, but it must not be used
+for cross-backend equality, stale checks, revision tokens, or restore
 validation.
 
 ### 2.2 Filters
@@ -106,11 +106,11 @@ state, or supersession state. Core imports must remain usable without FAISS,
 Hugging Face, Postgres, tree-sitter, or an LLM provider. Optional adapters
 must fail at their own boundary with actionable diagnostics.
 
-## 3. Legacy deletion boundary
+## 3. Retired compatibility boundary
 
-The old chunk-oriented query pipeline and federated query execution are
-removed from the supported 0.5.0 architecture. Chunks may still be created as
-an ingestion artifact, but they are not the public query identity. All query
+The former chunk-oriented query pipeline and federated query execution were
+retired before the 0.5.0 architecture. Chunks may still be created as an
+ingestion artifact, but they are not the public query identity. All query
 boundaries return canonical record outcomes and carry complete identities
 through `RecordHit`, graph expansion, and hydration.
 
@@ -158,7 +158,6 @@ CI output and must not be reported as backend coverage.
 ### R1 — Complete identity migration
 
 - Keep all store and retrieval seams returning `RecordHit` directly.
-- Remove tuple-only compatibility paths as each backend contract is finalized.
 - Add cross-backend fixtures proving canonical bytes, storage keys, cache keys,
   stale checks, and deletion behavior agree.
 - Verify that graph expansion, parent expansion, and hydration preserve the
@@ -202,12 +201,12 @@ CI output and must not be reported as backend coverage.
 - Add cache epochs for all mutation lanes, including graph changes, with
   invalidation tests.
 
-### R6 — Retire migration-only surfaces
+### R6 — Preserve migration boundaries
 
-- Keep legacy storage migrations isolated from the query contracts.
+- Keep storage migrations isolated from the query contracts.
 - Keep documentation aligned with the canonical record-only query path.
 - Keep source-specific behavior in adapters and injected policies, not in core
-  domain models or a compatibility pipeline.
+  domain models or a transitional query path.
 
 ## 6. Evidence policy
 
