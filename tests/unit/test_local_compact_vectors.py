@@ -1,5 +1,4 @@
 import asyncio
-import json
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -61,63 +60,27 @@ def test_packed_vector_validation_is_explicit(
         PackedVectorCodec.encode(values, dim)
 
 
-def test_legacy_json_vectors_migrate_after_binary_write(tmp_path: Path) -> None:
-    db_path = tmp_path / "legacy.db"
-    backend = LocalRecordBackend(db_path)
-    record = _record("legacy", [1.0, 0.0])
-    backend.index([record])
-    conn = backend.db_manager.get_connection()
-    conn.execute(
-        """
-        INSERT INTO local_vectors (storage_key, model_name, dim, embedding)
-        VALUES (?, ?, ?, ?)
-        """,
-        (record.storage_key, "legacy-model", 2, json.dumps([3.0, 4.0])),
-    )
-    conn.commit()
+def test_local_vector_store_round_trip_uses_packed_schema(tmp_path: Path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    store = LocalVectorStore(backend)
+    record = _record("current", [3.0, 4.0])
 
-    migrated = LocalRecordBackend(db_path)
-    rows = conn.execute(
+    store.upsert([record], "model", 2)
+
+    hits = store.search([3.0, 4.0], 1, model_name="model", dim=2)
+    row = backend.db_manager.get_connection().execute(
         """
         SELECT embedding, format_version, normalization_policy
         FROM local_vectors_v2
         WHERE storage_key = ? AND encoder_namespace = ?
         """,
-        (record.storage_key, "legacy-model"),
-    ).fetchall()
+        (record.storage_key, "model"),
+    ).fetchone()
 
-    assert len(rows) == 1
-    assert len(rows[0]["embedding"]) == 8
-    assert rows[0]["format_version"] == 2
-    assert rows[0]["normalization_policy"] == "l2"
-    assert conn.execute("SELECT COUNT(*) FROM local_vectors").fetchone()[0] == 0
-    assert migrated.search_vector(
-        [3.0, 4.0],
-        1,
-        model_name="legacy-model",
-        dim=2,
-    )[0].score == pytest.approx(1.0)
-
-
-def test_malformed_legacy_json_is_not_deleted(tmp_path: Path) -> None:
-    db_path = tmp_path / "malformed.db"
-    backend = LocalRecordBackend(db_path)
-    record = _record("broken", [1.0, 0.0])
-    backend.index([record])
-    conn = backend.db_manager.get_connection()
-    conn.execute(
-        """
-        INSERT INTO local_vectors (storage_key, model_name, dim, embedding)
-        VALUES (?, ?, ?, ?)
-        """,
-        (record.storage_key, "broken-model", 2, "[1.0,"),
-    )
-    conn.commit()
-
-    with pytest.raises(ValueError, match="malformed JSON"):
-        LocalRecordBackend(db_path)
-
-    assert conn.execute("SELECT COUNT(*) FROM local_vectors").fetchone()[0] == 1
+    assert hits[0].storage_key == record.storage_key
+    assert row[0] is not None
+    assert len(row[0]) == 8
+    assert row[1:] == (2, "l2")
 
 
 def test_exact_search_has_cosine_parity_deterministic_ties_and_filters() -> None:

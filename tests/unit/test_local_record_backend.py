@@ -1,4 +1,3 @@
-import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -333,52 +332,23 @@ def test_keyword_migrates_existing_local_records_schema(tmp_path: Path) -> None:
     assert backend.check_keyword_index()
 
 
-def test_local_graph_migrates_legacy_json_into_record_storage(tmp_path: Path) -> None:
-    persist_path = tmp_path / "legacy"
-    persist_path.mkdir()
-    (persist_path / "graph.json").write_text(
-        json.dumps(
-            {
-                "nodes": [{"id": "doc1", "title": "Legacy"}],
-                "links": [
-                    {
-                        "source": "doc1",
-                        "target": "doc2",
-                        "edge_type": "links_to",
-                        "weight": 0.5,
-                    }
-                ],
-            }
+def test_local_schema_initializes_current_storage_tables(tmp_path: Path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    tables = {
+        row[0]
+        for row in backend.db_manager.get_connection().execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
         )
-    )
-    (persist_path / "communities.json").write_text('{"doc1": 1}')
+    }
 
-    backend = LocalRecordBackend(tmp_path / "records.db")
-    graph = LocalGraphStore(backend)
-    graph.migrate_legacy_json(persist_path)
-
-    source = RecordIdentity(None, "legacy", "doc1")
-    target = RecordIdentity(None, "legacy", "doc2")
-    migrated = backend.hydrate_record(source.storage_key)
-    assert migrated is not None
-    assert migrated.metadata == {"title": "Legacy"}
-    assert graph.neighbors(source) == [GraphNeighbor(target, "links_to", 0.5)]
-    assert (persist_path / "graph.json.bak").exists()
-    assert (persist_path / "communities.json.bak").exists()
-
-
-def test_local_graph_skips_corrupted_legacy_json(tmp_path: Path) -> None:
-    persist_path = tmp_path / "legacy"
-    persist_path.mkdir()
-    (persist_path / "graph.json").write_text("{ corrupted json")
-
-    backend = LocalRecordBackend(tmp_path / "records.db")
-    LocalGraphStore(backend).migrate_legacy_json(persist_path)
-
-    assert backend.hydrate_record(
-        RecordIdentity(None, "legacy", "doc1").storage_key
-    ) is None
-    assert not (persist_path / "graph.json.bak").exists()
+    assert {
+        "local_records",
+        "local_vectors_v2",
+        "local_graph_edges",
+        "system_state",
+    } <= tables
+    assert "local_vectors" not in tables
+    assert "local_vector_schema" not in tables
 
 
 def test_scalar_and_batched_keyword_ingestion_are_equivalent() -> None:
