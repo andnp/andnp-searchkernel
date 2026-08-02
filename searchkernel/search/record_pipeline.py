@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import inspect
 import logging
 import math
@@ -1085,7 +1086,8 @@ class RecordSearchPipeline:
         )
         for seed_key in seed_scores:
             raw_neighbors = neighbors_by_seed.get(seed_key, ())
-            sorted_neighbors = sorted(
+            top_neighbors = heapq.nsmallest(
+                self._config.max_neighbors_per_seed,
                 (
                     _normalize_graph_neighbor(neighbor)
                     for neighbor in raw_neighbors
@@ -1093,7 +1095,7 @@ class RecordSearchPipeline:
                 key=lambda item: (-item[2], item[0], item[1]),
             )
             edges: list[TypedGraphEdge[str, tuple[str, float]]] = []
-            for target_id, edge_type, weight in sorted_neighbors:
+            for target_id, edge_type, weight in top_neighbors:
                 edge_key = (edge_type, weight)
                 edges.append(TypedGraphEdge(target_id, edge_key))
                 discounts[edge_key] = weight
@@ -1123,10 +1125,13 @@ class RecordSearchPipeline:
         identities = [candidate.identity for candidate in graph_seeds]
         neighbors_many = getattr(graph_store, "neighbors_many", None)
         if callable(neighbors_many):
+            kwargs: dict[str, Any] = {"depth": plan.graph_depth}
+            if _supports_keyword(neighbors_many, "max_neighbors"):
+                kwargs["max_neighbors"] = self._config.max_neighbors_per_seed
             result = await _call_async(
                 neighbors_many,
                 identities,
-                depth=plan.graph_depth,
+                **kwargs,
             )
             return dict(
                 cast(
@@ -1144,10 +1149,13 @@ class RecordSearchPipeline:
             seed: RecordSearchCandidate,
         ) -> tuple[str, Sequence[GraphNeighbor]]:
             async with semaphore:
+                kwargs: dict[str, Any] = {"depth": plan.graph_depth}
+                if _supports_keyword(graph_store.neighbors, "max_neighbors"):
+                    kwargs["max_neighbors"] = self._config.max_neighbors_per_seed
                 neighbors = await _call_async(
                     graph_store.neighbors,
                     seed.identity,
-                    depth=plan.graph_depth,
+                    **kwargs,
                 )
                 return seed.storage_key, cast(
                     Sequence[GraphNeighbor],
@@ -1327,6 +1335,17 @@ def _normalize_graph_neighbor(
     neighbor: GraphNeighbor,
 ) -> tuple[str, str, float]:
     return neighbor.identity.storage_key, neighbor.edge_type, neighbor.weight
+
+
+def _supports_keyword(function: Callable[..., Any], name: str) -> bool:
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 async def _call_async[T](

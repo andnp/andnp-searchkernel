@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 from collections.abc import Callable, Hashable, Iterable, Mapping
 from dataclasses import dataclass
 
@@ -43,10 +44,11 @@ def expand_bounded_typed_graph[
 
     Seeds are processed in descending score order, limited to
     ``max_seed_count``. For each seed, unsupported edge types are skipped and
-    supported edges are limited to ``max_neighbors_per_seed``. Each supported
-    edge contributes ``seed_score * discount``; duplicate targets retain the
-    highest contribution and its seed/edge provenance. Equal contributions
-    retain the first result encountered.
+    supported edges are limited to ``max_neighbors_per_seed`` using descending
+    discount, target, and edge-type order. Each supported edge contributes
+    ``seed_score * discount``; duplicate targets retain the highest contribution
+    and its seed/edge provenance. Equal contributions retain the first result
+    encountered.
 
     ``max_seed_count`` and ``max_neighbors_per_seed`` must both be positive.
     """
@@ -61,16 +63,21 @@ def expand_bounded_typed_graph[
     )[:max_seed_count]
 
     for seed_id, seed_score in seed_items:
-        expanded_neighbors = 0
-        for edge in outgoing_edges(seed_id):
-            discount = edge_type_discounts.get(edge.edge_type)
-            if discount is None:
-                continue
-
-            expanded_neighbors += 1
-            if expanded_neighbors > max_neighbors_per_seed:
-                break
-
+        supported_edges = (
+            (edge, discount)
+            for edge in outgoing_edges(seed_id)
+            if (discount := edge_type_discounts.get(edge.edge_type)) is not None
+        )
+        top_edges = heapq.nsmallest(
+            max_neighbors_per_seed,
+            supported_edges,
+            key=lambda item: (
+                -item[1],
+                _stable_key(item[0].target_id),
+                _stable_key(item[0].edge_type),
+            ),
+        )
+        for edge, discount in top_edges:
             contribution = seed_score * discount
             current = expanded.get(edge.target_id)
             if current is None or contribution > current.contribution:
@@ -88,3 +95,7 @@ def expand_bounded_typed_graph[
 def _validate_limit(name: str, value: int) -> None:
     if value <= 0:
         raise ValueError(f"{name} must be positive")
+
+
+def _stable_key(value: Hashable) -> tuple[str, str]:
+    return type(value).__qualname__, repr(value)

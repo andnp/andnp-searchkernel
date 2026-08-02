@@ -8,6 +8,7 @@ the ingestion surface, but query execution uses canonical record identities.
 from __future__ import annotations
 
 import asyncio
+import heapq
 import json
 import logging
 import math
@@ -1767,9 +1768,11 @@ class LocalRecordBackend:
         record_id: RecordIdentity | str,
         edge_types: list[str] | None = None,
         depth: int = 1,
+        max_neighbors: int | None = None,
     ) -> list[GraphNeighbor]:
         if depth < 1:
             raise ValueError("depth must be positive")
+        _validate_neighbor_limit(max_neighbors)
         allowed = set(edge_types) if edge_types else None
         identity_key = (
             record_id.storage_key if isinstance(record_id, RecordIdentity) else record_id
@@ -1812,7 +1815,7 @@ class LocalRecordBackend:
                         best[target_id] = (row["edge_type"], weight)
                     next_frontier.add(target_id)
                 frontier = next_frontier
-        return sorted(
+        return _sort_graph_neighbors(
             (
                 GraphNeighbor(
                     self._identity_from_storage_key(target_id),
@@ -1821,7 +1824,7 @@ class LocalRecordBackend:
                 )
                 for target_id, (edge_type, weight) in best.items()
             ),
-            key=lambda item: (-item.weight, item.identity.storage_key, item.edge_type),
+            max_neighbors,
         )
 
     def neighbors_many(
@@ -1829,10 +1832,12 @@ class LocalRecordBackend:
         identities: Sequence[RecordIdentity],
         *,
         depth: int,
+        max_neighbors: int | None = None,
     ) -> dict[str, list[GraphNeighbor]]:
         """Retrieve neighbors for multiple seeds with one query per hop."""
         if depth < 1:
             raise ValueError("depth must be positive")
+        _validate_neighbor_limit(max_neighbors)
         seed_keys = list(dict.fromkeys(identity.storage_key for identity in identities))
         frontiers = {seed_key: {seed_key} for seed_key in seed_keys}
         best_by_seed: dict[str, dict[str, tuple[str, float]]] = {
@@ -1883,7 +1888,7 @@ class LocalRecordBackend:
                         next_frontiers[seed_key].add(target_id)
                 frontiers = next_frontiers
         return {
-            seed_key: sorted(
+            seed_key: _sort_graph_neighbors(
                 (
                     GraphNeighbor(
                         self._identity_from_storage_key(target_id),
@@ -1892,11 +1897,7 @@ class LocalRecordBackend:
                     )
                     for target_id, (edge_type, weight) in best.items()
                 ),
-                key=lambda item: (
-                    -item.weight,
-                    item.identity.storage_key,
-                    item.edge_type,
-                ),
+                max_neighbors,
             )
             for seed_key, best in best_by_seed.items()
         }
@@ -2086,16 +2087,42 @@ class LocalGraphStore:
         record_id: RecordIdentity | str,
         edge_types: list[str] | None = None,
         depth: int = 1,
+        max_neighbors: int | None = None,
     ) -> list[GraphNeighbor]:
-        return self._backend.neighbors(record_id, edge_types, depth)
+        return self._backend.neighbors(
+            record_id,
+            edge_types,
+            depth,
+            max_neighbors,
+        )
 
     def neighbors_many(
         self,
         identities: Sequence[RecordIdentity],
         *,
         depth: int,
+        max_neighbors: int | None = None,
     ) -> dict[str, list[GraphNeighbor]]:
-        return self._backend.neighbors_many(identities, depth=depth)
+        return self._backend.neighbors_many(
+            identities,
+            depth=depth,
+            max_neighbors=max_neighbors,
+        )
+
+
+def _validate_neighbor_limit(max_neighbors: int | None) -> None:
+    if max_neighbors is not None and max_neighbors <= 0:
+        raise ValueError("max_neighbors must be positive")
+
+
+def _sort_graph_neighbors(
+    neighbors: Iterable[GraphNeighbor],
+    max_neighbors: int | None,
+) -> list[GraphNeighbor]:
+    key = lambda item: (-item.weight, item.identity.storage_key, item.edge_type)
+    if max_neighbors is None:
+        return sorted(neighbors, key=key)
+    return heapq.nsmallest(max_neighbors, neighbors, key=key)
 
 
 SQLiteKeywordStore = LocalKeywordStore

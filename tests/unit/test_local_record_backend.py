@@ -150,6 +150,33 @@ def test_local_batch_hydration_and_graph_preserve_canonical_keys(tmp_path) -> No
     }
 
 
+def test_local_graph_top_neighbors_are_bounded_and_deterministic(tmp_path) -> None:
+    backend, _keyword, _vector, graph = _backend(tmp_path)
+    source = _record("note", "source", "source")
+    targets = [
+        _record("note", "target-a", "target-a"),
+        _record("note", "target-b", "target-b"),
+        _record("note", "target-c", "target-c"),
+    ]
+    backend.index([source, *targets])
+    graph.upsert_edges(
+        [
+            (source.storage_key, targets[2].storage_key, "related", 0.5),
+            (source.storage_key, targets[1].storage_key, "related", 0.9),
+            (source.storage_key, targets[0].storage_key, "related", 0.9),
+        ]
+    )
+
+    expected = [
+        GraphNeighbor(targets[0].identity, "related", 0.9),
+        GraphNeighbor(targets[1].identity, "related", 0.9),
+    ]
+    assert graph.neighbors(source.identity, max_neighbors=2) == expected
+    assert graph.neighbors_many(
+        [source.identity], depth=1, max_neighbors=2
+    ) == {source.storage_key: expected}
+
+
 def test_keyword_search_supports_tokens_phrases_prefixes_artifacts_and_symbols(
     tmp_path,
 ) -> None:

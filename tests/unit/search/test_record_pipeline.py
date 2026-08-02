@@ -492,8 +492,10 @@ async def test_graph_expansion_reads_only_bounded_seed_neighbors() -> None:
             record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
+            max_neighbors: int | None = None,
         ) -> list[GraphNeighbor | tuple[str, str, float]]:
             assert isinstance(record_id, RecordIdentity)
+            assert max_neighbors == 1
             calls.append(record_id)
             return [("missing", "related", 1.0)]
 
@@ -501,13 +503,42 @@ async def test_graph_expansion_reads_only_bounded_seed_neighbors() -> None:
         keyword_store=FakeKeywordStore([("a", 1.0), ("b", 0.9), ("c", 0.8)]),
         graph_store=Graph(),
         hydrator=_hydrator(records),
-        config=RecordSearchConfig(max_graph_seeds=2),
+        config=RecordSearchConfig(max_graph_seeds=2, max_neighbors_per_seed=1),
         continue_on_error=True,
     )
 
     await pipeline.async_search("what relates to this module?", limit=3)
 
     assert sorted(identity.source_id for identity in calls) == ["a", "b"]
+
+
+async def test_graph_expansion_selects_deterministic_top_neighbors_from_fallback_store() -> None:
+    records = {
+        record_id: _record(record_id)
+        for record_id in ("seed", "target-a", "target-b", "target-c")
+    }
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("seed", 1.0)]),
+        graph_store=FakeGraphStore(
+            {
+                "seed": [
+                    ("target-c", "related", 0.5),
+                    ("target-b", "related", 0.9),
+                    ("target-a", "related", 0.9),
+                ]
+            }
+        ),
+        hydrator=_hydrator(records),
+        config=RecordSearchConfig(max_neighbors_per_seed=2),
+    )
+
+    outcome = await pipeline.async_search("what relates to the seed?", limit=4)
+
+    assert [result.record_id for result in outcome.results] == [
+        "seed",
+        "target-a",
+        "target-b",
+    ]
 
 
 async def test_callable_embedding_provider_accepts_explicit_vector_metadata() -> None:

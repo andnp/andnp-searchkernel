@@ -1570,6 +1570,7 @@ class PGGraphStore:
         record_id: RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
+        max_neighbors: int | None = None,
     ) -> Sequence[GraphNeighbor]:
         """Retrieve neighbors of a record.
 
@@ -1583,6 +1584,8 @@ class PGGraphStore:
         """
         if depth < 1:
             raise ValueError("depth must be positive")
+        if max_neighbors is not None and max_neighbors <= 0:
+            raise ValueError("max_neighbors must be positive")
         conn = self.conn_pool.get_connection()
         cursor = None
         try:
@@ -1601,6 +1604,10 @@ class PGGraphStore:
             params.append(depth)
             if edge_types:
                 params.extend(edge_types)
+            if max_neighbors is not None:
+                params.append(max_neighbors)
+
+            limit_clause = "LIMIT %s" if max_neighbors is not None else ""
 
             sql = f"""
                 WITH RECURSIVE walk AS (
@@ -1667,7 +1674,8 @@ class PGGraphStore:
                 FROM ranked
                 WHERE row_number = 1
                 ORDER BY weight DESC, target_workspace_id, target_kind,
-                         target_id, edge_type;
+                         target_id, edge_type
+                {limit_clause};
             """
 
             cursor.execute(sql, params)

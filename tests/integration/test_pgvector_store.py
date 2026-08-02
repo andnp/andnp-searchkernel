@@ -960,6 +960,9 @@ class TestGraphStore:
             earlier,
             later,
         ]
+        assert store.neighbors(start, max_neighbors=1) == [
+            GraphNeighbor(earlier, "links", pytest.approx(0.5))
+        ]
 
 class TestCacheStore:
     """Tests for CacheStore port implementation."""

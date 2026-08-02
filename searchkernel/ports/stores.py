@@ -143,6 +143,7 @@ class GraphStore(Protocol):
         record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
+        max_neighbors: int | None = None,
     ) -> Sequence[GraphNeighbor]:
         """
         Retrieve neighbors of a record in the graph.
@@ -151,6 +152,7 @@ class GraphStore(Protocol):
             record_id: Starting record ID.
             edge_types: Optional filter by edge type names.
             depth: Number of hops to traverse (default 1 for one-hop).
+            max_neighbors: Optional top-N bound on returned neighbors.
 
         Returns:
             Canonical graph neighbors sorted by the store's stable ordering.
@@ -215,6 +217,7 @@ class AsyncGraphStore(Protocol):
         record_id: str | RecordIdentity,
         edge_types: list[str] | None = None,
         depth: int = 1,
+        max_neighbors: int | None = None,
     ) -> Sequence[GraphNeighbor]:
         ...
 
@@ -227,6 +230,7 @@ class BatchGraphStore(Protocol):
         identities: Sequence[RecordIdentity],
         *,
         depth: int,
+        max_neighbors: int | None = None,
     ) -> Mapping[
         str,
         Sequence[GraphNeighbor],

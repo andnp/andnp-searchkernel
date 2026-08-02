@@ -49,6 +49,27 @@ def test_unsupported_edges_do_not_consume_neighbor_limit():
     assert set(result) == {"included"}
 
 
+def test_high_degree_edges_use_deterministic_bounded_top_n():
+    result = expand_bounded_typed_graph(
+        {"seed": 1.0},
+        lambda _: (
+            edge
+            for edge in [
+                TypedGraphEdge("target-z", "low"),
+                TypedGraphEdge("target-b", "high"),
+                TypedGraphEdge("ignored", "unsupported"),
+                TypedGraphEdge("target-a", "high"),
+                TypedGraphEdge("target-c", "medium"),
+            ]
+        ),
+        {"low": 0.1, "high": 0.9, "medium": 0.5},
+        max_seed_count=1,
+        max_neighbors_per_seed=2,
+    )
+
+    assert list(result) == ["target-a", "target-b"]
+
+
 def test_duplicate_targets_keep_highest_contribution_and_provenance():
     result = expand_bounded_typed_graph(
         {"first_seed": 0.8, "winning_seed": 0.9},
