@@ -89,9 +89,7 @@ uv build
 commit_message = "chore(release): {version}"
 tag_format = "v{version}"
 version_toml = ["pyproject.toml:project.version"]
-version_variables = [
-    'searchkernel/__init__.py:__version__ = "(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)"',
-]
+version_variables = ["searchkernel/__init__.py:__version__"]
 
 [tool.semantic_release.branches.main]
 match = "main"
