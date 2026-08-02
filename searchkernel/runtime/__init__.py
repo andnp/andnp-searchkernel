@@ -21,6 +21,13 @@ from searchkernel.runtime.query_embedding_cache import (
     get_query_embedding_cache,
     normalize_query,
 )
+from searchkernel.runtime.validated_read_cache import (
+    ValidatedCacheEntry,
+    ValidatedCacheStore,
+    ValidatedCacheValue,
+    ValidatedReadThroughCache,
+    ValidatedReadThroughCacheMetrics,
+)
 
 __all__ = [
     "BoundedCacheMetrics",
@@ -33,6 +40,11 @@ __all__ = [
     "SearchEpochProvider",
     "SearchEpochs",
     "UnstableCacheKey",
+    "ValidatedCacheEntry",
+    "ValidatedCacheStore",
+    "ValidatedCacheValue",
+    "ValidatedReadThroughCache",
+    "ValidatedReadThroughCacheMetrics",
     "clear_query_embedding_cache",
     "fingerprint",
     "get_or_compute_query_embedding",

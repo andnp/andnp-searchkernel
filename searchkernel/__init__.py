@@ -44,6 +44,13 @@ from searchkernel.ports import (
     SearchAPI,
     SourceBatch,
 )
+from searchkernel.runtime.validated_read_cache import (
+    ValidatedCacheEntry,
+    ValidatedCacheStore,
+    ValidatedCacheValue,
+    ValidatedReadThroughCache,
+    ValidatedReadThroughCacheMetrics,
+)
 from searchkernel.search.orchestrator import SearchOrchestrator
 from searchkernel.search.query_plan import (
     QueryPlan,
@@ -112,6 +119,11 @@ __all__ = [
     "SearchResult",
     "SearchableSource",
     "SourceBatch",
+    "ValidatedCacheEntry",
+    "ValidatedCacheStore",
+    "ValidatedCacheValue",
+    "ValidatedReadThroughCache",
+    "ValidatedReadThroughCacheMetrics",
     "ValidationResult",
     "canonical_storage_key",
     "classify_query_type",
