@@ -137,6 +137,12 @@ class SearchKernel:
         orchestrators must be wrapped explicitly with
         ``LegacyLocalOrchestratorAdapter``.
         """
+        effective_reranker = reranker
+        if effective_reranker is None:
+            if isinstance(config, Mapping):
+                effective_reranker = config.get("reranker")
+            elif config is not None:
+                effective_reranker = getattr(config, "reranker", None)
         record_dependencies = (
             record_hydrator,
             keyword_store,
@@ -169,21 +175,17 @@ class SearchKernel:
                 embedding_provider=embedding_provider,
                 embedding_model_name=embedding_model_name,
                 embedding_dim=embedding_dim,
+                reranker=effective_reranker,
                 policy=search_policy,
                 config=search_config,
             )
         elif orchestrator is None and record_hydrator is not None:
             orchestrator = SearchOrchestrator(
                 hydrator=record_hydrator,
+                reranker=effective_reranker,
                 policy=search_policy,
                 config=search_config,
             )
-        effective_reranker = reranker
-        if effective_reranker is None:
-            if isinstance(config, Mapping):
-                effective_reranker = config.get("reranker")
-            elif config is not None:
-                effective_reranker = getattr(config, "reranker", None)
         source_registry = registry or SourceRegistry()
         if orchestrator is not None:
             source_registry.register(LocalSearchSource(orchestrator))

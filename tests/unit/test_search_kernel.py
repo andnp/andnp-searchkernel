@@ -19,7 +19,11 @@ from searchkernel.runtime.local import (
     LegacyQueryOrchestrator,
     LocalSearchSource,
 )
-from searchkernel.search.record_pipeline import RecordSearchOutcome, RecordSearchResult
+from searchkernel.search.record_pipeline import (
+    RecordSearchConfig,
+    RecordSearchOutcome,
+    RecordSearchResult,
+)
 
 
 class _Source:
@@ -122,6 +126,52 @@ async def test_search_kernel_builds_canonical_local_source_from_record_ports():
     assert results[0].record_id == "record-1"
     assert results[0].source_kind == "note"
     assert results[0].metadata["text"] == "record body"
+
+
+@pytest.mark.asyncio
+async def test_search_kernel_wires_reranker_into_local_record_pipeline():
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    record = Record(
+        source_kind="note",
+        source_id="record-1",
+        title="Low priority title",
+        body="record body",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    class _KeywordStore:
+        def search(self, query, k, filters=None):
+            return [
+                RecordHit(
+                    RecordIdentity(None, "note", "record-1"),
+                    1.0,
+                )
+            ]
+
+    class _LocalReranker:
+        model_name = "local-test-reranker"
+
+        def __init__(self):
+            self.documents = []
+
+        def rerank(self, query, documents):
+            assert query == "query"
+            self.documents.append(documents)
+            return [0.25]
+
+    reranker = _LocalReranker()
+    kernel = SearchKernel.build(
+        record_hydrator=lambda identity: record,
+        keyword_store=_KeywordStore(),
+        reranker=reranker,
+        search_config=RecordSearchConfig(rerank_budget=1),
+    )
+
+    results = await kernel.search_anything("query", k=1)
+
+    assert results[0].score == pytest.approx(0.25)
+    assert reranker.documents[0] == ["Low priority title\nrecord body"]
 
 
 @pytest.mark.asyncio

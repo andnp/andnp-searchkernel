@@ -15,6 +15,7 @@ from searchkernel.ports import (
     KeywordStore,
     VectorStore,
 )
+from searchkernel.ports.rerank import Reranker
 from searchkernel.search.base_orchestrator import BaseSearchOrchestrator
 from searchkernel.search.record_pipeline import (
     QueryEmbeddingProvider,
@@ -54,6 +55,7 @@ class SearchOrchestrator(BaseSearchOrchestrator):
         ) = None,
         embedding_model_name: str | None = None,
         embedding_dim: int | None = None,
+        reranker: Reranker | None = None,
         policy: RecordSearchPolicy | None = None,
         config: RecordSearchConfig | None = None,
     ) -> None:
@@ -84,6 +86,7 @@ class SearchOrchestrator(BaseSearchOrchestrator):
                 embedding_provider=embedding_provider,
                 embedding_model_name=embedding_model_name,
                 embedding_dim=embedding_dim,
+                reranker=reranker,
                 policy=policy,
                 config=config,
             )
