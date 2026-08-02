@@ -135,6 +135,9 @@ markdown = [
     { name = "tree-sitter" },
     { name = "tree-sitter-markdown" },
 ]
+ollama = [
+    { name = "httpx" },
+]
 pgvector = [
     { name = "psycopg2-binary" },
 ]
@@ -143,6 +146,7 @@ pgvector = [
 dev = [
     { name = "docker" },
     { name = "faiss-cpu" },
+    { name = "httpx" },
     { name = "import-linter" },
     { name = "llama-index-core" },
     { name = "llama-index-embeddings-huggingface" },
@@ -163,6 +167,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "faiss-cpu", marker = "extra == 'faiss'", specifier = ">=1.9.0" },
+    { name = "httpx", marker = "extra == 'ollama'", specifier = ">=0.28.0" },
     { name = "llama-index-core", marker = "extra == 'faiss'", specifier = ">=0.12.0" },
     { name = "llama-index-embeddings-huggingface", marker = "extra == 'huggingface'", specifier = ">=0.4.0" },
     { name = "llama-index-vector-stores-faiss", marker = "extra == 'faiss'", specifier = ">=0.3.0" },
@@ -172,12 +177,13 @@ requires-dist = [
     { name = "tree-sitter", marker = "extra == 'markdown'", specifier = ">=0.23.0" },
     { name = "tree-sitter-markdown", marker = "extra == 'markdown'", specifier = ">=0.3.2" },
 ]
-provides-extras = ["faiss", "pgvector", "huggingface", "markdown"]
+provides-extras = ["faiss", "pgvector", "huggingface", "ollama", "markdown"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "docker", specifier = ">=7.1.0" },
     { name = "faiss-cpu", specifier = ">=1.9.0" },
+    { name = "httpx", specifier = ">=0.28.0" },
     { name = "import-linter", specifier = ">=2.0" },
     { name = "llama-index-core", specifier = ">=0.12.0" },
     { name = "llama-index-embeddings-huggingface", specifier = ">=0.4.0" },
