@@ -1,5 +1,6 @@
 """Embedding ports for providers and source-owned embedding sinks."""
 
+from collections.abc import Iterable, Iterator
 from typing import Protocol, runtime_checkable
 
 from searchkernel.domain import Vector
@@ -17,6 +18,16 @@ class EmbeddingBatchProvider(Protocol):
         """Return one embedding for each input text, in input order."""
         ...
 
+
+@runtime_checkable
+class StreamingEmbeddingProvider(EmbeddingBatchProvider, Protocol):
+    """Optional provider seam for bounded, source-driven embedding."""
+
+    def iter_embed_batches(
+        self, texts: Iterable[str], batch_size: int
+    ) -> Iterator[list[Vector]]:
+        """Yield validated embedding batches without retaining prior vectors."""
+        ...
 
 @runtime_checkable
 class EmbeddingSink(Protocol):

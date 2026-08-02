@@ -199,8 +199,43 @@ class SearchKernel:
         batch_size: int = 100,
         failure_mode: IngestionFailureMode = "strict",
         checkpoint_store: CheckpointStore | None = None,
+        progress: Callable[[IngestionReceipt], None] | None = None,
     ) -> IngestionReceipt:
-        """Ingest a source in async batches with commit-then-checkpoint ordering."""
+        """Ingest a source and return the complete backward-compatible receipt."""
+        results: list[RecordIngestionResult] = []
+        checkpoint: Cursor | None = since
+        resolved_workspace = workspace_id
+        async for receipt in self.iter_ingest_source(
+            source_kind,
+            since,
+            workspace_id=workspace_id,
+            batch_size=batch_size,
+            failure_mode=failure_mode,
+            checkpoint_store=checkpoint_store,
+            progress=progress,
+        ):
+            results.extend(receipt.records)
+            checkpoint = receipt.checkpoint
+            resolved_workspace = resolved_workspace or receipt.workspace_id
+        return IngestionReceipt(
+            source_kind=source_kind,
+            workspace_id=resolved_workspace or _single_workspace(results),
+            checkpoint=checkpoint,
+            records=tuple(results),
+        )
+
+    async def iter_ingest_source(
+        self,
+        source_kind: str,
+        since: Cursor | None = None,
+        *,
+        workspace_id: str | None = None,
+        batch_size: int = 100,
+        failure_mode: IngestionFailureMode = "strict",
+        checkpoint_store: CheckpointStore | None = None,
+        progress: Callable[[IngestionReceipt], None] | None = None,
+    ) -> AsyncIterator[IngestionReceipt]:
+        """Yield one receipt per bounded source batch as it is committed."""
         source = self._content_sources.get(source_kind)
         if source is None:
             raise KeyError(f"No content source registered for {source_kind!r}")
@@ -219,7 +254,7 @@ class SearchKernel:
                 source_kind, workspace_id
             )
 
-        all_results: list[RecordIngestionResult] = []
+        emitted = False
         checkpoint_blocked = False
         batch_iterator = getattr(source, "iter_batches", None)
         if callable(batch_iterator):
@@ -249,13 +284,27 @@ class SearchKernel:
                         terminal_cursor=source_batch.terminal_cursor,
                     )
                 )
-                all_results.extend(batch_results)
-            return IngestionReceipt(
-                source_kind=source_kind,
-                workspace_id=workspace_id or _single_workspace(all_results),
-                checkpoint=current_checkpoint,
-                records=tuple(all_results),
-            )
+                emitted = True
+                receipt = IngestionReceipt(
+                    source_kind=source_kind,
+                    workspace_id=workspace_id or _single_workspace(batch_results),
+                    checkpoint=current_checkpoint,
+                    records=tuple(batch_results),
+                )
+                if progress is not None:
+                    progress(receipt)
+                yield receipt
+            if not emitted:
+                receipt = IngestionReceipt(
+                    source_kind=source_kind,
+                    workspace_id=workspace_id,
+                    checkpoint=current_checkpoint,
+                    records=(),
+                )
+                if progress is not None:
+                    progress(receipt)
+                yield receipt
+            return
 
         stream = source.iter_records(since=current_checkpoint)
         if inspect.isawaitable(stream):
@@ -282,7 +331,16 @@ class SearchKernel:
                     checkpoint_store=checkpoint_store,
                     )
                 )
-                all_results.extend(batch_results)
+                emitted = True
+                receipt = IngestionReceipt(
+                    source_kind=source_kind,
+                    workspace_id=workspace_id or _single_workspace(batch_results),
+                    checkpoint=current_checkpoint,
+                    records=tuple(batch_results),
+                )
+                if progress is not None:
+                    progress(receipt)
+                yield receipt
                 batch = []
 
         if batch:
@@ -297,14 +355,27 @@ class SearchKernel:
                 checkpoint_store=checkpoint_store,
                 )
             )
-            all_results.extend(batch_results)
+            emitted = True
+            receipt = IngestionReceipt(
+                source_kind=source_kind,
+                workspace_id=workspace_id or _single_workspace(batch_results),
+                checkpoint=current_checkpoint,
+                records=tuple(batch_results),
+            )
+            if progress is not None:
+                progress(receipt)
+            yield receipt
 
-        return IngestionReceipt(
-            source_kind=source_kind,
-            workspace_id=workspace_id or _single_workspace(all_results),
-            checkpoint=current_checkpoint,
-            records=tuple(all_results),
-        )
+        if not emitted:
+            receipt = IngestionReceipt(
+                source_kind=source_kind,
+                workspace_id=workspace_id,
+                checkpoint=current_checkpoint,
+                records=(),
+            )
+            if progress is not None:
+                progress(receipt)
+            yield receipt
 
     async def _ingest_batch(
         self,

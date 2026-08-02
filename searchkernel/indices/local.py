@@ -52,6 +52,8 @@ _LOCAL_KEYWORD_SCHEMA_VERSION = 2
 _LOCAL_FTS_TABLE = "local_records_fts"
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
+_VECTOR_EMBEDDING_BYTES = np.dtype("<f4").itemsize
+_DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
@@ -134,6 +136,7 @@ class LocalRecordBackend:
         vector_engine: str = "exact",
         faiss_threshold: int = 50_000,
         vector_snapshot_max_rows: int = 100_000,
+        vector_snapshot_max_bytes: int = _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES,
     ) -> None:
         if db_manager is not None and db_path is not None:
             raise ValueError("pass db_path or db_manager, not both")
@@ -147,6 +150,8 @@ class LocalRecordBackend:
             raise ValueError("faiss_threshold must be positive")
         if vector_snapshot_max_rows < 1:
             raise ValueError("vector_snapshot_max_rows must be positive")
+        if vector_snapshot_max_bytes < 1:
+            raise ValueError("vector_snapshot_max_bytes must be positive")
         self._db = db_manager or (
             DatabaseManager(db_path, tuning=sqlite_tuning)
             if db_path is not None
@@ -160,6 +165,7 @@ class LocalRecordBackend:
         self._vector_engine = vector_engine
         self._faiss_threshold = faiss_threshold
         self._vector_snapshot_max_rows = vector_snapshot_max_rows
+        self._vector_snapshot_max_bytes = vector_snapshot_max_bytes
         self._fts5_available = False
         self._keyword_search_diagnostic = (
             "FTS5 indexed lexical search has not been initialized"
@@ -881,7 +887,11 @@ class LocalRecordBackend:
         query = PackedVectorCodec.normalize(
             query_vector, dim, context="query vector"
         )
-        if self.vector_count(model_name, dim) > self._vector_snapshot_max_rows:
+        row_count, byte_count = self.vector_storage_stats(model_name, dim)
+        if (
+            row_count > self._vector_snapshot_max_rows
+            or byte_count > self._vector_snapshot_max_bytes
+        ):
             return self._search_vector_blocks(
                 query,
                 k,
@@ -924,23 +934,40 @@ class LocalRecordBackend:
     ) -> list[RecordHit]:
         best_keys: list[str] = []
         best_scores: list[float] = []
-        offset = 0
+        last_storage_key: str | None = None
+        batch_limit = self._vector_batch_limit(dim)
         while True:
             with self._lock:
                 conn = self._db.get_connection()
-                rows = conn.execute(
-                    """
-                    SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                           r.status, r.metadata, r.uri, v.embedding, v.format_version,
-                           v.normalization_policy
-                    FROM local_records r
-                    JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
-                    WHERE v.encoder_namespace = ? AND v.dim = ?
-                    ORDER BY r.storage_key
-                    LIMIT ? OFFSET ?
-                    """,
-                    (model_name, dim, self._vector_snapshot_max_rows, offset),
-                ).fetchall()
+                if last_storage_key is None:
+                    rows = conn.execute(
+                        """
+                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
+                               v.normalization_policy
+                        FROM local_records r
+                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                        WHERE v.encoder_namespace = ? AND v.dim = ?
+                        ORDER BY r.storage_key
+                        LIMIT ?
+                        """,
+                        (model_name, dim, batch_limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
+                               v.normalization_policy
+                        FROM local_records r
+                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                        WHERE v.encoder_namespace = ? AND v.dim = ?
+                          AND r.storage_key > ?
+                        ORDER BY r.storage_key
+                        LIMIT ?
+                        """,
+                        (model_name, dim, last_storage_key, batch_limit),
+                    ).fetchall()
             if not rows:
                 break
             eligible_rows = [row for row in rows if self._matches(row, filters)]
@@ -968,7 +995,7 @@ class LocalRecordBackend:
                     )
                     best_keys = [best_keys[position] for _, position in selected]
                     best_scores = [best_scores[position] for _, position in selected]
-            offset += len(rows)
+            last_storage_key = rows[-1]["storage_key"]
         ordered = sorted(
             zip(best_keys, best_scores, strict=True),
             key=lambda item: (-item[1], item[0]),
@@ -987,17 +1014,100 @@ class LocalRecordBackend:
         return self._faiss_threshold
 
     def vector_count(self, model_name: str, dim: int) -> int:
+        row_count, _ = self.vector_storage_stats(model_name, dim)
+        return row_count
+
+    def vector_storage_stats(self, model_name: str, dim: int) -> tuple[int, int]:
         with self._lock:
             conn = self._db.get_connection()
             row = conn.execute(
                 """
-                SELECT COUNT(*)
+                SELECT COUNT(*), COALESCE(SUM(length(embedding)), 0)
                 FROM local_vectors_v2
                 WHERE encoder_namespace = ? AND dim = ?
                 """,
                 (model_name, dim),
             ).fetchone()
-            return int(row[0]) if row else 0
+            return (int(row[0]), int(row[1])) if row else (0, 0)
+
+    def _vector_batch_limit(self, dim: int) -> int:
+        bytes_per_vector = dim * _VECTOR_EMBEDDING_BYTES
+        if bytes_per_vector < 1:
+            raise ValueError("vector dimension must be positive")
+        return max(
+            1,
+            min(
+                self._vector_snapshot_max_rows,
+                self._vector_snapshot_max_bytes // bytes_per_vector,
+            ),
+        )
+
+    def _iter_vector_batches(
+        self,
+        model_name: str,
+        dim: int,
+    ) -> Iterable[list[sqlite3.Row]]:
+        """Yield bounded vector rows for streamed optional-index builds."""
+        last_storage_key: str | None = None
+        batch_limit = self._vector_batch_limit(dim)
+        while True:
+            with self._lock:
+                conn = self._db.get_connection()
+                if last_storage_key is None:
+                    rows = conn.execute(
+                        """
+                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
+                               v.normalization_policy
+                        FROM local_records r
+                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                        WHERE v.encoder_namespace = ? AND v.dim = ?
+                        ORDER BY r.storage_key
+                        LIMIT ?
+                        """,
+                        (model_name, dim, batch_limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
+                               v.normalization_policy
+                        FROM local_records r
+                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                        WHERE v.encoder_namespace = ? AND v.dim = ?
+                          AND r.storage_key > ?
+                        ORDER BY r.storage_key
+                        LIMIT ?
+                        """,
+                        (model_name, dim, last_storage_key, batch_limit),
+                    ).fetchall()
+            if not rows:
+                return
+            yield rows
+            last_storage_key = rows[-1]["storage_key"]
+
+    def _vector_row_matches(
+        self,
+        storage_key: str,
+        model_name: str,
+        dim: int,
+        filters: SearchFilters | None,
+    ) -> bool:
+        with self._lock:
+            conn = self._db.get_connection()
+            row = conn.execute(
+                """
+                SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                       r.status, r.metadata, r.uri
+                FROM local_records r
+                JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                WHERE r.storage_key = ?
+                  AND v.encoder_namespace = ? AND v.dim = ?
+                """,
+                (storage_key, model_name, dim),
+            ).fetchone()
+        return row is not None and self._matches(row, filters)
 
     def _get_vector_snapshot(self, model_name: str, dim: int) -> VectorSnapshot:
         key = (model_name, dim)

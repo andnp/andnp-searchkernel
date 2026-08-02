@@ -24,6 +24,8 @@ from searchkernel.search.record_pipeline import (
     RecordSearchPolicy,
 )
 
+_DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class LocalRecordKernel:
@@ -49,6 +51,8 @@ def build_local_record_kernel(
     embedding_model_name: str | None = None,
     embedding_dim: int | None = None,
     vector_engine: str = "exact",
+    vector_snapshot_max_rows: int = 100_000,
+    vector_snapshot_max_bytes: int = _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES,
     faiss_path: Path | None = None,
     reranker: Reranker | None = None,
     search_policy: RecordSearchPolicy | None = None,
@@ -56,7 +60,12 @@ def build_local_record_kernel(
 ) -> LocalRecordKernel:
     """Build the durable local record stores and their search kernel."""
 
-    backend = LocalRecordBackend(db_path, vector_engine=vector_engine)
+    backend = LocalRecordBackend(
+        db_path,
+        vector_engine=vector_engine,
+        vector_snapshot_max_rows=vector_snapshot_max_rows,
+        vector_snapshot_max_bytes=vector_snapshot_max_bytes,
+    )
     vector_store = LocalVectorStore(backend, faiss_path=faiss_path)
     keyword_store = LocalKeywordStore(backend)
     graph_store = LocalGraphStore(backend)

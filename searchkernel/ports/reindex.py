@@ -1,8 +1,11 @@
 """Capability protocols for embedding-model migration."""
 
+from collections.abc import Sequence
 from contextlib import AbstractContextManager
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
+from searchkernel.domain import Cursor, Record
 from searchkernel.domain.reindex import (
     ActiveModelMetadata,
     BackupMetadata,
@@ -11,6 +14,36 @@ from searchkernel.domain.reindex import (
     RollbackMetadata,
     ValidationResult,
 )
+
+type ReindexCursor = Cursor
+
+
+@dataclass(frozen=True, slots=True)
+class RecordBatch:
+    """One bounded page returned by a cursor-based reindex source."""
+
+    records: Sequence[Record]
+    next_cursor: ReindexCursor = None
+    total_records: int | None = None
+
+
+@runtime_checkable
+class RecordSource(Protocol):
+    """Read records in bounded pages using an opaque source cursor."""
+
+    total_records: int | None
+
+    def fetch_batch(
+        self,
+        cursor: ReindexCursor,
+        limit: int,
+    ) -> RecordBatch:
+        """Return at most ``limit`` records and the cursor for the next page."""
+        ...
+
+
+ReindexBatch = RecordBatch
+ReindexRecordSource = RecordSource
 
 
 class ModelNamespaceStore(Protocol):
@@ -89,3 +122,17 @@ class ModelLifecycleStore(
     def save_migration(self, migration: MigrationState) -> None:
         """Persist durable migration state atomically."""
         ...
+
+
+__all__ = [
+    "ActiveModelStore",
+    "ModelBackupStore",
+    "ModelLifecycleStore",
+    "ModelNamespaceStore",
+    "ModelValidationStore",
+    "RecordBatch",
+    "RecordSource",
+    "ReindexBatch",
+    "ReindexCursor",
+    "ReindexRecordSource",
+]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass
 from itertools import islice
 
@@ -102,6 +103,27 @@ def embed_in_batches(
     return vectors
 
 
+def iter_embed_batches(
+    texts: Iterable[str],
+    *,
+    provider: EmbeddingBatchProvider,
+    batch_size: int,
+) -> Iterator[list[Vector]]:
+    """Yield validated embedding batches without retaining prior vectors."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+
+    iterator = iter(texts)
+    while batch := list(islice(iterator, batch_size)):
+        batch_vectors = provider.embed(batch)
+        if len(batch_vectors) != len(batch):
+            raise ValueError(
+                f"Embedding provider {provider.model_name!r} returned {len(batch_vectors)} "
+                f"vectors for {len(batch)} inputs"
+            )
+        yield [list(vector) for vector in batch_vectors]
+
+
 async def async_embed_and_upsert(
     inputs: list[EmbeddingInput],
     *,
@@ -132,3 +154,24 @@ async def async_embed_in_batches(
         provider=provider,
         batch_size=batch_size,
     )
+
+
+async def async_iter_embed_batches(
+    texts: Iterable[str],
+    *,
+    provider: EmbeddingBatchProvider,
+    batch_size: int,
+) -> AsyncIterator[list[Vector]]:
+    """Yield bounded embedding responses without blocking the event loop."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+
+    iterator = iter(texts)
+    while batch := list(islice(iterator, batch_size)):
+        batch_vectors = await asyncio.to_thread(provider.embed, batch)
+        if len(batch_vectors) != len(batch):
+            raise ValueError(
+                f"Embedding provider {provider.model_name!r} returned "
+                f"{len(batch_vectors)} vectors for {len(batch)} inputs"
+            )
+        yield [list(vector) for vector in batch_vectors]

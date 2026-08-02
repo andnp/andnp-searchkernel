@@ -81,6 +81,7 @@ class SemanticRecordIngestor:
         vector_store: VectorStore,
         embedding_cache: EmbeddingCache,
         encoder_namespace: str | None = None,
+        embedding_batch_size: int = 32,
     ) -> None:
         self.embedding_provider = embedding_provider
         self.keyword_store = keyword_store
@@ -95,6 +96,9 @@ class SemanticRecordIngestor:
             self.encoder_namespace,
             dimension=embedding_provider.dim,
         )
+        if embedding_batch_size < 1:
+            raise ValueError("embedding_batch_size must be >= 1")
+        self.embedding_batch_size = embedding_batch_size
         self._encoder: _EmbeddingEncoder = _ProviderEncoder(embedding_provider)
 
     async def index_records(
@@ -344,6 +348,7 @@ class SemanticRecordIngestor:
                 records,
                 self.embedding_provider.model_name,
             ),
+            batch_size=self.embedding_batch_size,
         )
 
     def _index_record_semantic(self, record: Record) -> None:
@@ -356,6 +361,7 @@ class SemanticRecordIngestor:
             self.embedding_cache,
             self._encoder,
             _RecordMaterializer(record, self.embedding_provider.model_name),
+            batch_size=self.embedding_batch_size,
         )
  
     def _index_record_semantic_and_vector(self, record: Record) -> None:

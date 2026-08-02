@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,7 +17,6 @@ from searchkernel.indices.local_vectors import (
     NORMALIZATION_POLICY,
     VECTOR_FORMAT_VERSION,
     PackedVectorCodec,
-    VectorSnapshot,
 )
 from searchkernel.utils.atomic_io import atomic_write_binary, atomic_write_json
 
@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 @dataclass(frozen=True, slots=True)
 class _FAISSState:
     index: Any
+    encoder_namespace: str
+    dim: int
     epoch: int
     ids: tuple[int, ...]
     storage_keys: tuple[str, ...]
@@ -54,6 +56,7 @@ class FAISSLocalVectorStore:
         self._index_path = index_path
         self._overfetch_multiplier = overfetch_multiplier
         self._max_scan_rounds = max_scan_rounds
+        self._state_lock = threading.RLock()
         self._states: dict[tuple[str, int], _FAISSState] = {}
 
     def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
@@ -73,17 +76,18 @@ class FAISSLocalVectorStore:
         query = PackedVectorCodec.normalize(
             query_vector, dim, context="query vector"
         )
-        snapshot = self._backend._get_vector_snapshot(model_name, dim)
-        eligible = snapshot.filter_mask(
-            filters,
-            status_values=self._backend._status_values(filters),
-            filter_values=self._backend._filter_values,
-        )
-        if not np.any(eligible):
+        if self._backend.vector_count(model_name, dim) == 0:
             return []
         try:
-            state = self._get_state(snapshot)
-            return self._search_state(state, snapshot, query, eligible, k)
+            state = self._get_state(model_name, dim)
+            if state.epoch != self._backend.vector_epoch():
+                state = self._get_state(model_name, dim)
+            return self._search_state(
+                state,
+                query,
+                k,
+                filters=filters,
+            )
         except Exception:  # noqa: BLE001 - broken optional indexes use exact fallback
             return self._backend.search_vector(
                 query_vector,
@@ -146,19 +150,23 @@ class FAISSLocalVectorStore:
             hit.storage_key for hit in approximate
         }) / len(exact)
 
-    def _get_state(self, snapshot: VectorSnapshot) -> _FAISSState:
-        key = (snapshot.encoder_namespace, snapshot.dim)
-        cached = self._states.get(key)
-        if cached is not None and cached.epoch == snapshot.epoch:
-            return cached
-        loaded = self._load_state(snapshot)
-        if loaded is not None:
-            self._states[key] = loaded
-            return loaded
-        state = self._build_state(snapshot)
-        self._states[key] = state
-        self._persist_state(snapshot, state)
-        return state
+    def _get_state(self, model_name: str, dim: int) -> _FAISSState:
+        key = (model_name, dim)
+        vector_epoch = self._backend.vector_epoch()
+        with self._state_lock:
+            cached = self._states.get(key)
+            if cached is not None and cached.epoch == vector_epoch:
+                return cached
+            loaded = self._load_state(model_name, dim, vector_epoch)
+            if loaded is not None:
+                self._states[key] = loaded
+                return loaded
+            state = self._build_state(model_name, dim, vector_epoch)
+            if self._backend.vector_epoch() != vector_epoch:
+                raise RuntimeError("vector index changed while FAISS state was built")
+            self._states[key] = state
+            self._persist_state(state)
+            return state
 
     @staticmethod
     def _stable_id(storage_key: str) -> int:
@@ -168,49 +176,75 @@ class FAISSLocalVectorStore:
         ) & ((1 << 63) - 1)
         return value or 1
 
-    def _build_state(self, snapshot: VectorSnapshot) -> _FAISSState:
+    def _build_state(
+        self,
+        model_name: str,
+        dim: int,
+        epoch: int,
+    ) -> _FAISSState:
         import faiss
 
-        ids = tuple(self._stable_id(key) for key in snapshot.storage_keys)
-        if len(set(ids)) != len(ids):
-            raise ValueError("FAISS stable ID collision")
-        index = faiss.IndexIDMap2(faiss.IndexFlatIP(snapshot.dim))
-        if ids:
+        index = faiss.IndexIDMap2(faiss.IndexFlatIP(dim))
+        ids: list[int] = []
+        storage_keys: list[str] = []
+        id_to_storage_key: dict[int, str] = {}
+        for rows in self._backend._iter_vector_batches(model_name, dim):
+            vectors = [
+                PackedVectorCodec.decode(
+                    row["embedding"],
+                    dim,
+                    context=f"stored embedding for {row['storage_key']}",
+                )
+                for row in rows
+            ]
+            batch_keys = [row["storage_key"] for row in rows]
+            batch_ids = [self._stable_id(key) for key in batch_keys]
+            if any(faiss_id in id_to_storage_key for faiss_id in batch_ids):
+                raise ValueError("FAISS stable ID collision")
             index.add_with_ids(
-                np.asarray(snapshot.matrix, dtype=np.float32),
-                np.asarray(ids, dtype=np.int64),
+                np.asarray(vectors, dtype=np.float32),
+                np.asarray(batch_ids, dtype=np.int64),
             )
+            ids.extend(batch_ids)
+            storage_keys.extend(batch_keys)
+            id_to_storage_key.update(zip(batch_ids, batch_keys, strict=True))
         return _FAISSState(
             index=index,
-            epoch=snapshot.epoch,
-            ids=ids,
-            storage_keys=snapshot.storage_keys,
-            id_to_storage_key=dict(zip(ids, snapshot.storage_keys, strict=True)),
+            encoder_namespace=model_name,
+            dim=dim,
+            epoch=epoch,
+            ids=tuple(ids),
+            storage_keys=tuple(storage_keys),
+            id_to_storage_key=id_to_storage_key,
         )
 
     def _search_state(
         self,
         state: _FAISSState,
-        snapshot: VectorSnapshot,
         query: np.ndarray,
-        eligible: np.ndarray,
         k: int,
+        *,
+        filters: dict[str, Any] | None,
     ) -> list[RecordHit]:
-        eligible_keys = {
-            snapshot.storage_keys[position]
-            for position in np.flatnonzero(eligible)
-        }
         total = len(state.storage_keys)
+        if total == 0:
+            return []
         scan = min(total, max(k, int(np.ceil(k * self._overfetch_multiplier))))
         hits: dict[str, RecordHit] = {}
         for _ in range(self._max_scan_rounds):
-            scores, ids = state.index.search(
-                np.asarray(query[None, :], dtype=np.float32),
-                scan,
-            )
+            with self._state_lock:
+                scores, ids = state.index.search(
+                    np.asarray(query[None, :], dtype=np.float32),
+                    scan,
+                )
             for score, faiss_id in zip(scores[0], ids[0], strict=True):
                 storage_key = state.id_to_storage_key.get(int(faiss_id))
-                if storage_key is None or storage_key not in eligible_keys:
+                if storage_key is None or not self._backend._vector_row_matches(
+                    storage_key,
+                    state.encoder_namespace,
+                    state.dim,
+                    filters,
+                ):
                     continue
                 if storage_key in hits:
                     continue
@@ -228,32 +262,35 @@ class FAISSLocalVectorStore:
             key=lambda hit: (-hit.score, hit.storage_key),
         )[:k]
 
-    def _paths(self, snapshot: VectorSnapshot) -> tuple[Path, Path]:
+    def _paths(self, model_name: str, dim: int) -> tuple[Path, Path]:
         if self._index_path is None:
             raise FileNotFoundError("FAISS persistence is disabled")
         if self._index_path.suffix:
             index_path = self._index_path
         else:
             digest = hashlib.sha256(
-                f"{snapshot.encoder_namespace}:{snapshot.dim}".encode()
+                f"{model_name}:{dim}".encode()
             ).hexdigest()[:16]
             index_path = self._index_path / f"{digest}.faiss"
         return index_path, index_path.with_suffix(".json")
 
-    def _persist_state(self, snapshot: VectorSnapshot, state: _FAISSState) -> None:
+    def _persist_state(self, state: _FAISSState) -> None:
         try:
             import faiss
 
-            index_path, metadata_path = self._paths(snapshot)
+            index_path, metadata_path = self._paths(
+                state.encoder_namespace,
+                state.dim,
+            )
             atomic_write_binary(index_path, bytes(faiss.serialize_index(state.index)))
             atomic_write_json(
                 metadata_path,
                 {
                     "format_version": VECTOR_FORMAT_VERSION,
                     "normalization_policy": NORMALIZATION_POLICY,
-                    "encoder_namespace": snapshot.encoder_namespace,
-                    "dim": snapshot.dim,
-                    "epoch": snapshot.epoch,
+                    "encoder_namespace": state.encoder_namespace,
+                    "dim": state.dim,
+                    "epoch": state.epoch,
                     "ids": list(state.ids),
                     "storage_keys": list(state.storage_keys),
                     "tombstones": [],
@@ -262,33 +299,40 @@ class FAISSLocalVectorStore:
         except Exception:  # noqa: BLE001 - corrupted optional indexes use exact fallback
             return
 
-    def _load_state(self, snapshot: VectorSnapshot) -> _FAISSState | None:
+    def _load_state(
+        self,
+        model_name: str,
+        dim: int,
+        epoch: int,
+    ) -> _FAISSState | None:
         try:
             import faiss
 
-            index_path, metadata_path = self._paths(snapshot)
+            index_path, metadata_path = self._paths(model_name, dim)
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             if (
                 metadata["format_version"] != VECTOR_FORMAT_VERSION
                 or metadata["normalization_policy"] != NORMALIZATION_POLICY
-                or metadata["encoder_namespace"] != snapshot.encoder_namespace
-                or metadata["dim"] != snapshot.dim
-                or metadata["epoch"] != snapshot.epoch
-                or tuple(metadata["storage_keys"]) != snapshot.storage_keys
+                or metadata["encoder_namespace"] != model_name
+                or metadata["dim"] != dim
+                or metadata["epoch"] != epoch
             ):
                 return None
             ids = tuple(int(value) for value in metadata["ids"])
-            if len(ids) != len(snapshot.storage_keys):
+            storage_keys = tuple(metadata["storage_keys"])
+            if len(ids) != len(storage_keys) or len(set(ids)) != len(ids):
                 return None
             index = faiss.deserialize_index(np.frombuffer(index_path.read_bytes(), dtype=np.uint8))
-            if index.d != snapshot.dim or index.ntotal != len(ids):
+            if index.d != dim or index.ntotal != len(ids):
                 return None
             return _FAISSState(
                 index=index,
-                epoch=snapshot.epoch,
+                encoder_namespace=model_name,
+                dim=dim,
+                epoch=epoch,
                 ids=ids,
-                storage_keys=snapshot.storage_keys,
-                id_to_storage_key=dict(zip(ids, snapshot.storage_keys, strict=True)),
+                storage_keys=storage_keys,
+                id_to_storage_key=dict(zip(ids, storage_keys, strict=True)),
             )
         except Exception:  # noqa: BLE001 - stale or corrupt indexes use exact fallback
             return None

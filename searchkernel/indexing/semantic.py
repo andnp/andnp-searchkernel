@@ -246,7 +246,10 @@ class SemanticWorkPlanner:
         encoder: EmbeddingEncoder,
         materializer: VectorMaterializer,
         progress: Callable[[SemanticProgress], None] | None = None,
+        batch_size: int = 32,
     ) -> SemanticProgress:
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
         plan = self.plan(inputs, cache)
         total = len(plan.groups)
         completed = 0
@@ -258,22 +261,24 @@ class SemanticWorkPlanner:
             self._report(progress, completed, total, len(plan.hits), len(plan.misses))
 
         if plan.misses:
-            vectors = encoder.encode([work.text for work in plan.misses])
-            if len(vectors) != len(plan.misses):
-                raise ValueError(
-                    "encoder returned a different number of vectors than texts"
-                )
-            to_cache: dict[str, Sequence[float]] = {}
-            for work, vector in zip(plan.misses, vectors, strict=True):
-                self._validate_vector(vector)
-                to_cache[work.content_hash] = vector
-                for item in plan.groups[work.content_hash]:
-                    self._materialize(materializer, item, vector)
-                completed += 1
-                self._report(
-                    progress, completed, total, len(plan.hits), len(plan.misses)
-                )
-            cache.put_many(to_cache)
+            for start in range(0, len(plan.misses), batch_size):
+                work_batch = plan.misses[start : start + batch_size]
+                vectors = encoder.encode([work.text for work in work_batch])
+                if len(vectors) != len(work_batch):
+                    raise ValueError(
+                        "encoder returned a different number of vectors than texts"
+                    )
+                to_cache: dict[str, Sequence[float]] = {}
+                for work, vector in zip(work_batch, vectors, strict=True):
+                    self._validate_vector(vector)
+                    to_cache[work.content_hash] = vector
+                    for item in plan.groups[work.content_hash]:
+                        self._materialize(materializer, item, vector)
+                    completed += 1
+                    self._report(
+                        progress, completed, total, len(plan.hits), len(plan.misses)
+                    )
+                cache.put_many(to_cache)
         return SemanticProgress(completed, total, len(plan.hits), len(plan.misses))
 
     async def execute_async(
@@ -283,6 +288,7 @@ class SemanticWorkPlanner:
         encoder: EmbeddingEncoder,
         materializer: VectorMaterializer,
         progress: Callable[[SemanticProgress], None] | None = None,
+        batch_size: int = 32,
     ) -> SemanticProgress:
         """Execute blocking cache, model, and materializer work off-loop."""
         return await asyncio.to_thread(
@@ -292,6 +298,7 @@ class SemanticWorkPlanner:
             encoder,
             materializer,
             progress,
+            batch_size,
         )
 
     def _valid_vector(self, vector: Sequence[float]) -> bool:

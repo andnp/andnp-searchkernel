@@ -22,6 +22,7 @@ from searchkernel.domain import (
     ValidationResult,
 )
 from searchkernel.indices import LocalRecordBackend, LocalVectorStore
+from searchkernel.ports.reindex import RecordBatch
 from searchkernel.runtime.reindex import ReindexError, ReindexRoutine
 from searchkernel.utils.atomic_io import atomic_write_json
 
@@ -52,6 +53,23 @@ class FakeProvider:
             [float(len(text)), *[float(value) for value in range(2, self.dim + 1)]]
             for text in texts
         ]
+
+
+class FakeRecordSource:
+    total_records: int | None
+
+    def __init__(self, records: list[Record], total_records: int | None = None):
+        self.records = records
+        self.total_records = total_records
+        self.calls: list[str | None] = []
+
+    def fetch_batch(self, cursor: str | None, limit: int) -> RecordBatch:
+        self.calls.append(cursor)
+        start = 0 if cursor is None else int(cursor.removeprefix("cursor-"))
+        batch = self.records[start : start + limit]
+        end = start + len(batch)
+        next_cursor = None if end == len(self.records) else f"cursor-{end}"
+        return RecordBatch(records=batch, next_cursor=next_cursor)
 
 
 class LocalLifecycleStore:
@@ -368,6 +386,77 @@ def _assert_records_are_preserved(
     backend: LocalRecordBackend, records: list[Record]
 ) -> None:
     assert all(backend.hydrate_record(record.storage_key) is not None for record in records)
+
+
+def test_cursor_source_checkpoints_after_each_committed_batch(
+    tmp_path: Path,
+):
+    records, backend, store, source_namespace = _local_migration(tmp_path, count=4)
+    source = FakeRecordSource(records)
+    routine = ReindexRoutine(
+        source,
+        FakeProvider(model_name="new-model"),
+        LocalVectorStore(backend),
+        batch_size=2,
+        lifecycle_store=store,
+        migration_id="cursor-migration",
+        source_namespace=source_namespace,
+    )
+
+    routine.expand()
+    progress = routine.backfill()
+
+    assert source.calls == [None, "cursor-2"]
+    assert progress.complete
+    assert progress.total_records == 4
+    assert routine.checkpoint == 4
+    saved = routine.state
+    assert saved is not None
+    assert saved.total_records == 4
+    assert backend.vector_count("new-model", 3) == 4
+
+
+def test_cursor_source_resume_uses_durable_cursor_after_batch_failure(
+    tmp_path: Path,
+):
+    records, backend, store, source_namespace = _local_migration(tmp_path, count=4)
+    first_source = FakeRecordSource(records)
+    first = ReindexRoutine(
+        first_source,
+        FakeProvider(model_name="new-model", fail_on_call=2),
+        LocalVectorStore(backend),
+        batch_size=2,
+        lifecycle_store=store,
+        migration_id="cursor-migration",
+        source_namespace=source_namespace,
+    )
+    first.expand()
+
+    with pytest.raises(ReindexError, match="Batch 1 failed"):
+        first.backfill()
+
+    failed = first.state
+    assert failed is not None
+    assert failed.checkpoint == 2
+    assert backend.vector_count("new-model", 3) == 2
+
+    restarted_source = FakeRecordSource(records)
+    restarted = ReindexRoutine(
+        restarted_source,
+        FakeProvider(model_name="new-model"),
+        LocalVectorStore(backend),
+        batch_size=2,
+        lifecycle_store=store,
+        migration_id="cursor-migration",
+        source_namespace=source_namespace,
+    )
+    restarted.retry()
+    progress = restarted.backfill()
+
+    assert restarted_source.calls == ["cursor-2"]
+    assert progress.complete
+    assert restarted.checkpoint == 4
+    assert backend.vector_count("new-model", 3) == 4
 
 
 def test_local_lifecycle_keeps_old_namespace_during_target_backfill(tmp_path: Path):
