@@ -307,6 +307,38 @@ def _canonical_ids(values: list[str | RecordIdentity]) -> list[str]:
     return result
 
 
+def _delete_graph_edges_for_identities(
+    cursor: Any,
+    identities: Sequence[RecordIdentity | tuple[str | None, str, str]],
+) -> bool:
+    """Delete graph edges incident to the supplied record identities."""
+    if not identities:
+        return False
+    rows = [
+        (
+            identity.workspace_id or "",
+            identity.source_kind,
+            identity.source_id,
+        )
+        if isinstance(identity, RecordIdentity)
+        else (identity[0] or "", identity[1], identity[2])
+        for identity in identities
+    ]
+    psycopg2.extras.execute_values(
+        cursor,
+        """
+        DELETE FROM graph_edges AS edge
+        USING (VALUES %s) AS deleted(workspace_id, source_kind, source_id)
+        WHERE (edge.source_workspace_id, edge.source_kind, edge.source_id) =
+              (deleted.workspace_id, deleted.source_kind, deleted.source_id)
+           OR (edge.target_workspace_id, edge.target_kind, edge.target_id) =
+              (deleted.workspace_id, deleted.source_kind, deleted.source_id);
+        """,
+        rows,
+    )
+    return bool(cursor.rowcount)
+
+
 def _migrate_records_schema(cursor) -> None:
     """Upgrade legacy records in the same transaction as schema creation."""
     cursor.execute(
@@ -1138,6 +1170,10 @@ class PGVectorStore:
         cursor = None
         try:
             cursor = conn.cursor()
+            graph_changed = _delete_graph_edges_for_identities(
+                cursor,
+                [RecordIdentity.from_storage_key(storage_id) for storage_id in storage_ids],
+            )
             cursor.execute("SELECT DISTINCT table_name FROM vector_tables;")
             table_names = [row[0] for row in cursor.fetchall()]
 
@@ -1153,7 +1189,12 @@ class PGVectorStore:
                 "DELETE FROM records WHERE record_id = ANY(%s);", (storage_ids,)
             )
 
-            _bump_epochs(cursor, keyword=True, vector=True)
+            _bump_epochs(
+                cursor,
+                keyword=True,
+                vector=True,
+                graph=graph_changed,
+            )
 
             conn.commit()
             logger.debug(f"Deleted {len(record_ids)} records")
@@ -1203,19 +1244,38 @@ class PGVectorStore:
                 for other_table in table_names
             ]
             if remaining_checks:
+                remaining_clause = sql.SQL(" AND ").join(remaining_checks)
                 cursor.execute(
-                    sql.SQL("DELETE FROM records r WHERE r.record_id = ANY(%s) AND {}").format(
-                        sql.SQL(" AND ").join(remaining_checks)
-                    ),
+                    sql.SQL(
+                        "SELECT r.workspace_id, r.source_kind, r.source_id "
+                        "FROM records r "
+                        "WHERE r.record_id = ANY(%s) AND {}"
+                    ).format(remaining_clause),
+                    (storage_ids,),
+                )
+                deleted_identities = cursor.fetchall()
+                graph_changed = _delete_graph_edges_for_identities(
+                    cursor, deleted_identities
+                )
+                cursor.execute(
+                    sql.SQL(
+                        "DELETE FROM records r WHERE r.record_id = ANY(%s) AND {}"
+                    ).format(remaining_clause),
                     (storage_ids,),
                 )
             else:
+                graph_changed = False
                 cursor.execute(
                     "DELETE FROM records WHERE record_id = ANY(%s);",
                     (storage_ids,),
                 )
 
-            _bump_epochs(cursor, keyword=True, vector=True)
+            _bump_epochs(
+                cursor,
+                keyword=True,
+                vector=True,
+                graph=graph_changed,
+            )
             conn.commit()
         finally:
             if cursor is not None:

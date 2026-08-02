@@ -206,6 +206,51 @@ class TestVectorStore:
         assert fixture_records[1].source_id not in result_ids
         assert fixture_records[2].source_id in result_ids
 
+    def test_delete_removes_incident_graph_edges(self, pg_conn, fixture_records):
+        vector_store = PGVectorStore(pg_conn)
+        graph_store = PGGraphStore(pg_conn)
+        vector_store.upsert(fixture_records, model_name="test-model", dim=4)
+        source = RecordIdentity(None, "test", fixture_records[0].source_id)
+        target = RecordIdentity(None, "test", fixture_records[1].source_id)
+        graph_store.upsert_edges(
+            [
+                GraphEdge(source, target, "links", 0.9),
+                GraphEdge(target, source, "links", 0.8),
+            ]
+        )
+        graph_epoch = graph_store.graph_epoch()
+
+        vector_store.delete([source.storage_key])
+
+        assert graph_store.neighbors(target) == []
+        assert graph_store.graph_epoch() > graph_epoch
+
+    def test_model_delete_preserves_graph_edges_until_last_model(self, pg_conn):
+        vector_store = PGVectorStore(pg_conn)
+        graph_store = PGGraphStore(pg_conn)
+        now = datetime.now(UTC)
+        source = Record(
+            source_kind="note",
+            source_id="shared-source",
+            title="Source",
+            body="Source",
+            created_at=now,
+            updated_at=now,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        target = RecordIdentity(None, "note", "shared-target")
+        vector_store.upsert([source], model_name="model-one", dim=4)
+        vector_store.upsert([source], model_name="model-two", dim=4)
+        graph_store.upsert_edges(
+            [GraphEdge(RecordIdentity(None, "note", source.source_id), target, "links", 1.0)]
+        )
+
+        vector_store.delete_for_model([source.storage_key], "model-one", 4)
+        assert graph_store.neighbors(RecordIdentity(None, "note", source.source_id))
+
+        vector_store.delete_for_model([source.storage_key], "model-two", 4)
+        assert graph_store.neighbors(RecordIdentity(None, "note", source.source_id)) == []
+
     def test_delete_rejects_bare_source_id(self, pg_conn, fixture_records):
         store = PGVectorStore(pg_conn)
         store.upsert(fixture_records[:1], model_name="test-model", dim=4)
