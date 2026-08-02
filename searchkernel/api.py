@@ -136,7 +136,6 @@ from searchkernel.indexing.submission import (
     TaskSubmissionResult,
 )
 from searchkernel.indices.graph import GraphStore as GraphIndex
-from searchkernel.indices.hash_store import ChunkHashStore
 from searchkernel.indices.keyword import KeywordIndex
 from searchkernel.indices.vector import VectorIndex
 from searchkernel.ingestion.records import SemanticRecordIngestor
@@ -303,7 +302,6 @@ __all__ = [
     "ChangeSignal",
     "CheckpointStore",
     "Chunk",
-    "ChunkHashStore",
     "ChunkResult",
     "ChunkTuningConfig",
     "ChunkingStrategy",
