@@ -438,6 +438,57 @@ class TestVectorStore:
             hit.storage_key for hit in local_hits
         ] == [records[0].storage_key]
 
+    def test_equal_vector_ties_preserve_workspace_identity_order(
+        self,
+        pg_conn,
+        tmp_path,
+    ):
+        now = datetime.now(UTC)
+        records = [
+            Record(
+                workspace_id=workspace_id,
+                source_kind="note",
+                source_id="shared",
+                title=workspace_id,
+                body=workspace_id,
+                created_at=now,
+                updated_at=now,
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            )
+            for workspace_id in ("workspace-c", "workspace-a", "workspace-b")
+        ]
+        local = LocalRecordBackend(tmp_path / "local.db")
+        local.upsert(records, "tie-model", 4)
+        pg = PGVectorStore(pg_conn)
+        pg.upsert(records, "tie-model", 4)
+
+        local_hits = local.search_vector(
+            [1.0, 0.0, 0.0, 0.0],
+            10,
+            model_name="tie-model",
+            dim=4,
+        )
+        pg_hits = pg.search(
+            [1.0, 0.0, 0.0, 0.0],
+            10,
+            model_name="tie-model",
+            dim=4,
+        )
+
+        expected = sorted(record.storage_key for record in records)
+        assert [hit.storage_key for hit in local_hits] == expected
+        assert [hit.storage_key for hit in pg_hits] == expected
+        assert [
+            hit.storage_key
+            for hit in pg.search(
+                [1.0, 0.0, 0.0, 0.0],
+                10,
+                model_name="tie-model",
+                dim=4,
+                filters={"workspace_id": "workspace-a"},
+            )
+        ] == [records[1].storage_key]
+
     def test_dimension_and_model_tables_are_isolated(self, pg_conn, fixture_records):
         """Test that model/dimension pairs select only their own table."""
         store = PGVectorStore(pg_conn)

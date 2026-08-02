@@ -154,7 +154,11 @@ def build_pgvector_filter_sql(
     *,
     record_alias: str = "r",
 ) -> tuple[list[str], list[Any]]:
-    """Build SQL predicates for the canonical vector filter contract."""
+    """Build SQL predicates for the canonical vector filter contract.
+
+    Supports generic metadata field filtering via the 'metadata_equals' dict,
+    where each key-value pair becomes a metadata->>'key' = value filter.
+    """
     filters = filters or {}
     clauses: list[str] = []
     parameters: list[Any] = []
