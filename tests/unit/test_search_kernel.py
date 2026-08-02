@@ -1,85 +1,20 @@
-from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from searchkernel import SearchAPI, SearchKernel
-from searchkernel.domain import (
-    Record,
-    RecordHit,
-    RecordIdentity,
-    ScoredRef,
-    SearchResult,
-    SearchResultProvenance,
-)
-from searchkernel.runtime.local import LocalSearchSource
+from searchkernel import Record, RecordHit, RecordIdentity, SearchAPI, SearchKernel
 from searchkernel.search.record_pipeline import (
-    RecordSearchConfig,
     RecordSearchOutcome,
     RecordSearchResult,
 )
 
 
-class _Source:
-    def __init__(self, source_kind: str, result: ScoredRef):
-        self.source_kind = source_kind
-        self.result = result
-        self.calls: list[tuple[str, int, dict[str, Any] | None]] = []
-
-    async def search(
-        self, query: str, k: int, filters: dict[str, Any] | None = None
-    ) -> Iterable[ScoredRef]:
-        self.calls.append((query, k, filters))
-        return [self.result]
-
-
-class _Reranker:
-    model_name = "test-reranker"
-
-    def rerank(self, query: str, documents: list[str]) -> list[float]:
-        return [0.75 for _ in documents]
-
-
 @pytest.mark.asyncio
-async def test_search_kernel_delegates_fusion_and_returns_search_results():
-    source = _Source(
-        "memory",
-        ScoredRef(
-            source_id="memory-1",
-            score=0.2,
-            source_kind="memory",
-            metadata={"text": "a memory"},
-        ),
-    )
-    kernel = SearchKernel.build(
-        {"reranker": _Reranker()},
-        sources=[source],
-    )
-
-    assert isinstance(kernel, SearchAPI)
-    results = await kernel.search_anything(
-        "query",
-        sources=["memory"],
-        filters={"workspace": "personal"},
-        k=1,
-    )
-
-    assert results == [
-        SearchResult(
-            record_id="memory-1",
-            score=0.75,
-            source_kind="memory",
-            metadata={"text": "a memory", "source_score": 0.2},
-        )
-    ]
-    assert source.calls == [("query", 1, {"workspace": "personal"})]
-
-
-@pytest.mark.asyncio
-async def test_search_kernel_builds_canonical_local_source_from_record_ports():
+async def test_public_search_returns_canonical_record_outcome() -> None:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
     record = Record(
+        workspace_id="workspace",
         source_kind="note",
         source_id="record-1",
         title="Record title",
@@ -97,16 +32,7 @@ async def test_search_kernel_builds_canonical_local_source_from_record_ports():
         ) -> list[RecordHit]:
             assert query == "query"
             assert filters == {"statuses": ["active"]}
-            return [
-                RecordHit(
-                    RecordIdentity(
-                        record.workspace_id,
-                        record.source_kind,
-                        record.source_id,
-                    ),
-                    1.0,
-                )
-            ][:k]
+            return [RecordHit(record.identity, 1.0)][:k]
 
         def index(self, records: list[Record]) -> None:
             pass
@@ -116,136 +42,31 @@ async def test_search_kernel_builds_canonical_local_source_from_record_ports():
         keyword_store=_KeywordStore(),
     )
 
-    results = await kernel.search_anything("query", k=1)
-
-    assert results[0].record_id == "record-1"
-    assert results[0].source_kind == "note"
-    assert results[0].metadata["text"] == "record body"
-
-
-@pytest.mark.asyncio
-async def test_search_kernel_wires_reranker_into_local_record_pipeline():
-    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
-    record = Record(
-        source_kind="note",
-        source_id="record-1",
-        title="Low priority title",
-        body="record body",
-        created_at=timestamp,
-        updated_at=timestamp,
-    )
-
-    class _KeywordStore:
-        def search(self, query, k, filters=None):
-            return [
-                RecordHit(
-                    RecordIdentity(None, "note", "record-1"),
-                    1.0,
-                )
-            ]
-
-    class _LocalReranker:
-        model_name = "local-test-reranker"
-
-        def __init__(self):
-            self.documents = []
-
-        def rerank(self, query, documents):
-            assert query == "query"
-            self.documents.append(documents)
-            return [0.25]
-
-    reranker = _LocalReranker()
-    kernel = SearchKernel.build(
-        record_hydrator=lambda identity: record,
-        keyword_store=_KeywordStore(),
-        reranker=reranker,
-        search_config=RecordSearchConfig(rerank_budget=1),
-    )
-
-    results = await kernel.search_anything("query", k=1)
-
-    assert results[0].score == pytest.approx(0.25)
-    assert reranker.documents[0] == ["Low priority title\nrecord body"]
-
-
-@pytest.mark.asyncio
-async def test_search_kernel_builds_without_reranker():
-    source = _Source(
-        "memory",
-        ScoredRef(
-            source_id="memory-1",
-            score=0.2,
-            source_kind="memory",
-            metadata={"text": "a memory"},
-        ),
-    )
-    kernel = SearchKernel.build(sources=[source])
-
-    results = await kernel.search_anything("query", k=1)
-
-    assert results[0].record_id == "memory-1"
-    assert results[0].score == pytest.approx(1 / 61)
-    assert results[0].metadata == {"text": "a memory", "source_score": 0.2}
-
-
-@pytest.mark.asyncio
-async def test_local_search_source_exposes_canonical_record_identity_and_metadata():
-    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
-    record = Record(
-        source_kind="note",
-        source_id="record-1",
-        title="Local result",
-        body="local result",
-        created_at=timestamp,
-        updated_at=timestamp,
-        metadata={"file_path": "notes.md"},
-    )
-
-    class _Orchestrator:
-        def __init__(self):
-            self.calls = []
-
-        async def search(
-            self,
-            query: str,
-            *,
-            limit: int,
-            filters: dict[str, Any] | None,
-        ):
-            self.calls.append((query, limit, filters))
-            return RecordSearchOutcome(
-                results=(
-                    RecordSearchResult(
-                        record=record,
-                        score=0.9,
-                        provenance=SearchResultProvenance(),
-                    ),
-                )
-            )
-
-    orchestrator = _Orchestrator()
-    source = LocalSearchSource(orchestrator)  # type: ignore[arg-type]
-
-    results = await source.search(
+    assert isinstance(kernel, SearchAPI)
+    outcome = await kernel.search(
         "query",
-        3,
-        filters={"source_filter": ["note"]},
+        filters={"statuses": ["active"]},
+        limit=1,
     )
 
-    assert list(results) == [
-        ScoredRef(
-            source_id="record-1",
-            score=0.9,
-            source_kind="note",
-            metadata={
-                "file_path": "notes.md",
-                "text": "local result",
-                "title": "Local result",
-                "uri": None,
-                "storage_key": record.storage_key,
-                "provenance": {"strategies": []},
-            },
-        )
-    ]
-    assert orchestrator.calls == [("query", 3, {"source_kinds": ["note"]})]
+    assert isinstance(outcome, RecordSearchOutcome)
+    assert len(outcome.results) == 1
+    result = outcome.results[0]
+    assert isinstance(result, RecordSearchResult)
+    assert result.record is record
+    assert result.record.identity == RecordIdentity("workspace", "note", "record-1")
+    assert result.storage_key == record.storage_key
+    assert result.provenance.record_identity == result.record.identity
+
+
+@pytest.mark.asyncio
+async def test_public_search_preserves_degraded_outcome_shape() -> None:
+    kernel = SearchKernel.build(
+        record_hydrator=lambda identity: None,
+    )
+
+    outcome = await kernel.search("query", limit=1)
+
+    assert isinstance(outcome, RecordSearchOutcome)
+    assert outcome.results == ()
+    assert outcome.failures == ()

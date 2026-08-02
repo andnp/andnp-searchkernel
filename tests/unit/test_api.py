@@ -17,6 +17,7 @@ from searchkernel.ports import (
 )
 from searchkernel.runtime import reindex
 from searchkernel.search import orchestrator, query_plan
+from searchkernel.search.record_pipeline import RecordSearchOutcome, RecordSearchResult
 from searchkernel.storage import db
 from searchkernel.utils import similarity
 
@@ -27,6 +28,7 @@ API_EXPORTS = {
     "QueryPlan": query_plan.QueryPlan,
     "Record": models.Record,
     "RecordHit": models.RecordHit,
+    "RecordIdentity": models.RecordIdentity,
     "ReindexError": reindex.ReindexError,
     "ReindexProgress": reindex.ReindexProgress,
     "ReindexRoutine": reindex.ReindexRoutine,
@@ -34,7 +36,9 @@ API_EXPORTS = {
     "SearchAvailability": SearchAvailability,
     "SearchOrchestrator": orchestrator.SearchOrchestrator,
     "SearchFilters": models.SearchFilters,
-    "SearchResult": models.SearchResult,
+    "SearchResultProvenance": models.SearchResultProvenance,
+    "RecordSearchOutcome": RecordSearchOutcome,
+    "RecordSearchResult": RecordSearchResult,
     "SemanticInput": semantic.SemanticInput,
     "cosine_similarity": similarity.cosine_similarity,
 }
@@ -79,8 +83,8 @@ def reject_markdown_import(name, globals=None, locals=None, fromlist=(), level=0
 
 builtins.__import__ = reject_markdown_import
 
-from searchkernel.api import SearchKernel
+from searchkernel.api import SearchOrchestrator
 
-assert SearchKernel is not None
+assert SearchOrchestrator is not None
 """
     subprocess.run([sys.executable, "-c", script], check=True)

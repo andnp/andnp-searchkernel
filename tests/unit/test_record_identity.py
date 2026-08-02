@@ -4,9 +4,8 @@ import pytest
 
 from searchkernel.domain import (
     Record,
+    RecordHit,
     RecordIdentity,
-    ScoredRef,
-    SearchResult,
     canonical_storage_key,
 )
 
@@ -36,12 +35,11 @@ def test_identity_rejects_non_canonical_storage_key_encoding() -> None:
         ("workspace-a", "note", "same"),
     ],
 )
-def test_results_expose_the_same_canonical_identity(value: tuple[str | None, str, str]) -> None:
+def test_record_hits_expose_the_canonical_identity(value: tuple[str | None, str, str]) -> None:
     workspace_id, source_kind, source_id = value
     expected = RecordIdentity(workspace_id, source_kind, source_id)
 
-    assert SearchResult(source_id, 0.5, source_kind, workspace_id=workspace_id).identity == expected
-    assert ScoredRef(source_id, 0.5, source_kind, workspace_id=workspace_id).identity == expected
+    assert RecordHit(expected, 0.5).identity == expected
     assert canonical_storage_key("workspace-a", "note", "same") != (
         canonical_storage_key("workspace-b", "note", "same")
     )
