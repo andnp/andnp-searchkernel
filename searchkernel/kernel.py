@@ -133,9 +133,7 @@ class SearchKernel:
 
         Pass the record stores and ``record_hydrator`` to compose the canonical
         local record pipeline. ``orchestrator`` remains available for callers
-        that already own a canonical ``SearchOrchestrator``; legacy chunk
-        orchestrators must be wrapped explicitly with
-        ``LegacyLocalOrchestratorAdapter``.
+        that already own a canonical ``SearchOrchestrator``.
         """
         effective_reranker = reranker
         if effective_reranker is None:
