@@ -159,6 +159,29 @@ def test_vector_metadata_and_snapshot_cache_follow_vector_epoch() -> None:
     connection.set_trace_callback(None)
 
 
+def test_auto_vector_engine_reuses_selection_until_vector_epoch_changes(
+    monkeypatch,
+) -> None:
+    backend = LocalRecordBackend()
+    vector = LocalVectorStore(backend, engine="auto")
+    record = _record("one", [1.0, 0.0])
+    backend.upsert([record], "model", 2)
+
+    calls = 0
+    vector_count = backend.vector_count
+
+    def counted_vector_count(model_name: str, dim: int) -> int:
+        nonlocal calls
+        calls += 1
+        return vector_count(model_name, dim)
+
+    monkeypatch.setattr(backend, "vector_count", counted_vector_count)
+    vector.search([1.0, 0.0], 1, model_name="model", dim=2)
+    vector.search([1.0, 0.0], 1, model_name="model", dim=2)
+
+    assert calls == 1
+
+
 def test_snapshot_reload_corruption_and_deletion(tmp_path: Path) -> None:
     db_path = tmp_path / "records.db"
     backend = LocalRecordBackend(db_path)

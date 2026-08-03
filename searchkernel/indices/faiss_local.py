@@ -92,12 +92,8 @@ class FAISSLocalVectorStore:
         query = PackedVectorCodec.normalize(
             query_vector, dim, context="query vector"
         )
-        if self._backend.vector_count(model_name, dim) == 0:
-            return []
         try:
             state = self._get_state(model_name, dim)
-            if state.epoch != self._backend.vector_epoch():
-                state = self._get_state(model_name, dim)
             return self._search_state(
                 state,
                 query,

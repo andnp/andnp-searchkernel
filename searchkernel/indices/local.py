@@ -1346,18 +1346,22 @@ class LocalRecordBackend:
         self,
         identities: Sequence[RecordIdentity],
     ) -> dict[str, Record | None]:
-        """Hydrate canonical identities with one record query."""
+        """Hydrate canonical identities with bounded record queries."""
         keys = list(dict.fromkeys(identity.storage_key for identity in identities))
         if not keys:
             return {}
-        placeholders = ",".join("?" for _ in keys)
         with self._lock:
             conn = self._db.get_connection()
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                f"SELECT * FROM local_records WHERE storage_key IN ({placeholders})",
-                keys,
-            ).fetchall()
+            rows: list[sqlite3.Row] = []
+            for key_chunk in self._key_chunks(keys):
+                placeholders = ",".join("?" for _ in key_chunk)
+                rows.extend(
+                    conn.execute(
+                        f"SELECT * FROM local_records WHERE storage_key IN ({placeholders})",
+                        key_chunk,
+                    ).fetchall()
+                )
         records = {
             row["storage_key"]: Record(
                 workspace_id=row["workspace_id"],
@@ -1926,6 +1930,9 @@ class LocalVectorStore:
         self._last_engine_name = (
             "faiss" if self._engine == "faiss" else "sqlite-exact"
         )
+        self._selection_key: tuple[str, int] | None = None
+        self._selection_epoch: int | None = None
+        self._selection_use_faiss: bool | None = None
 
     @property
     def engine_name(self) -> str:
@@ -1936,11 +1943,24 @@ class LocalVectorStore:
         model_name: str,
         dim: int,
     ) -> Any | None:
-        use_faiss = self._engine == "faiss" or (
-            self._engine == "auto"
-            and self._backend.vector_count(model_name, dim)
-            >= self._backend.faiss_threshold
-        )
+        use_faiss = self._engine == "faiss"
+        if self._engine == "auto":
+            key = (model_name, dim)
+            selection_epoch = self._backend.vector_epoch()
+            if (
+                self._selection_key == key
+                and self._selection_epoch == selection_epoch
+                and self._selection_use_faiss is not None
+            ):
+                use_faiss = self._selection_use_faiss
+            else:
+                use_faiss = (
+                    self._backend.vector_count(model_name, dim)
+                    >= self._backend.faiss_threshold
+                )
+                self._selection_key = key
+                self._selection_epoch = selection_epoch
+                self._selection_use_faiss = use_faiss
         if not use_faiss:
             self._last_engine_name = "sqlite-exact"
             return None

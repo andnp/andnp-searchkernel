@@ -150,6 +150,17 @@ def test_local_batch_hydration_and_graph_preserve_canonical_keys(tmp_path) -> No
     }
 
 
+def test_local_batch_hydration_chunks_large_identity_lists(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [_record("note", f"record-{index}", "body") for index in range(901)]
+    backend.index(records)
+
+    hydrated = backend.hydrate_records([record.identity for record in records])
+
+    assert list(hydrated) == [record.storage_key for record in records]
+    assert all(hydrated[record.storage_key] is not None for record in records)
+
+
 def test_local_graph_top_neighbors_are_bounded_and_deterministic(tmp_path) -> None:
     backend, _keyword, _vector, graph = _backend(tmp_path)
     source = _record("note", "source", "source")
