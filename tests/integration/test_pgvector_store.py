@@ -825,6 +825,37 @@ class TestKeywordStore:
         assert len(results) > 0
         assert results[0][0] == "test:3"
 
+    def test_keyword_search_weights_title_above_indexed_body(self, pg_conn):
+        """Title matches rank above equivalent indexed-body matches."""
+        now = datetime.now(UTC)
+        records = [
+            Record(
+                source_kind="test",
+                source_id="title-match",
+                title="PostgreSQL",
+                body="A guide to database systems.",
+                created_at=now,
+                updated_at=now,
+            ),
+            Record(
+                source_kind="test",
+                source_id="body-match",
+                title="Database systems",
+                body="PostgreSQL",
+                created_at=now,
+                updated_at=now,
+            ),
+        ]
+        vector_store = PGVectorStore(pg_conn)
+        keyword_store = PGKeywordStore(pg_conn)
+
+        vector_store.upsert(records, model_name="test-model", dim=4)
+        keyword_store.index(records)
+
+        results = keyword_store.search("PostgreSQL", k=2)
+
+        assert [hit.source_id for hit in results] == ["title-match", "body-match"]
+
     def test_keyword_index_ignores_missing_records(self, pg_conn):
         """Test indexing an unknown record does not create searchable data."""
         record = Record(

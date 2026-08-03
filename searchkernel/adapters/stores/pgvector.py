@@ -1424,17 +1424,30 @@ class PGKeywordStore:
             where_clause = "AND " + " AND ".join(where_parts)
 
             sql = f"""
+                WITH search_query AS (
+                    SELECT plainto_tsquery('english', %s) AS query
+                )
                 SELECT r.workspace_id, r.source_kind, r.source_id,
-                       ts_rank(r.tsvector_body,
-                               plainto_tsquery('english', %s)) AS relevance,
+                       ts_rank(
+                           setweight(to_tsvector('english', r.title), 'A') ||
+                           setweight(
+                               to_tsvector(
+                                   'english',
+                                   COALESCE(NULLIF(r.indexed_text, ''), r.body)
+                               ),
+                               'B'
+                           ),
+                           search_query.query
+                       ) AS relevance,
                        r.record_id
                 FROM records AS r
-                WHERE r.tsvector_body @@ plainto_tsquery('english', %s)
+                CROSS JOIN search_query
+                WHERE r.tsvector_body @@ search_query.query
                 {where_clause}
                 ORDER BY relevance DESC, r.record_id ASC
                 LIMIT %s;
             """
-            params = [query, query, *filter_params, k]
+            params = [query, *filter_params, k]
 
             cursor.execute(sql, params)
             results = cursor.fetchall()
