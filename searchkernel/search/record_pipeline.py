@@ -825,9 +825,18 @@ class RecordSearchPipeline:
         cached: list[tuple[RecordSearchCandidate, Record | None]] = []
         misses: list[RecordSearchCandidate] = []
         if self._hydration_cache is not None and self._policy_version is not None:
+            hydration_versions = await self._hydration_versions_for(
+                [candidate.identity for candidate in candidates],
+                diagnostics,
+            )
             for candidate in candidates:
                 try:
-                    version = await self._hydration_version_for(candidate.identity)
+                    if candidate.storage_key in hydration_versions:
+                        version = hydration_versions[candidate.storage_key]
+                    else:
+                        version = await self._hydration_version_for(
+                            candidate.identity
+                        )
                 except Exception as error:  # noqa: BLE001 - cache is optional
                     misses.append(candidate)
                     diagnostics.append(
@@ -941,6 +950,28 @@ class RecordSearchPipeline:
             for candidate in candidates
             if candidate.storage_key in hydrated_by_key
         ]
+
+    async def _hydration_versions_for(
+        self,
+        identities: Sequence[RecordIdentity],
+        diagnostics: list[str],
+    ) -> Mapping[str, object | None]:
+        provider = self._hydration_version_provider
+        if provider is None or self._hydration_version is not None:
+            return {}
+        batch_provider = getattr(provider, "hydration_versions", None)
+        if not callable(batch_provider):
+            return {}
+        try:
+            versions = await _call_async(batch_provider, identities)
+            if not isinstance(versions, Mapping):
+                raise TypeError("hydration_versions must return a mapping")
+            return cast(Mapping[str, object | None], versions)
+        except Exception as error:  # noqa: BLE001 - scalar fallback preserves compatibility
+            diagnostics.append(
+                f"hydration_cache:batch_version_fallback:{type(error).__name__}"
+            )
+            return {}
 
     async def _hydration_version_for(
         self,

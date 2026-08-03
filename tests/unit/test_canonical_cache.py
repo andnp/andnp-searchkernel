@@ -434,3 +434,65 @@ async def test_record_pipeline_hydration_cache_uses_version_and_policy() -> None
     hydrator.record_epoch = 2
     await pipeline.async_search("query")
     assert hydrator.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_record_pipeline_uses_batch_hydration_versions_before_scalar_provider() -> None:
+    record = Record(
+        source_kind="note",
+        source_id="record",
+        title="title",
+        body="body",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    class Hydrator:
+        def __init__(self) -> None:
+            self.hydrate_calls = 0
+
+        def hydrate_record(self, identity: RecordIdentity) -> Record:
+            self.hydrate_calls += 1
+            return record
+
+    class VersionProvider:
+        def __init__(self) -> None:
+            self.batch_calls = 0
+            self.scalar_calls = 0
+
+        def hydration_versions(
+            self, identities: list[RecordIdentity]
+        ) -> dict[str, object]:
+            self.batch_calls += 1
+            return {identity.storage_key: 1 for identity in identities}
+
+        def __call__(self, identity: RecordIdentity) -> object:
+            self.scalar_calls += 1
+            return 99
+
+    class Keyword:
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, Any] | None = None,
+        ) -> list[RecordHit]:
+            return [RecordHit(RecordIdentity(None, "note", "record"), 1.0)]
+
+    hydrator = Hydrator()
+    version_provider = VersionProvider()
+    pipeline = RecordSearchPipeline(
+        keyword_store=Keyword(),
+        hydrator=hydrator,
+        hydration_cache=HydrationCache(),
+        policy_version="policy/v1",
+        hydration_version_provider=version_provider,
+    )
+
+    first = await pipeline.async_search("query")
+    second = await pipeline.async_search("query")
+
+    assert len(first.results) == len(second.results) == 1
+    assert version_provider.batch_calls == 2
+    assert version_provider.scalar_calls == 0
+    assert hydrator.hydrate_calls == 1
