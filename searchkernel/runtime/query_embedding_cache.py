@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
@@ -10,6 +11,9 @@ from dataclasses import dataclass, field
 from threading import Event, Lock
 
 from searchkernel.domain import Vector
+from searchkernel.ports.stores import CacheStore
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_query(query: str) -> str:
@@ -55,6 +59,8 @@ class QueryEmbeddingCache:
         ttl_seconds: float = 300.0,
         max_entries: int = 128,
         clock: Callable[[], float] = time.monotonic,
+        store: CacheStore | None = None,
+        epoch: int = 0,
     ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be > 0")
@@ -63,6 +69,8 @@ class QueryEmbeddingCache:
         self._ttl_seconds = ttl_seconds
         self._max_entries = max_entries
         self._clock = clock
+        self._store = store
+        self._epoch = epoch
         self._cache: OrderedDict[tuple[str, str], _CachedEmbedding] = OrderedDict()
         self._inflight: dict[tuple[str, str], _InFlightEmbedding] = {}
         self._lock = Lock()
@@ -150,6 +158,22 @@ class QueryEmbeddingCache:
         with self._lock:
             self._cache.clear()
 
+    def invalidate_epoch(self, epoch: int) -> None:
+        """Discard entries from the supplied epoch or earlier.
+
+        Clears the whole in-memory cache, since entries aren't tracked
+        per-epoch locally; the backing store (if any) prunes precisely.
+        """
+        with self._lock:
+            self._cache.clear()
+        if self._store is not None:
+            try:
+                self._store.invalidate_epoch(epoch)
+            except Exception:
+                logger.warning(
+                    "query_embedding_cache_store_invalidate_failed", exc_info=True
+                )
+
     def _key(
         self,
         model_name: str | None,
@@ -180,11 +204,24 @@ class QueryEmbeddingCache:
         with self._lock:
             self._evict_expired(now)
             cached = self._cache.get(key)
-            if cached is None:
-                return None
+            if cached is not None:
+                self._hits += 1
+                self._cache.move_to_end(key)
+                return list(cached.embedding)
+        embedding = self._load_from_store(key)
+        if embedding is None:
+            return None
+        with self._lock:
             self._hits += 1
+            self._cache[key] = _CachedEmbedding(
+                embedding=embedding,
+                expires_at=now + self._ttl_seconds,
+            )
             self._cache.move_to_end(key)
-            return list(cached.embedding)
+            while len(self._cache) > self._max_entries:
+                self._cache.popitem(last=False)
+                self._evictions += 1
+        return list(embedding)
 
     def _complete_success(
         self,
@@ -205,6 +242,7 @@ class QueryEmbeddingCache:
                 self._evictions += 1
             self._inflight.pop(key, None)
             inflight.completed.set()
+        self._save_to_store(key, embedding)
 
     def _complete_failure(
         self,
@@ -237,6 +275,34 @@ class QueryEmbeddingCache:
     def _record_compute_time(self, elapsed: float) -> None:
         with self._lock:
             self._compute_time_seconds += elapsed
+
+    def _store_key(self, key: tuple[str, str]) -> str:
+        namespace, normalized_query = key
+        return f"query_embedding:{namespace}:{normalized_query}"
+
+    def _load_from_store(self, key: tuple[str, str]) -> tuple[float, ...] | None:
+        if self._store is None:
+            return None
+        try:
+            value = self._store.get(self._store_key(key))
+        except Exception:
+            logger.warning("query_embedding_cache_store_get_failed", exc_info=True)
+            return None
+        if value is None:
+            return None
+        try:
+            return tuple(float(item) for item in value)
+        except (TypeError, ValueError):
+            logger.warning("query_embedding_cache_store_value_invalid")
+            return None
+
+    def _save_to_store(self, key: tuple[str, str], embedding: tuple[float, ...]) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.set(self._store_key(key), list(embedding), self._epoch)
+        except Exception:
+            logger.warning("query_embedding_cache_store_set_failed", exc_info=True)
 
 
 async def _maybe_await(value: Vector | Awaitable[Vector]) -> Vector:
