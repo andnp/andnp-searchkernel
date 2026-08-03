@@ -1521,6 +1521,73 @@ async def test_batch_graph_normalizes_legacy_source_id_seed_keys() -> None:
     assert outcome.results[1].provenance.strategies == ("graph",)
 
 
+@pytest.mark.parametrize(
+    ("depth", "expected_ids"),
+    [(1, ["seed", "one-hop"]), (2, ["seed", "one-hop", "two-hop"])],
+)
+async def test_graph_retrieval_recovers_neighbors_from_partial_batch(
+    depth: int,
+    expected_ids: list[str],
+) -> None:
+    records = {
+        record_id: _record(record_id)
+        for record_id in ("seed", "one-hop", "two-hop")
+    }
+
+    class Graph:
+        def neighbors_many(
+            self,
+            identities: Sequence[RecordIdentity],
+            *,
+            depth: int,
+        ) -> dict[str, list[GraphNeighbor]]:
+            return {}
+
+        def neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+            max_neighbors: int | None = None,
+        ) -> list[GraphNeighbor]:
+            assert isinstance(record_id, RecordIdentity)
+            assert max_neighbors == 10
+            if record_id.source_id != "seed":
+                return []
+            neighbors = [
+                GraphNeighbor(
+                    records["one-hop"].identity,
+                    "links_to",
+                    1.0,
+                )
+            ]
+            if depth > 1:
+                neighbors.append(
+                    GraphNeighbor(
+                        records["two-hop"].identity,
+                        "links_to",
+                        0.5,
+                    )
+                )
+            return neighbors
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("seed", 1.0)]),
+        graph_store=Graph(),
+        hydrator=_hydrator(records),
+        config=RecordSearchConfig(graph_depth=depth),
+    )
+
+    outcome = await pipeline.async_search("what is linked to the seed?", limit=3)
+
+    assert {result.record_id for result in outcome.results} == set(expected_ids)
+    assert {
+        result.record_id
+        for result in outcome.results
+        if result.provenance.strategies == ("graph",)
+    } == set(expected_ids[1:])
+
+
 async def test_scalar_and_batch_hydration_have_identical_results_and_provenance() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b", "c")}
     keyword_results: list[RecordHit | tuple[str, float]] = [
