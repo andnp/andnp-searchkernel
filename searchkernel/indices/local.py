@@ -59,6 +59,18 @@ _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
+def _natural_language_match_query(
+    query: str,
+    match_query: str,
+) -> str | None:
+    if '"' in query or _keyword_scoring.looks_like_artifact_query(query):
+        return None
+    terms = match_query.split()
+    if len(terms) < 2:
+        return None
+    return " OR ".join(terms)
+
+
 class _VectorSnapshotCache(dict[tuple[str, int], VectorSnapshot]):
     """Clear metadata alongside snapshots when storage is externally reset."""
 
@@ -847,73 +859,82 @@ class LocalRecordBackend:
         match_query = _keyword_scoring.sanitize_fts_query(query)
         if match_query == '""':
             return []
-        if _keyword_scoring.looks_like_artifact_query(query):
-            match_query = '"' + match_query.replace('"', "") + '"'
-        clauses, parameters = self._keyword_filter_sql(filters)
-        clauses.insert(0, f"{_LOCAL_FTS_TABLE} MATCH ?")
-        parameters.insert(0, match_query)
         needs_artifact_rerank = _keyword_scoring.looks_like_artifact_query(query)
+        if needs_artifact_rerank:
+            match_query = '"' + match_query.replace('"', "") + '"'
         limit = k
         if needs_artifact_rerank:
             limit = max(k, math.ceil(k * self._keyword_overfetch_multiplier))
-        with self._lock:
-            conn = self._db.get_connection()
-            rows = conn.execute(
-                f"""
-                SELECT
-                    r.storage_key,
-                    r.workspace_id,
-                    r.source_kind,
-                    r.source_id,
-                    r.status,
-                    r.title,
-                    r.body,
-                    r.indexed_text,
-                    r.uri,
-                    r.keywords,
-                    r.metadata,
-                    -bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0) AS score
-                FROM {_LOCAL_FTS_TABLE}
-                JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
-                WHERE {" AND ".join(clauses)}
-                ORDER BY score DESC, r.storage_key ASC
-                LIMIT ?
-                """,
-                (*parameters, limit if not filters else -1),
-            ).fetchall()
-        hits: list[RecordHit] = []
-        for row in rows:
-            if filters and not self._matches(row, filters):
-                continue
-            score = float(row["score"])
-            if needs_artifact_rerank:
-                normalized_query = _keyword_scoring.normalize_artifact_value(query)
-                score += _keyword_scoring.score_field_aware_match(
-                    query,
-                    content=row["indexed_text"] or row["body"],
-                    title=row["title"],
-                    headers=row["keywords"],
-                    source_file=row["uri"] or "",
+        def fetch_rows(current_query: str) -> list[sqlite3.Row]:
+            clauses, parameters = self._keyword_filter_sql(filters)
+            clauses.insert(0, f"{_LOCAL_FTS_TABLE} MATCH ?")
+            parameters.insert(0, current_query)
+            with self._lock:
+                conn = self._db.get_connection()
+                return conn.execute(
+                    f"""
+                    SELECT
+                        r.storage_key,
+                        r.workspace_id,
+                        r.source_kind,
+                        r.source_id,
+                        r.status,
+                        r.title,
+                        r.body,
+                        r.indexed_text,
+                        r.uri,
+                        r.keywords,
+                        r.metadata,
+                        -bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0) AS score
+                    FROM {_LOCAL_FTS_TABLE}
+                    JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
+                    WHERE {" AND ".join(clauses)}
+                    ORDER BY score DESC, r.storage_key ASC
+                    LIMIT ?
+                    """,
+                    (*parameters, limit if not filters else -1),
+                ).fetchall()
+
+        def build_hits(rows: Sequence[sqlite3.Row]) -> list[RecordHit]:
+            hits: list[RecordHit] = []
+            for row in rows:
+                if filters and not self._matches(row, filters):
+                    continue
+                score = float(row["score"])
+                if needs_artifact_rerank:
+                    normalized_query = _keyword_scoring.normalize_artifact_value(query)
+                    score += _keyword_scoring.score_field_aware_match(
+                        query,
+                        content=row["indexed_text"] or row["body"],
+                        title=row["title"],
+                        headers=row["keywords"],
+                        source_file=row["uri"] or "",
+                    )
+                    score += _keyword_scoring.score_artifact_match(
+                        normalized_query,
+                        Path(normalized_query).name,
+                        row["body"],
+                        row["title"],
+                        row["keywords"],
+                        row["uri"] or "",
+                    )
+                hits.append(
+                    RecordHit(
+                        RecordIdentity(
+                            row["workspace_id"],
+                            row["source_kind"],
+                            row["source_id"],
+                        ),
+                        score,
+                    )
                 )
-                score += _keyword_scoring.score_artifact_match(
-                    normalized_query,
-                    Path(normalized_query).name,
-                    row["body"],
-                    row["title"],
-                    row["keywords"],
-                    row["uri"] or "",
-                )
-            hits.append(
-                RecordHit(
-                    RecordIdentity(
-                        row["workspace_id"],
-                        row["source_kind"],
-                        row["source_id"],
-                    ),
-                    score,
-                )
-            )
-        hits.sort(key=lambda item: (-item.score, item.storage_key))
+            hits.sort(key=lambda item: (-item.score, item.storage_key))
+            return hits
+
+        hits = build_hits(fetch_rows(match_query))
+        fallback_query = _natural_language_match_query(query, match_query)
+        if not hits and fallback_query is not None:
+            hits = build_hits(fetch_rows(fallback_query))
         return hits[:k]
 
     def _search_keyword_fallback(
