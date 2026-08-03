@@ -377,6 +377,42 @@ def test_keyword_search_applies_metadata_and_exclusion_filters(tmp_path) -> None
     ]
 
 
+@pytest.mark.asyncio
+async def test_scoped_keyword_candidates_match_public_pipeline_boundary(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    kept = _record(
+        "memory",
+        "backlog-kept",
+        "backlog",
+        workspace_id="workspace",
+        metadata={"project_id": "keep"},
+    )
+    excluded = [
+        _record(
+            "memory",
+            f"backlog-drop-{index}",
+            "backlog",
+            workspace_id="workspace",
+            metadata={"project_id": "drop"},
+        )
+        for index in range(4)
+    ]
+    backend.index([kept, *excluded])
+    keyword = LocalKeywordStore(backend)
+    filters = {"workspace_id": "workspace", "project_filter": ["keep"]}
+
+    fts_candidates = keyword.search("backlog", 1, filters)
+    outcome = await SearchOrchestrator(
+        hydrator=backend,
+        keyword_store=keyword,
+    ).search("backlog", limit=1, filters=filters)
+
+    assert [hit.storage_key for hit in fts_candidates] == [kept.storage_key]
+    assert [result.storage_key for result in outcome.results] == [
+        kept.storage_key
+    ]
+
+
 def test_keyword_search_rejects_bare_candidate_ids(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     record = _record("note", "same", "common")

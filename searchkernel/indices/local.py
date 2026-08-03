@@ -936,6 +936,34 @@ class LocalRecordBackend:
             ))
             parameters.extend(source_kinds)
 
+        project_values = filters.get("project_ids")
+        if project_values is None:
+            project_values = filters.get("project_id")
+        if project_values is None:
+            project_values = filters.get("project_filter")
+        if project_values is not None:
+            project_values = LocalRecordBackend._filter_values(project_values)
+            if project_values:
+                clauses.append(
+                    "json_extract(r.metadata, '$.project_id') IN ({})".format(
+                        ", ".join("?" for _ in project_values)
+                    )
+                )
+                parameters.extend(str(value) for value in project_values)
+
+        excluded_projects = filters.get("excluded_projects")
+        if excluded_projects is None:
+            excluded_projects = filters.get("excluded_project_ids")
+        if excluded_projects:
+            excluded_projects = LocalRecordBackend._filter_values(excluded_projects)
+            clauses.append(
+                "(json_extract(r.metadata, '$.project_id') IS NULL OR "
+                "json_extract(r.metadata, '$.project_id') NOT IN ({}))".format(
+                    ", ".join("?" for _ in excluded_projects)
+                )
+            )
+            parameters.extend(str(value) for value in excluded_projects)
+
         candidate_keys = filters.get("candidate_ids")
         if candidate_keys is None:
             candidate_keys = filters.get("candidate_storage_keys")
