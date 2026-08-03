@@ -6,13 +6,14 @@ import asyncio
 from collections.abc import Sequence
 from typing import Protocol
 
-from searchkernel.domain import Cursor, Record
+from searchkernel.domain import Chunk, Cursor, Record
 from searchkernel.indexing.semantic import (
     EmbeddingCache,
     SemanticInput,
     SemanticWorkPlanner,
     semantic_input_for_record,
 )
+from searchkernel.ports.chunking import RecordChunker
 from searchkernel.ports.content_source import (
     IngestionFailureMode,
     IngestionReceipt,
@@ -80,6 +81,7 @@ class SemanticRecordIngestor:
         keyword_store: KeywordStore,
         vector_store: VectorStore,
         embedding_cache: EmbeddingCache,
+        chunker: RecordChunker | None = None,
         encoder_namespace: str | None = None,
         embedding_batch_size: int = 32,
     ) -> None:
@@ -87,6 +89,7 @@ class SemanticRecordIngestor:
         self.keyword_store = keyword_store
         self.vector_store = vector_store
         self.embedding_cache = embedding_cache
+        self.chunker = chunker
         self.encoder_namespace = (
             encoder_namespace
             or getattr(embedding_cache, "encoder_namespace", None)
@@ -112,9 +115,10 @@ class SemanticRecordIngestor:
         if failure_mode not in {"strict", "lenient"}:
             raise ValueError("failure_mode must be 'strict' or 'lenient'")
 
-        records = tuple(records)
-        if not records:
+        source_records = tuple(records)
+        if not source_records:
             return IngestionReceipt("", None, checkpoint, ())
+        records = _expand_records(source_records, self.chunker)
 
         keyword_task = asyncio.create_task(
             self._index_keyword_stage(records, failure_mode=failure_mode)
@@ -138,11 +142,15 @@ class SemanticRecordIngestor:
             raise
 
         return _merge_stage_outcomes(
-            records,
+            source_records,
             checkpoint=checkpoint,
             failure_mode=failure_mode,
-            keyword_outcomes=keyword_outcomes,
-            semantic_outcomes=semantic_outcomes,
+            keyword_outcomes=_collapse_outcomes(
+                source_records, records, keyword_outcomes
+            ),
+            semantic_outcomes=_collapse_outcomes(
+                source_records, records, semantic_outcomes
+            ),
         )
 
     async def _index_keyword_stage(
@@ -450,6 +458,80 @@ def _workspace_id(records: Sequence[Record]) -> str | None:
     if len(values) == 1:
         return next(iter(values))
     return None
+
+
+def _expand_records(
+    records: Sequence[Record],
+    chunker: RecordChunker | None,
+) -> tuple[Record, ...]:
+    if chunker is None:
+        return tuple(records)
+    expanded: list[Record] = []
+    for record in records:
+        expanded.append(record)
+        expanded.extend(_chunk_record(record, chunk) for chunk in chunker.chunk_record(record))
+    return tuple(expanded)
+
+
+def _chunk_record(record: Record, chunk: Chunk) -> Record:
+    metadata = dict(record.metadata)
+    metadata.update(
+        {
+            "_searchkernel_chunk": True,
+            "_chunk_id": chunk.chunk_id,
+            "_chunk_index": chunk.chunk_index,
+            "_chunk_parent_storage_key": record.storage_key,
+            "_chunk_metadata": dict(chunk.metadata),
+        }
+    )
+    return Record(
+        workspace_id=record.workspace_id,
+        source_kind=record.source_kind,
+        source_id=f"{record.storage_key}#chunk:{chunk.chunk_id}",
+        title=record.title,
+        body=chunk.content,
+        indexed_text=chunk.content,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        metadata=metadata,
+        uri=record.uri,
+        status=record.status,
+    )
+
+
+def _collapse_outcomes(
+    source_records: Sequence[Record],
+    indexed_records: Sequence[Record],
+    outcomes: Sequence[RecordIngestionResult],
+) -> tuple[RecordIngestionResult, ...]:
+    by_parent: dict[str, list[RecordIngestionResult]] = {
+        record.storage_key: [] for record in source_records
+    }
+    for record, outcome in zip(indexed_records, outcomes, strict=False):
+        parent_key = record.metadata.get("_chunk_parent_storage_key", record.storage_key)
+        by_parent.setdefault(parent_key, []).append(outcome)
+    collapsed: list[RecordIngestionResult] = []
+    for record in source_records:
+        related = by_parent[record.storage_key]
+        failed = next((result for result in related if not result.successful), None)
+        if not related:
+            failed = RecordIngestionResult(
+                source_kind=record.source_kind,
+                source_id=record.source_id,
+                workspace_id=record.workspace_id,
+                status="failed",
+                error="chunk stage did not report an outcome",
+            )
+        collapsed.append(
+            RecordIngestionResult(
+                source_kind=record.source_kind,
+                source_id=record.source_id,
+                workspace_id=record.workspace_id,
+                status="failed" if failed else "committed",
+                error=failed.error if failed else None,
+            )
+        )
+    return tuple(collapsed)
 
 
 __all__ = ["SemanticRecordIngestor"]

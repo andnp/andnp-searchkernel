@@ -8,6 +8,7 @@ Dependency rule: ports import only from domain/ and stdlib/typing.
 
 from searchkernel.domain import GraphEdge, GraphNeighbor, RecordHit, SearchFilters
 from searchkernel.ports.candidate_filter import CandidateFilterSupport
+from searchkernel.ports.chunking import RecordChunker
 from searchkernel.ports.chunking_config import ChunkTuningConfig
 from searchkernel.ports.content_source import (
     AsyncRecordIngestor,
@@ -135,6 +136,7 @@ __all__ = [
     "ModelValidationStore",
     "OrchestratorConfig",
     "ParentRecordExpander",
+    "RecordChunker",
     "RecordHit",
     "RecordIngestionResult",
     "RecordIngestionStatus",
