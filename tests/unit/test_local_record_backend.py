@@ -267,6 +267,28 @@ def test_keyword_search_recovers_bounded_technical_typos(tmp_path) -> None:
     assert backend.search_keyword("reciprical.py", 10) == []
 
 
+def test_keyword_fuzzy_search_includes_uri_and_keyword_fields(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    keyword_record = _record(
+        "note",
+        "keyword-only",
+        "Unrelated body",
+        metadata={"keywords": ["reciprocal", "rank", "fusion"]},
+    )
+    uri_record = _record(
+        "note",
+        "uri-only",
+        "Unrelated body",
+        uri="docs/reciprocal-rank-fusion.md",
+    )
+    backend.index([keyword_record, uri_record])
+
+    assert {
+        hit.source_id
+        for hit in backend.search_keyword("reciprical rank fuson", 10)
+    } == {"keyword-only", "uri-only"}
+
+
 def test_keyword_search_applies_filters_to_natural_language_fallback(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     records = [

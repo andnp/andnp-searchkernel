@@ -1109,7 +1109,7 @@ class LocalRecordBackend:
             rows = conn.execute(
                 f"""
                 SELECT storage_key, workspace_id, source_kind, source_id, status,
-                       title, body, indexed_text, uri, metadata
+                       title, body, indexed_text, uri, keywords, metadata
                 FROM local_records r
                 WHERE {" AND ".join(clauses)}
                 LIMIT ?
@@ -1122,7 +1122,14 @@ class LocalRecordBackend:
         for row in rows:
             if filters and not self._matches(row, filters):
                 continue
-            text = f"{row['title']} {row['indexed_text'] or row['body']}"
+            text = " ".join(
+                (
+                    row["title"] or "",
+                    row["indexed_text"] or row["body"] or "",
+                    row["uri"] or "",
+                    row["keywords"] or "",
+                )
+            )
             tokens = list(dict.fromkeys(_TOKEN_RE.findall(text.lower())))[:_FUZZY_ROW_TOKEN_LIMIT]
             scores = [_fuzzy_term_score(term, tokens) for term in terms]
             if all(score >= _FUZZY_TERM_RATIO for score in scores):
