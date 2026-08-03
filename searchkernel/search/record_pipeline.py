@@ -1416,6 +1416,7 @@ class RecordSearchPipeline:
     ) -> dict[str, Sequence[GraphNeighbor]]:
         identities = [candidate.identity for candidate in graph_seeds]
         neighbors_many = getattr(graph_store, "neighbors_many", None)
+        normalized: dict[str, Sequence[GraphNeighbor]] = {}
         if callable(neighbors_many):
             kwargs: dict[str, Any] = {"depth": plan.graph_depth}
             if _supports_keyword(neighbors_many, "max_neighbors"):
@@ -1425,10 +1426,17 @@ class RecordSearchPipeline:
                 identities,
                 **kwargs,
             )
-            return _normalize_graph_neighbor_map(
+            normalized = _normalize_graph_neighbor_map(
                 cast(Mapping[object, Sequence[GraphNeighbor]], result),
                 graph_seeds,
             )
+            if len(normalized) == len(graph_seeds):
+                return normalized
+            graph_seeds = [
+                seed
+                for seed in graph_seeds
+                if seed.storage_key not in normalized
+            ]
 
         semaphore = asyncio.Semaphore(self._config.max_graph_concurrency)
 
@@ -1452,7 +1460,10 @@ class RecordSearchPipeline:
         loaded = await _gather_tasks(
             [asyncio.create_task(load(seed)) for seed in graph_seeds]
         )
-        return dict(cast(list[tuple[str, Sequence[GraphNeighbor]]], loaded))
+        return {
+            **normalized,
+            **dict(cast(list[tuple[str, Sequence[GraphNeighbor]]], loaded)),
+        }
 
     async def _query_embedding(self, query: str) -> tuple[Vector, str, int]:
         provider = self._embedding_provider
