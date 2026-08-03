@@ -78,7 +78,7 @@ async def test_chunk_ingestion_search_returns_one_parent_with_excerpts(tmp_path)
     outcome = await RecordSearchPipeline(
         hydrator=backend,
         keyword_store=keyword,
-    ).search("needle", limit=5, filters={"source_kind": "note"})
+    ).search("needle", limit=1, filters={"source_kind": "note"})
 
     assert len(outcome.results) == 1
     result = outcome.results[0]

@@ -734,6 +734,29 @@ class RecordSearchPipeline:
                 if self._policy.result_filter is None or self._policy.result_filter(result):
                     hydrated.append(result)
 
+        chunk_candidates = [
+            candidate
+            for candidate in candidates[hydration_offset:]
+            if _is_chunk_candidate(candidate)
+        ]
+        if chunk_candidates:
+            batch_hydration = await self._hydrate_candidates(
+                chunk_candidates,
+                failures,
+                cache_diagnostics,
+            )
+            for candidate, record in batch_hydration:
+                if record is None:
+                    missing_record_ids.append(candidate.record_id)
+                    continue
+                result = RecordSearchResult(
+                    record=record,
+                    score=candidate.score,
+                    provenance=candidate.provenance,
+                )
+                if self._policy.result_filter is None or self._policy.result_filter(result):
+                    hydrated.append(result)
+
         hydrated = await self._rerank_results(
             query,
             hydrated,
@@ -1633,6 +1656,10 @@ async def _resolve_parent_identity(
     ):
         raise TypeError("parent_expander returned a non-canonical identity")
     return parent_identity
+
+
+def _is_chunk_candidate(candidate: RecordSearchCandidate) -> bool:
+    return "#chunk:" in candidate.record_id
 
 
 def _graph_hit(
