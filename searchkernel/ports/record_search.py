@@ -27,6 +27,19 @@ class BatchRecordHydrator(Protocol):
 
 
 @runtime_checkable
+class BatchParentRecordExpander(Protocol):
+    """Resolve optional parents for multiple canonical identities."""
+
+    def parent_identities(
+        self,
+        identities: Sequence[RecordIdentity],
+    ) -> Mapping[str, RecordIdentity | None] | Awaitable[
+        Mapping[str, RecordIdentity | None]
+    ]:
+        ...
+
+
+@runtime_checkable
 class ParentRecordExpander(Protocol):
     """Resolve an optional parent while retaining canonical identity."""
 

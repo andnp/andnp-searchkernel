@@ -427,6 +427,38 @@ async def test_parent_expansion_preserves_canonical_identity_and_first_rank() ->
     assert provenance.parent_expanded_from_identity == child_b
 
 
+async def test_parent_expansion_prefers_batch_resolution() -> None:
+    records = {record_id: _record(record_id) for record_id in ("child", "parent")}
+    child = RecordIdentity(None, "fake", "child")
+    parent = RecordIdentity(None, "fake", "parent")
+
+    class ParentExpander:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def parent_identities(
+            self, identities: Sequence[RecordIdentity]
+        ) -> dict[str, RecordIdentity | None]:
+            self.calls += 1
+            assert identities == [child]
+            return {child.storage_key: parent}
+
+        def parent_identity(self, identity: RecordIdentity) -> RecordIdentity | None:
+            raise AssertionError("scalar parent lookup should not run")
+
+    expander = ParentExpander()
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([RecordHit(child, 1.0)]),
+        hydrator=_hydrator(records),
+        policy=RecordSearchPolicy(parent_expander=expander),
+    )
+
+    outcome = await pipeline.async_search("query", limit=1)
+
+    assert [result.record_id for result in outcome.results] == ["parent"]
+    assert expander.calls == 1
+
+
 async def test_policy_can_adjust_scores_reject_results_and_post_process() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b")}
     pipeline = RecordSearchPipeline(

@@ -1016,9 +1016,27 @@ class RecordSearchPipeline:
         if expander is None:
             return list(candidates)
 
+        ordered = self._sort_candidates(candidates)
+        parent_identities = getattr(expander, "parent_identities", None)
+        if callable(parent_identities):
+            try:
+                resolved = await _call_async(
+                    parent_identities,
+                    [candidate.identity for candidate in ordered],
+                )
+                if not isinstance(resolved, Mapping):
+                    raise TypeError("parent_expander must return a mapping")
+            except Exception as error:  # noqa: BLE001 - policy failure is staged
+                self._handle_error("parent_expansion", error, failures)
+                return list(ordered)
+            return self._apply_parent_identities(
+                ordered,
+                cast(Mapping[str, RecordIdentity | None], resolved),
+            )
+
         expanded: list[RecordSearchCandidate] = []
         seen: set[str] = set()
-        for candidate in self._sort_candidates(candidates):
+        for candidate in ordered:
             try:
                 parent_identity = await _resolve_parent_identity(
                     expander,
@@ -1034,6 +1052,38 @@ class RecordSearchPipeline:
                     expanded.append(candidate)
                 continue
 
+            if parent_identity.storage_key in seen:
+                continue
+            provenance = candidate.provenance.clone()
+            provenance.record_identity = parent_identity
+            provenance.parent_expanded_from = candidate.record_id
+            provenance.parent_expanded_from_identity = candidate.identity
+            seen.add(parent_identity.storage_key)
+            expanded.append(
+                RecordSearchCandidate(
+                    identity=parent_identity,
+                    score=candidate.score,
+                    provenance=provenance,
+                )
+            )
+        return expanded
+
+    def _apply_parent_identities(
+        self,
+        candidates: Sequence[RecordSearchCandidate],
+        parent_identities: Mapping[str, RecordIdentity | None],
+    ) -> list[RecordSearchCandidate]:
+        expanded: list[RecordSearchCandidate] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            parent_identity = parent_identities.get(candidate.storage_key)
+            if parent_identity is None:
+                if candidate.storage_key not in seen:
+                    seen.add(candidate.storage_key)
+                    expanded.append(candidate)
+                continue
+            if not isinstance(parent_identity, RecordIdentity):
+                raise TypeError("parent_expander returned a non-canonical identity")
             if parent_identity.storage_key in seen:
                 continue
             provenance = candidate.provenance.clone()

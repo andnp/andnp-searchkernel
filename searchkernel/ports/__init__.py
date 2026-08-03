@@ -48,11 +48,13 @@ from searchkernel.ports.federation import (
 from searchkernel.ports.federation import (
     SourceCapabilities as FederationSourceCapabilities,
 )
+from searchkernel.ports.graph import BatchGraphStore
 from searchkernel.ports.index_manager import IndexManagerPort
 from searchkernel.ports.llm import LLMProvider
 from searchkernel.ports.orchestrator_config import OrchestratorConfig
 from searchkernel.ports.record_search import (
     AsyncRecordHydrator,
+    BatchParentRecordExpander,
     BatchRecordHydrator,
     ParentRecordExpander,
 )
@@ -82,7 +84,6 @@ from searchkernel.ports.stores import (
     AsyncGraphStore,
     AsyncKeywordStore,
     AsyncVectorStore,
-    BatchGraphStore,
     CacheStore,
     GraphStore,
     KeywordStore,
@@ -104,6 +105,7 @@ __all__ = [
     "AsyncVectorStore",
     "BatchContentSource",
     "BatchGraphStore",
+    "BatchParentRecordExpander",
     "BatchRecordHydrator",
     "CacheStore",
     "CallerAuthorizationContext",
