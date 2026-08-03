@@ -113,6 +113,7 @@ class CandidateCachePolicy[CandidateT]:
                         "adaptive_graph_min_seed_count": (
                             self._config.adaptive_graph_min_seed_count
                         ),
+                        "graph_only_penalty": self._config.graph_only_penalty,
                         "graph_depth": self._config.graph_depth,
                         "max_graph_seeds": self._config.max_graph_seeds,
                         "max_neighbors_per_seed": (

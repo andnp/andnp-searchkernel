@@ -207,6 +207,7 @@ class RecordSearchConfig:
     adaptive_graph_enabled: bool = False
     adaptive_graph_min_seed_score: float = 0.75
     adaptive_graph_min_seed_count: int = 1
+    graph_only_penalty: float = 0.5
     max_neighbors_per_seed: int = 10
     max_graph_concurrency: int = 8
     max_hydration_concurrency: int = 8
@@ -594,6 +595,14 @@ class RecordSearchPipeline:
                         != "query_plan:skip:graph:awaiting_seed_confidence"
                     ]
                     diagnostics.append("query_plan:graph:adaptive")
+                    if trace is not None:
+                        trace.provenance["query_plan"] = {
+                            "type": plan.query_type.name.lower(),
+                            "signals": plan.signals.names,
+                            "lanes": plan.enabled_lanes,
+                            "budgets": plan.lane_budgets,
+                            "skip_reasons": plan.diagnostic_skip_reasons,
+                        }
 
             if plan.graph_enabled and base_candidates:
                 try:
@@ -624,6 +633,14 @@ class RecordSearchPipeline:
                             )
                         candidates = self._build_candidates(fused_scores, rankings)
                         candidates = self._apply_candidate_policy(candidates)
+                        candidates = self._apply_graph_priority(
+                            candidates,
+                            direct_keys={
+                                candidate.storage_key
+                                for candidate in base_candidates
+                            },
+                            plan=plan,
+                        )
                     else:
                         candidates = base_candidates
                 except Exception as error:  # noqa: BLE001 - degraded mode captures backend failures
@@ -1541,6 +1558,8 @@ class RecordSearchPipeline:
             raise ValueError("adaptive_graph_min_seed_score must not be negative")
         if self._config.adaptive_graph_min_seed_count < 1:
             raise ValueError("adaptive_graph_min_seed_count must be positive")
+        if not 0 <= self._config.graph_only_penalty <= 1:
+            raise ValueError("graph_only_penalty must be between zero and one")
         if self._config.max_hydration_concurrency < 1:
             raise ValueError("max_hydration_concurrency must be positive")
         if self._config.max_chunk_matches < 1:
@@ -1564,9 +1583,38 @@ class RecordSearchPipeline:
                 >= self._config.adaptive_graph_min_seed_score
                 for strategy, contribution in candidate.provenance.strategy_details.items()
             )
-            for candidate in candidates[: self._config.max_graph_seeds]
+            for candidate in self._sort_candidates(candidates)[
+                : self._config.max_graph_seeds
+            ]
         )
         return strong_seed_count >= self._config.adaptive_graph_min_seed_count
+
+    def _apply_graph_priority(
+        self,
+        candidates: Sequence[RecordSearchCandidate],
+        *,
+        direct_keys: set[str],
+        plan: QueryPlan,
+    ) -> list[RecordSearchCandidate]:
+        if not plan.adaptive_graph:
+            return list(candidates)
+        adjusted = [
+            candidate
+            if candidate.storage_key in direct_keys
+            else dataclass_replace(
+                candidate,
+                score=candidate.score * self._config.graph_only_penalty,
+            )
+            for candidate in candidates
+        ]
+        return sorted(
+            adjusted,
+            key=lambda candidate: (
+                candidate.storage_key not in direct_keys,
+                -candidate.score,
+                candidate.storage_key,
+            ),
+        )
 
 
 async def _resolve_parent_identity(
