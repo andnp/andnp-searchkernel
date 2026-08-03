@@ -8,6 +8,7 @@ the ingestion surface, but query execution uses canonical record identities.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import heapq
 import json
 import logging
@@ -54,6 +55,9 @@ _LOCAL_KEYWORD_SCHEMA_VERSION = 2
 _LOCAL_FTS_TABLE = "local_records_fts"
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
+_FUZZY_QUERY_MAX_TERMS = 4
+_FUZZY_ROW_TOKEN_LIMIT = 256
+_FUZZY_TERM_RATIO = 0.82
 _VECTOR_EMBEDDING_BYTES = np.dtype("<f4").itemsize
 _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 logger = logging.getLogger(__name__)
@@ -69,6 +73,22 @@ def _natural_language_match_query(
     if len(terms) < 2:
         return None
     return " OR ".join(terms)
+
+
+def _fuzzy_term_score(query_term: str, tokens: Sequence[str]) -> float:
+    candidates = (
+        token
+        for token in tokens
+        if token[:1] == query_term[:1]
+        and abs(len(token) - len(query_term)) <= 2
+    )
+    return max(
+        (
+            difflib.SequenceMatcher(None, query_term, token).ratio()
+            for token in candidates
+        ),
+        default=0.0,
+    )
 
 
 class _VectorSnapshotCache(dict[tuple[str, int], VectorSnapshot]):
@@ -1062,6 +1082,61 @@ class LocalRecordBackend:
         fallback_query = _natural_language_match_query(query, match_query)
         if not hits and fallback_query is not None:
             hits = build_hits(fetch_rows(fallback_query))
+        if not hits:
+            hits = self._search_keyword_fuzzy(query, k, filters)
+        return hits[:k]
+
+    def _search_keyword_fuzzy(
+        self,
+        query: str,
+        k: int,
+        filters: SearchFilters | None,
+    ) -> list[RecordHit]:
+        if (
+            '"' in query
+            or _keyword_scoring.looks_like_artifact_query(query)
+        ):
+            return []
+        terms = [term.lower() for term in _TOKEN_RE.findall(query)]
+        if (
+            not 2 <= len(terms) <= _FUZZY_QUERY_MAX_TERMS
+            or not all(len(term) >= 4 for term in terms)
+        ):
+            return []
+        clauses, parameters = self._keyword_filter_sql(filters)
+        with self._lock:
+            conn = self._db.get_connection()
+            rows = conn.execute(
+                f"""
+                SELECT storage_key, workspace_id, source_kind, source_id, status,
+                       title, body, indexed_text, uri, metadata
+                FROM local_records r
+                WHERE {" AND ".join(clauses)}
+                LIMIT ?
+                """,
+                (*parameters, _FALLBACK_SCAN_MAX_ROWS + 1),
+            ).fetchall()
+        if len(rows) > _FALLBACK_SCAN_MAX_ROWS:
+            return []
+        hits: list[RecordHit] = []
+        for row in rows:
+            if filters and not self._matches(row, filters):
+                continue
+            text = f"{row['title']} {row['indexed_text'] or row['body']}"
+            tokens = list(dict.fromkeys(_TOKEN_RE.findall(text.lower())))[:_FUZZY_ROW_TOKEN_LIMIT]
+            scores = [_fuzzy_term_score(term, tokens) for term in terms]
+            if all(score >= _FUZZY_TERM_RATIO for score in scores):
+                hits.append(
+                    RecordHit(
+                        RecordIdentity(
+                            row["workspace_id"],
+                            row["source_kind"],
+                            row["source_id"],
+                        ),
+                        sum(scores),
+                    )
+                )
+        hits.sort(key=lambda item: (-item.score, item.storage_key))
         return hits[:k]
 
     def _search_keyword_fallback(

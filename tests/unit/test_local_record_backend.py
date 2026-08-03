@@ -247,6 +247,26 @@ def test_keyword_search_keeps_artifact_queries_exact(tmp_path) -> None:
     assert backend.search_keyword("alpha.beta", 10) == []
 
 
+def test_keyword_search_recovers_bounded_technical_typos(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.index(
+        [
+            _record(
+                "note",
+                "fusion",
+                "The reciprocal rank fusion algorithm",
+            ),
+            _record("note", "other", "A reciprocal ranking overview"),
+        ]
+    )
+
+    assert [hit.source_id for hit in backend.search_keyword(
+        "reciprical rank fuson", 10
+    )] == ["fusion"]
+    assert backend.search_keyword('"reciprical rank fuson"', 10) == []
+    assert backend.search_keyword("reciprical.py", 10) == []
+
+
 def test_keyword_search_applies_filters_to_natural_language_fallback(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     records = [
