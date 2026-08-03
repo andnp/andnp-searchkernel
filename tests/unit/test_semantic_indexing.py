@@ -433,6 +433,23 @@ class TestSQLiteEmbeddingCache:
             results = cache2.get_many(["hash-1"])
             assert len(results) == 0
 
+    def test_cache_prune_to_keeps_retained_namespace_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.db"
+            cache1 = SQLiteEmbeddingCache(path, "namespace-1", dimension=3)
+            cache2 = SQLiteEmbeddingCache(path, "namespace-2", dimension=3)
+            cache1.put_many(
+                {
+                    "keep": [0.1, 0.2, 0.3],
+                    "stale": [0.4, 0.5, 0.6],
+                },
+            )
+            cache2.put_many({"stale": [0.7, 0.8, 0.9]})
+
+            assert cache1.prune_to({"keep"}) == 1
+            assert set(cache1.get_many(["keep", "stale"])) == {"keep"}
+            assert set(cache2.get_many(["stale"])) == {"stale"}
+
     def test_cache_miss(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "cache.db"
