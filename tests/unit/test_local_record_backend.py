@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import searchkernel.indices.local as local_indices
 from searchkernel.domain import GraphNeighbor, Record, RecordIdentity, RecordStatus
 from searchkernel.indices import (
     LocalGraphStore,
@@ -287,6 +288,40 @@ def test_keyword_fuzzy_search_includes_uri_and_keyword_fields(tmp_path) -> None:
         hit.source_id
         for hit in backend.search_keyword("reciprical rank fuson", 10)
     } == {"keyword-only", "uri-only"}
+
+
+def test_keyword_fuzzy_search_narrows_similarity_candidates(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record("note", f"unrelated-{index}", "unrelated content")
+        for index in range(1_000)
+    ]
+    records.append(
+        _record(
+            "note",
+            "target",
+            "The reciprocal rank fusion algorithm",
+        )
+    )
+    backend.index(records)
+
+    calls = 0
+    original = local_indices._fuzzy_term_score
+
+    def counted_score(query_term, tokens):
+        nonlocal calls
+        calls += 1
+        return original(query_term, tokens)
+
+    monkeypatch.setattr(local_indices, "_fuzzy_term_score", counted_score)
+
+    assert [hit.source_id for hit in backend.search_keyword(
+        "reciprical rank fuson", 10
+    )] == ["target"]
+    assert calls <= 3 * 256
 
 
 def test_keyword_search_applies_filters_to_natural_language_fallback(tmp_path) -> None:

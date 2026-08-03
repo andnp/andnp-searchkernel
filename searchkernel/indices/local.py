@@ -56,6 +56,7 @@ _LOCAL_FTS_TABLE = "local_records_fts"
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
 _FUZZY_QUERY_MAX_TERMS = 4
+_FUZZY_CANDIDATE_LIMIT = 256
 _FUZZY_ROW_TOKEN_LIMIT = 256
 _FUZZY_TERM_RATIO = 0.82
 _VECTOR_EMBEDDING_BYTES = np.dtype("<f4").itemsize
@@ -1103,21 +1104,27 @@ class LocalRecordBackend:
             or not all(len(term) >= 4 for term in terms)
         ):
             return []
+        prefix_query = " OR ".join(
+            f"{term[:3]}*" for term in terms
+        )
         clauses, parameters = self._keyword_filter_sql(filters)
+        clauses.insert(0, f"{_LOCAL_FTS_TABLE} MATCH ?")
+        parameters.insert(0, prefix_query)
         with self._lock:
             conn = self._db.get_connection()
             rows = conn.execute(
                 f"""
-                SELECT storage_key, workspace_id, source_kind, source_id, status,
-                       title, body, indexed_text, uri, keywords, metadata
-                FROM local_records r
+                SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                       r.status, r.title, r.body, r.indexed_text, r.uri,
+                       r.keywords, r.metadata
+                FROM {_LOCAL_FTS_TABLE}
+                JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
                 WHERE {" AND ".join(clauses)}
+                ORDER BY bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0)
                 LIMIT ?
                 """,
-                (*parameters, _FALLBACK_SCAN_MAX_ROWS + 1),
+                (*parameters, _FUZZY_CANDIDATE_LIMIT),
             ).fetchall()
-        if len(rows) > _FALLBACK_SCAN_MAX_ROWS:
-            return []
         hits: list[RecordHit] = []
         for row in rows:
             if filters and not self._matches(row, filters):
