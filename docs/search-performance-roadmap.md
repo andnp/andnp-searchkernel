@@ -1,7 +1,7 @@
 # Search Performance and Retrieval Quality Roadmap
 
-Status: 0.6.0 canonical record architecture with v1 federation contracts;
-performance work is still in validation
+Status: 0.7.0 canonical record architecture with batch-first performance
+boundaries and v1 federation contracts
 
 Last reviewed: 2026-08-02
 
@@ -15,10 +15,15 @@ optional graph expansion, policy application, and hydration. Version 0.6.0
 adds a versioned federation port, bounded executor, and HTTP source adapter for
 systems that own independent search indexes.
 
-Both paths are ready for focused contract testing, but neither is a production
-performance or relevance claim. The repository has synthetic benchmarks,
-backend tests, and federation contract tests; it does not yet have a
-representative, versioned, labeled corpus or a cross-backend latency study.
+Version 0.7.0 adds batch hydration, compiled filters, single-flight caches,
+bulk epoch reads, batch graph and parent boundaries, incremental embedding
+persistence, bounded federation workers, and opt-in progressive federation
+events. These changes improve execution cost and memory behavior without
+turning batch-oriented source APIs into per-record public concurrency.
+
+The repository still has synthetic benchmarks, backend tests, and federation
+contract tests; it does not yet have a representative, versioned, labeled
+corpus or a cross-backend latency study.
 
 ## 1. Canonical architecture
 
@@ -46,9 +51,13 @@ The supported federated flow is:
 Independent source
   -> SearchSource (v1 contract)
      -> FederationExecutor
-        -> bounded concurrent calls
+           -> bounded worker pool
            -> rank fusion and identity/URI deduplication
               -> hits + source responses + degradation diagnostics
+
+The existing `search()` method remains batch-final. `FederationExecutor.stream()`
+and its event aliases are opt-in and emit source updates, explicitly
+non-authoritative provisional results, and one authoritative fused result.
 ```
 
 Federation is intentionally a separate composition boundary. The executor
@@ -57,9 +66,10 @@ management.
 
 Ingestion uses `SemanticRecordIngestor` for keyword and vector stages and
 `ResumableSemanticCoordinator` when source iteration and checkpoints are
-needed. The ingestor returns per-record outcomes. The coordinator persists a
-source checkpoint only after the complete batch succeeds, so the checkpoint
-never claims progress beyond a failed batch.
+needed. Embedding writes are consumed and persisted batch by batch, while the
+ingestor returns per-record outcomes. The coordinator persists a source
+checkpoint only after the complete batch succeeds, so the checkpoint never
+claims progress beyond a failed batch.
 
 ## 2. Contracts that every optimization must preserve
 
@@ -232,11 +242,12 @@ CI output and must not be reported as backend coverage.
 
 ### R5 — Optimize only after parity is measured
 
-- Replace local lexical full scans with an indexed implementation while
-  preserving filter and identity parity.
+- Measure local FTS filtered retrieval and keep filter work out of Python row
+  loops where the schema can support it.
 - Compact local vectors and cache normalized norms without changing model
   fingerprint semantics.
-- Batch graph and hydration operations and compare scalar/batch output exactly.
+- Compare scalar and batch graph, parent, hydration, and version-provider
+  output exactly across local and PostgreSQL adapters.
 - Add cache epochs for all mutation lanes, including graph changes, with
   invalidation tests.
 
