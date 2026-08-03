@@ -513,6 +513,19 @@ def test_keyword_project_filters_match_numeric_metadata_ids(tmp_path) -> None:
     ] == ["kept"]
 
 
+def test_keyword_empty_project_scopes_match_nothing(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.index(
+        [
+            _record("note", "one", "common", metadata={"project_id": "one"}),
+            _record("note", "two", "common", metadata={"project_id": "two"}),
+        ]
+    )
+
+    assert backend.search_keyword("common", 10, {"project_ids": []}) == []
+    assert backend.search_keyword("common", 10, {"project_id": []}) == []
+
+
 @pytest.mark.asyncio
 async def test_scoped_keyword_candidates_match_public_pipeline_boundary(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")

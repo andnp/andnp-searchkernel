@@ -964,12 +964,14 @@ class LocalRecordBackend:
             project_values = filters.get("project_filter")
         if project_values is not None:
             project_values = LocalRecordBackend._filter_values(project_values)
+            if not project_values and (
+                "project_ids" in filters or "project_id" in filters
+            ):
+                return ["0"], []
             if project_values:
                 clauses.append(
                     "CAST(json_extract(r.metadata, '$.project_id') AS TEXT) "
-                    "IN ({})".format(
-                        ", ".join("?" for _ in project_values)
-                    )
+                    "IN ({})".format(", ".join("?" for _ in project_values))
                 )
                 parameters.extend(str(value) for value in project_values)
 
