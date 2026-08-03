@@ -1486,6 +1486,41 @@ async def test_batch_graph_and_hydration_use_canonical_keys_once() -> None:
     ]
 
 
+async def test_batch_graph_normalizes_legacy_source_id_seed_keys() -> None:
+    records = {record_id: _record(record_id) for record_id in ("seed", "target")}
+    seed = records["seed"].identity
+    target = records["target"].identity
+
+    class Graph:
+        def neighbors_many(
+            self,
+            identities: Sequence[RecordIdentity],
+            *,
+            depth: int,
+        ) -> dict[str, list[GraphNeighbor]]:
+            assert identities == [seed]
+            return {"seed": [GraphNeighbor(target, "related", 1.0)]}
+
+        def neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+        ) -> list[GraphNeighbor]:
+            raise AssertionError("scalar graph lookup should not run")
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("seed", 1.0)]),
+        graph_store=Graph(),
+        hydrator=_hydrator(records),
+    )
+
+    outcome = await pipeline.async_search("what relates to the seed?", limit=2)
+
+    assert [result.record_id for result in outcome.results] == ["seed", "target"]
+    assert outcome.results[1].provenance.strategies == ("graph",)
+
+
 async def test_scalar_and_batch_hydration_have_identical_results_and_provenance() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b", "c")}
     keyword_results: list[RecordHit | tuple[str, float]] = [

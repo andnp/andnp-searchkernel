@@ -1425,14 +1425,9 @@ class RecordSearchPipeline:
                 identities,
                 **kwargs,
             )
-            return dict(
-                cast(
-                    Mapping[
-                        str,
-                        Sequence[GraphNeighbor],
-                    ],
-                    result,
-                )
+            return _normalize_graph_neighbor_map(
+                cast(Mapping[object, Sequence[GraphNeighbor]], result),
+                graph_seeds,
             )
 
         semaphore = asyncio.Semaphore(self._config.max_graph_concurrency)
@@ -1682,6 +1677,36 @@ def _normalize_graph_neighbor(
     neighbor: GraphNeighbor,
 ) -> tuple[str, str, float]:
     return neighbor.identity.storage_key, neighbor.edge_type, neighbor.weight
+
+
+def _normalize_graph_neighbor_map(
+    neighbors: Mapping[object, Sequence[GraphNeighbor]],
+    seeds: Sequence[RecordSearchCandidate],
+) -> dict[str, Sequence[GraphNeighbor]]:
+    """Accept legacy source-id keys while preferring canonical seed keys."""
+    by_storage_key = {
+        seed.storage_key: seed.storage_key
+        for seed in seeds
+    }
+    source_id_keys: dict[str, str | None] = {}
+    for seed in seeds:
+        current = source_id_keys.get(seed.record_id)
+        source_id_keys[seed.record_id] = (
+            seed.storage_key
+            if current is None and seed.record_id not in source_id_keys
+            else None
+        )
+    normalized: dict[str, Sequence[GraphNeighbor]] = {}
+    for raw_key, values in neighbors.items():
+        if isinstance(raw_key, RecordIdentity):
+            key = raw_key.storage_key
+        elif isinstance(raw_key, str):
+            key = by_storage_key.get(raw_key) or source_id_keys.get(raw_key)
+        else:
+            key = None
+        if key is not None:
+            normalized[key] = values
+    return normalized
 
 
 def _supports_keyword(function: Callable[..., Any], name: str) -> bool:
