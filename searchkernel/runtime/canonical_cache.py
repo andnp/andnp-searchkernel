@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
 import math
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
+from threading import Event, Lock, RLock
 from typing import TypeVar
 
 from searchkernel.domain import RecordIdentity
@@ -124,6 +126,17 @@ class BoundedCacheMetrics:
     hits: int = 0
     misses: int = 0
     evictions: int = 0
+    coalesced_waiters: int = 0
+
+
+_MISSING = object()
+
+
+@dataclass(slots=True)
+class _InFlight[ValueT]:
+    completed: Event = field(default_factory=Event)
+    value: object = _MISSING
+    error: BaseException | None = None
 
 
 class _BoundedCache[ValueT]:
@@ -142,35 +155,48 @@ class _BoundedCache[ValueT]:
         self._ttl_seconds = ttl_seconds
         self._clock = clock
         self._entries: OrderedDict[object, tuple[float, ValueT]] = OrderedDict()
+        self._lock = Lock()
         self._hits = 0
         self._misses = 0
         self._evictions = 0
+        self._coalesced_waiters = 0
 
     @property
     def metrics(self) -> BoundedCacheMetrics:
-        return BoundedCacheMetrics(self._hits, self._misses, self._evictions)
+        with self._lock:
+            return BoundedCacheMetrics(
+                self._hits,
+                self._misses,
+                self._evictions,
+                self._coalesced_waiters,
+            )
 
     def get(self, key: object) -> ValueT | None:
-        entry = self._entries.get(key)
-        if entry is None:
-            self._misses += 1
-            return None
-        expires_at, value = entry
-        if expires_at <= self._clock():
-            self._entries.pop(key, None)
-            self._evictions += 1
-            self._misses += 1
-            return None
-        self._entries.move_to_end(key)
-        self._hits += 1
-        return copy.deepcopy(value)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                self._misses += 1
+                return None
+            expires_at, value = entry
+            if expires_at <= self._clock():
+                self._entries.pop(key, None)
+                self._evictions += 1
+                self._misses += 1
+                return None
+            self._entries.move_to_end(key)
+            self._hits += 1
+            return copy.deepcopy(value)
 
     def set(self, key: object, value: ValueT) -> None:
-        self._entries[key] = (self._clock() + self._ttl_seconds, copy.deepcopy(value))
-        self._entries.move_to_end(key)
-        while len(self._entries) > self._max_entries:
-            self._entries.popitem(last=False)
-            self._evictions += 1
+        with self._lock:
+            self._entries[key] = (
+                self._clock() + self._ttl_seconds,
+                copy.deepcopy(value),
+            )
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+                self._evictions += 1
 
 
 class CandidateResultCache[ValueT]:
@@ -188,6 +214,8 @@ class CandidateResultCache[ValueT]:
             ttl_seconds=ttl_seconds,
             clock=clock,
         )
+        self._inflight: dict[CandidateCacheKey, _InFlight[ValueT]] = {}
+        self._flight_lock = Lock()
 
     @property
     def metrics(self) -> BoundedCacheMetrics:
@@ -198,6 +226,68 @@ class CandidateResultCache[ValueT]:
 
     def set(self, key: CandidateCacheKey, value: ValueT) -> None:
         self._cache.set(key, value)
+        self._complete_inflight(key, value)
+
+    async def async_wait_for_miss(
+        self, key: CandidateCacheKey
+    ) -> tuple[bool, ValueT | None]:
+        """Claim a miss or await the caller already computing this key."""
+        inflight, leader = self._start_or_join(key)
+        if leader:
+            return True, None
+        await asyncio.to_thread(inflight.completed.wait)
+        return False, _finish_waiter(inflight)
+
+    async def async_get_or_compute(
+        self,
+        key: CandidateCacheKey,
+        compute: Callable[[], ValueT | Awaitable[ValueT]],
+    ) -> ValueT:
+        """Read through the cache while coalescing concurrent misses."""
+        cached = self.get(key)
+        if cached is not None:
+            return cached
+        inflight, leader = self._start_or_join(key)
+        if not leader:
+            await asyncio.to_thread(inflight.completed.wait)
+            return _finish_waiter(inflight)
+        try:
+            value = await _maybe_await(compute())
+            self.set(key, value)
+            return copy.deepcopy(value)
+        except BaseException as error:
+            self._fail_inflight(key, inflight, error)
+            raise
+
+    def _complete_inflight(self, key: CandidateCacheKey, value: ValueT) -> None:
+        with self._flight_lock:
+            inflight = self._inflight.pop(key, None)
+        if inflight is not None:
+            _complete_success(inflight, value)
+
+    def _fail_inflight(
+        self,
+        key: CandidateCacheKey,
+        inflight: _InFlight[ValueT],
+        error: BaseException,
+    ) -> None:
+        with self._flight_lock:
+            self._inflight.pop(key, None)
+        _complete_failure(inflight, error)
+
+    def _start_or_join(
+        self, key: CandidateCacheKey
+    ) -> tuple[_InFlight[ValueT], bool]:
+        with self._flight_lock:
+            inflight = self._inflight.get(key)
+            if inflight is not None:
+                with self._cache._lock:
+                    self._cache._coalesced_waiters += 1
+                    self._cache._misses -= 1
+                return inflight, False
+            inflight = _InFlight()
+            self._inflight[key] = inflight
+            return inflight, True
 
 
 class HydrationCache[ValueT]:
@@ -221,6 +311,8 @@ class HydrationCache[ValueT]:
         self._missing_ttl_seconds = missing_ttl_seconds
         self._clock = clock
         self._missing: OrderedDict[HydrationCacheKey, float] = OrderedDict()
+        self._inflight: dict[HydrationCacheKey, _InFlight[ValueT | None]] = {}
+        self._flight_lock = RLock()
 
     @property
     def metrics(self) -> BoundedCacheMetrics:
@@ -231,23 +323,99 @@ class HydrationCache[ValueT]:
         return value
 
     def lookup(self, key: HydrationCacheKey) -> tuple[bool, ValueT | None]:
-        missing_until = self._missing.get(key)
-        if missing_until is not None:
-            if missing_until > self._clock():
-                self._missing.move_to_end(key)
-                return True, None
-            self._missing.pop(key, None)
-        value = self._cache.get(key)
-        return value is not None, value
+        with self._flight_lock:
+            missing_until = self._missing.get(key)
+            if missing_until is not None:
+                if missing_until > self._clock():
+                    self._missing.move_to_end(key)
+                    return True, None
+                self._missing.pop(key, None)
+            value = self._cache.get(key)
+            return value is not None, value
 
     def set(self, key: HydrationCacheKey, value: ValueT | None) -> None:
-        if value is None:
-            self._missing[key] = self._clock() + self._missing_ttl_seconds
-            self._missing.move_to_end(key)
-            while len(self._missing) > self._cache._max_entries:
-                self._missing.popitem(last=False)
-            return
-        self._cache.set(key, value)
+        with self._flight_lock:
+            if value is None:
+                self._missing[key] = self._clock() + self._missing_ttl_seconds
+                self._missing.move_to_end(key)
+                while len(self._missing) > self._cache._max_entries:
+                    self._missing.popitem(last=False)
+            else:
+                self._cache.set(key, value)
+            inflight = self._inflight.pop(key, None)
+        if inflight is not None:
+            _complete_success(inflight, value)
+
+    async def async_wait_for_miss(
+        self, key: HydrationCacheKey
+    ) -> tuple[bool, ValueT | None]:
+        """Claim a miss or await the caller already computing this key."""
+        inflight, leader = self._start_or_join(key)
+        if leader:
+            return True, None
+        await asyncio.to_thread(inflight.completed.wait)
+        return False, _finish_waiter(inflight)
+
+    async def async_get_or_compute(
+        self,
+        key: HydrationCacheKey,
+        compute: Callable[[], ValueT | None | Awaitable[ValueT | None]],
+    ) -> ValueT | None:
+        """Read through the cache while coalescing concurrent misses."""
+        hit, value = self.lookup(key)
+        if hit:
+            return value
+        inflight, leader = self._start_or_join(key)
+        if not leader:
+            await asyncio.to_thread(inflight.completed.wait)
+            return _finish_waiter(inflight)
+        try:
+            value = await _maybe_await(compute())
+            self.set(key, value)
+            return copy.deepcopy(value)
+        except BaseException as error:
+            with self._flight_lock:
+                self._inflight.pop(key, None)
+            _complete_failure(inflight, error)
+            raise
+
+    def _start_or_join(
+        self, key: HydrationCacheKey
+    ) -> tuple[_InFlight[ValueT | None], bool]:
+        with self._flight_lock:
+            inflight = self._inflight.get(key)
+            if inflight is not None:
+                with self._cache._lock:
+                    self._cache._coalesced_waiters += 1
+                    self._cache._misses -= 1
+                return inflight, False
+            inflight = _InFlight()
+            self._inflight[key] = inflight
+            return inflight, True
+
+
+def _complete_success[T](inflight: _InFlight[T], value: T) -> None:
+    inflight.value = copy.deepcopy(value)
+    inflight.completed.set()
+
+
+def _complete_failure[T](inflight: _InFlight[T], error: BaseException) -> None:
+    inflight.error = error
+    inflight.completed.set()
+
+
+def _finish_waiter[T](inflight: _InFlight[T]) -> T:
+    if inflight.value is not _MISSING:
+        return copy.deepcopy(inflight.value)  # type: ignore[return-value]
+    if inflight.error is not None:
+        raise inflight.error
+    raise RuntimeError("cache coalescing completed without a result")
+
+
+async def _maybe_await[T](value: T | Awaitable[T]) -> T:
+    if asyncio.iscoroutine(value) or isinstance(value, Awaitable):
+        return await value
+    return value
 
 
 def _stable_value(value: object) -> object:

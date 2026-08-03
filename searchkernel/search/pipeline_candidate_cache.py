@@ -168,6 +168,23 @@ class CandidateCachePolicy[CandidateT]:
         except Exception as error:  # noqa: BLE001 - cache is optional
             diagnostics.append(f"candidate_cache:error:{type(error).__name__}")
 
+    async def async_wait_for_miss(
+        self,
+        key: CandidateCacheKey | None,
+        diagnostics: list[str],
+    ) -> list[CandidateT] | None:
+        if key is None:
+            return None
+        try:
+            leader, candidates = await self._cache.async_wait_for_miss(key)
+        except Exception as error:  # noqa: BLE001 - cache is optional
+            diagnostics.append(f"candidate_cache:error:{type(error).__name__}")
+            return None
+        if leader:
+            return None
+        diagnostics.append("candidate_cache:coalesced")
+        return list(candidates or ())
+
     def encoder_namespace(self) -> str | None:
         provider = self._embedding_provider
         if provider is None:
@@ -203,24 +220,61 @@ class CandidateCachePolicy[CandidateT]:
         )
 
     def _cache_epochs(self) -> SearchEpochs:
-        values = {
-            lane: _read_lane_epoch(store, lane)
-            for lane, store in self._stores.items()
-        }
+        values = _read_bulk_epochs(self._stores)
+        for lane, store in self._stores.items():
+            if lane not in values:
+                epoch = _read_lane_epoch(store, lane)
+                if epoch is not None:
+                    values[lane] = epoch
         missing = [
             lane
             for lane, store in self._stores.items()
-            if store is not None and values[lane] is None
+            if store is not None and values.get(lane) is None
         ]
         if missing:
             raise UnstableCacheKey(
                 f"missing mutation epoch for {', '.join(missing)} lane"
             )
         return SearchEpochs(
-            keyword=values["keyword"] or 0,
-            vector=values["vector"] or 0,
-            graph=values["graph"] or 0,
+            keyword=values.get("keyword") or 0,
+            vector=values.get("vector") or 0,
+            graph=values.get("graph") or 0,
         )
+
+
+def _read_bulk_epochs(stores: Mapping[str, object | None]) -> dict[str, int]:
+    """Read lane epochs in one backend call when an adapter supports it."""
+    values: dict[str, int] = {}
+    seen: set[int] = set()
+    for store in stores.values():
+        if store is None or id(store) in seen:
+            continue
+        seen.add(id(store))
+        epochs = getattr(store, "epochs", None)
+        if not callable(epochs):
+            continue
+        try:
+            raw = epochs()
+        except Exception:  # noqa: BLE001, S112 - scalar fallback is best effort
+            continue
+        if isinstance(raw, SearchEpochs):
+            candidate = {
+                lane: raw.for_lane(lane)
+                for lane in ("keyword", "vector", "graph")
+            }
+        elif isinstance(raw, Mapping):
+            candidate = {
+                lane: value
+                for lane, value in raw.items()
+                if lane in ("keyword", "vector", "graph")
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+            }
+        else:
+            continue
+        values.update(candidate)
+    return values
 
 
 def _read_lane_epoch(store: object | None, lane: str) -> int | None:

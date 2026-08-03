@@ -265,6 +265,82 @@ def test_hydration_cache_requires_version_in_key_and_expires_missing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_candidate_cache_single_flight_isolates_failures() -> None:
+    cache: CandidateResultCache[list[str]] = CandidateResultCache()
+    key = CandidateCacheKey.build(
+        query="query",
+        filters={},
+        requested_limit=1,
+        acquisition_limit=1,
+        adaptive_limit=None,
+        routing_fingerprint="r",
+        encoder_namespace=None,
+        epochs=SearchEpochs(),
+        policy_version=None,
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def compute() -> list[str]:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return ["candidate"]
+
+    first = asyncio.create_task(cache.async_get_or_compute(key, compute))
+    await started.wait()
+    second = asyncio.create_task(cache.async_get_or_compute(key, compute))
+    release.set()
+    assert await asyncio.gather(first, second) == [["candidate"], ["candidate"]]
+    assert calls == 1
+    assert cache.metrics.coalesced_waiters == 1
+
+    async def fail() -> list[str]:
+        raise RuntimeError("isolated")
+
+    failed_key = CandidateCacheKey.build(
+        query="failure",
+        filters={},
+        requested_limit=1,
+        acquisition_limit=1,
+        adaptive_limit=None,
+        routing_fingerprint="r",
+        encoder_namespace=None,
+        epochs=SearchEpochs(),
+        policy_version=None,
+    )
+    with pytest.raises(RuntimeError, match="isolated"):
+        await cache.async_get_or_compute(failed_key, fail)
+    assert cache.metrics.misses == 2
+
+
+@pytest.mark.asyncio
+async def test_hydration_cache_single_flight_caches_missing_records() -> None:
+    cache: HydrationCache[Record] = HydrationCache()
+    key = HydrationCacheKey.build(
+        RecordIdentity("workspace", "note", "missing"),
+        record_version=1,
+        policy_version="policy/v1",
+    )
+    calls = 0
+
+    async def compute() -> None:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+
+    assert await asyncio.gather(
+        cache.async_get_or_compute(key, compute),
+        cache.async_get_or_compute(key, compute),
+    ) == [None, None]
+    assert calls == 1
+    assert cache.lookup(key) == (True, None)
+    assert cache.metrics.coalesced_waiters == 1
+
+
+@pytest.mark.asyncio
 async def test_record_pipeline_warm_candidates_skip_retrieval_until_epoch_changes() -> None:
     class Keyword:
         def __init__(self) -> None:

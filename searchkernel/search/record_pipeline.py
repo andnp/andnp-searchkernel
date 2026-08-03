@@ -407,6 +407,11 @@ class RecordSearchPipeline:
                 candidate_key,
                 cache_diagnostics,
             )
+            if candidates is None:
+                candidates = await self._candidate_cache_policy.async_wait_for_miss(
+                    candidate_key,
+                    cache_diagnostics,
+                )
 
         if candidates is None:
             rankings: dict[str, list[RecordHit]] = {}
@@ -850,8 +855,21 @@ class RecordSearchPipeline:
                     cached.append((candidate, record))
                     diagnostics.append("hydration_cache:hit")
                 else:
-                    misses.append(candidate)
-                    diagnostics.append("hydration_cache:miss")
+                    try:
+                        leader, shared = await self._hydration_cache.async_wait_for_miss(
+                            key
+                        )
+                    except Exception as error:  # noqa: BLE001 - cache is optional
+                        leader, shared = True, None
+                        diagnostics.append(
+                            f"hydration_cache:bypass:{type(error).__name__}"
+                        )
+                    if leader:
+                        misses.append(candidate)
+                        diagnostics.append("hydration_cache:miss")
+                    else:
+                        cached.append((candidate, shared))
+                        diagnostics.append("hydration_cache:coalesced")
         else:
             misses = list(candidates)
             if self._hydration_cache is not None:
