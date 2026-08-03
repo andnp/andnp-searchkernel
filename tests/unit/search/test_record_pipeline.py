@@ -1148,6 +1148,50 @@ async def test_ordinary_query_does_not_touch_available_graph_store() -> None:
     assert "query_plan:skip:graph:query_not_relationship" in outcome.diagnostics
 
 
+async def test_adaptive_graph_expands_strong_ordinary_seed_without_displacing_it() -> None:
+    records = {"seed": _record("seed"), "neighbor": _record("neighbor")}
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("seed", 0.9)]),
+        graph_store=FakeGraphStore(
+            {"seed": [("neighbor", "related", 1.0)]}
+        ),
+        hydrator=_hydrator(records),
+        config=RecordSearchConfig(adaptive_graph_enabled=True),
+    )
+
+    outcome = await pipeline.async_search("what is caching?", limit=2)
+
+    assert [result.record_id for result in outcome.results] == [
+        "seed",
+        "neighbor",
+    ]
+    assert outcome.results[1].provenance.strategies == ("graph",)
+    assert "query_plan:graph:adaptive" in outcome.diagnostics
+
+
+async def test_adaptive_graph_skips_weak_ordinary_seed() -> None:
+    class FailingGraph(FakeGraphStore):
+        def neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+        ) -> list[GraphNeighbor]:
+            raise AssertionError("weak seeds should not route to graph")
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("seed", 0.5)]),
+        graph_store=FailingGraph({}),
+        hydrator=_hydrator({"seed": _record("seed")}),
+        config=RecordSearchConfig(adaptive_graph_enabled=True),
+    )
+
+    outcome = await pipeline.async_search("what is caching?", limit=1)
+
+    assert [result.record_id for result in outcome.results] == ["seed"]
+    assert "query_plan:skip:graph:awaiting_seed_confidence" in outcome.diagnostics
+
+
 async def test_conditional_expansion_is_called_once_after_weak_first_pass() -> None:
     class AnyEmbedder(FakeEmbedder):
         def embed_query(self, query: str) -> list[float]:

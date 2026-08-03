@@ -95,6 +95,31 @@ def test_relationship_query_enables_graph_expansion() -> None:
     assert "graph:query_not_relationship" not in plan.diagnostic_skip_reasons
 
 
+def test_adaptive_graph_requires_strong_base_seed_signal() -> None:
+    router = QueryRouter(QueryRouterConfig(adaptive_graph_enabled=True))
+
+    waiting = router.route(
+        "what is caching?",
+        limit=1,
+        keyword_available=True,
+        vector_available=True,
+        graph_available=True,
+    )
+    ready = router.route(
+        "what is caching?",
+        limit=1,
+        keyword_available=True,
+        vector_available=True,
+        graph_available=True,
+        adaptive_graph_ready=True,
+    )
+
+    assert not waiting.graph_enabled
+    assert "graph:awaiting_seed_confidence" in waiting.diagnostic_skip_reasons
+    assert ready.graph_enabled
+    assert ready.adaptive_graph
+
+
 def test_unavailable_graph_is_diagnostic_only() -> None:
     plan = QueryRouter().route(
         "what depends on this module?",
