@@ -204,6 +204,9 @@ class RecordSearchConfig:
     graph_depth: int = 1
     max_graph_seeds: int = 10
     graph_enabled: bool = True
+    adaptive_graph_enabled: bool = False
+    adaptive_graph_min_seed_score: float = 0.75
+    adaptive_graph_min_seed_count: int = 1
     max_neighbors_per_seed: int = 10
     max_graph_concurrency: int = 8
     max_hydration_concurrency: int = 8
@@ -323,6 +326,7 @@ class RecordSearchPipeline:
                 ),
                 graph_seed_budget=self._config.max_graph_seeds,
                 graph_depth=self._config.graph_depth,
+                adaptive_graph_enabled=self._config.adaptive_graph_enabled,
                 rerank_budget=self._config.rerank_budget,
                 expansion_enabled=self._config.expansion_enabled,
                 base_semantic_weight=self._config.base_semantic_weight,
@@ -563,6 +567,33 @@ class RecordSearchPipeline:
                 )
             base_candidates = self._build_candidates(fused_scores, rankings)
             base_candidates = self._apply_candidate_policy(base_candidates)
+
+            if (
+                self._config.adaptive_graph_enabled
+                and not plan.signals.relationship
+            ):
+                adaptive_plan = self._router.route(
+                    query,
+                    limit=limit,
+                    keyword_available=self._keyword_store is not None,
+                    vector_available=self._vector_store is not None,
+                    graph_available=self._graph_store is not None,
+                    graph_enabled=self._config.graph_enabled
+                    and not semantic_only,
+                    adaptive_graph_ready=self._adaptive_graph_ready(
+                        base_candidates
+                    ),
+                    rerank_available=self._reranker is not None,
+                )
+                if adaptive_plan.graph_enabled:
+                    plan = adaptive_plan
+                    diagnostics = [
+                        diagnostic
+                        for diagnostic in diagnostics
+                        if diagnostic
+                        != "query_plan:skip:graph:awaiting_seed_confidence"
+                    ]
+                    diagnostics.append("query_plan:graph:adaptive")
 
             if plan.graph_enabled and base_candidates:
                 try:
@@ -1506,6 +1537,10 @@ class RecordSearchPipeline:
             raise ValueError("max_neighbors_per_seed must be positive")
         if self._config.max_graph_concurrency < 1:
             raise ValueError("max_graph_concurrency must be positive")
+        if self._config.adaptive_graph_min_seed_score < 0:
+            raise ValueError("adaptive_graph_min_seed_score must not be negative")
+        if self._config.adaptive_graph_min_seed_count < 1:
+            raise ValueError("adaptive_graph_min_seed_count must be positive")
         if self._config.max_hydration_concurrency < 1:
             raise ValueError("max_hydration_concurrency must be positive")
         if self._config.max_chunk_matches < 1:
@@ -1518,6 +1553,20 @@ class RecordSearchPipeline:
         candidates: Sequence[RecordSearchCandidate],
     ) -> list[RecordSearchCandidate]:
         return sorted(candidates, key=lambda item: (-item.score, item.storage_key))
+
+    def _adaptive_graph_ready(
+        self, candidates: Sequence[RecordSearchCandidate]
+    ) -> bool:
+        strong_seed_count = sum(
+            any(
+                strategy in {"keyword", "vector"}
+                and contribution.raw_score
+                >= self._config.adaptive_graph_min_seed_score
+                for strategy, contribution in candidate.provenance.strategy_details.items()
+            )
+            for candidate in candidates[: self._config.max_graph_seeds]
+        )
+        return strong_seed_count >= self._config.adaptive_graph_min_seed_count
 
 
 async def _resolve_parent_identity(

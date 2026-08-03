@@ -29,6 +29,7 @@ class QueryPlan:
     graph_depth: int
     graph_seed_budget: int
     rerank_budget: int
+    adaptive_graph: bool = False
     expansion_strategy: str | None = None
     diagnostic_skip_reasons: tuple[str, ...] = ()
 
@@ -69,6 +70,7 @@ class QueryRouterConfig:
     vector_candidate_multiplier: int | None = None
     graph_seed_budget: int = 10
     graph_depth: int = 1
+    adaptive_graph_enabled: bool = False
     rerank_budget: int = 0
     expansion_enabled: bool = False
     expansion_strategy: str = "query_expansion"
@@ -93,6 +95,7 @@ class QueryRouter:
         vector_available: bool,
         graph_available: bool,
         graph_enabled: bool = True,
+        adaptive_graph_ready: bool = False,
         rerank_available: bool = False,
     ) -> QueryPlan:
         if limit < 1:
@@ -113,8 +116,17 @@ class QueryRouter:
         keyword_enabled = keyword_available
         vector_enabled = vector_available
         graph_is_enabled = (
-            graph_available and graph_enabled and signals.relationship
+            graph_available
+            and graph_enabled
+            and (
+                signals.relationship
+                or (
+                    self.config.adaptive_graph_enabled
+                    and adaptive_graph_ready
+                )
+            )
         )
+        adaptive_graph = graph_is_enabled and not signals.relationship
         skip_reasons: list[str] = []
 
         if not keyword_enabled:
@@ -126,7 +138,11 @@ class QueryRouter:
         elif not graph_enabled:
             skip_reasons.append("graph:disabled")
         elif not signals.relationship:
-            skip_reasons.append("graph:query_not_relationship")
+            skip_reasons.append(
+                "graph:awaiting_seed_confidence"
+                if self.config.adaptive_graph_enabled
+                else "graph:query_not_relationship"
+            )
 
         if signals.artifact:
             vector_candidates_keyword_bounded = keyword_enabled
@@ -192,6 +208,7 @@ class QueryRouter:
             graph_depth=self.config.graph_depth,
             graph_seed_budget=self.config.graph_seed_budget,
             rerank_budget=rerank_budget,
+            adaptive_graph=adaptive_graph,
             expansion_strategy=expansion_strategy,
             diagnostic_skip_reasons=tuple(skip_reasons),
         )

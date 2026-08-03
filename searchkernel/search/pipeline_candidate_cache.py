@@ -104,6 +104,15 @@ class CandidateCachePolicy[CandidateT]:
                         "base_graph_weight": self._config.base_graph_weight,
                         "graph_fusion": self._config.graph_fusion,
                         "graph_enabled": self._config.graph_enabled,
+                        "adaptive_graph_enabled": (
+                            self._config.adaptive_graph_enabled
+                        ),
+                        "adaptive_graph_min_seed_score": (
+                            self._config.adaptive_graph_min_seed_score
+                        ),
+                        "adaptive_graph_min_seed_count": (
+                            self._config.adaptive_graph_min_seed_count
+                        ),
                         "graph_depth": self._config.graph_depth,
                         "max_graph_seeds": self._config.max_graph_seeds,
                         "max_neighbors_per_seed": (
