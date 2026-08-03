@@ -7,7 +7,7 @@ import math
 import os
 import sqlite3
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
@@ -118,6 +118,24 @@ class SQLiteEmbeddingCache:
                 self._add_metrics(invalidations=1)
                 return
             self._add_metrics(writes=len(prepared))
+
+    def prune_to(self, content_hashes: Iterable[str]) -> int:
+        """Remove cached vectors outside the supplied live content hashes."""
+        keep = frozenset(content_hashes)
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT content_hash FROM embeddings WHERE namespace = ?",
+                (self.encoder_namespace,),
+            ).fetchall()
+            stale = [str(row[0]) for row in rows if row[0] not in keep]
+            if not stale:
+                return 0
+            with self._connection:
+                self._connection.executemany(
+                    "DELETE FROM embeddings WHERE namespace = ? AND content_hash = ?",
+                    ((self.encoder_namespace, content_hash) for content_hash in stale),
+                )
+            return len(stale)
 
     def close(self) -> None:
         with self._lock:
