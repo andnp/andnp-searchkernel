@@ -94,7 +94,7 @@ from searchkernel.search.record_pipeline import (
 )
 from searchkernel.search.utils import classify_query_type, truncate_content
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 __all__ = [
     "FEDERATION_CONTRACT_VERSION",
