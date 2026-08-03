@@ -822,6 +822,7 @@ class RecordSearchPipeline:
         versioned: list[
             tuple[RecordSearchCandidate, HydrationCacheKey]
         ] = []
+        versioned_keys: dict[str, HydrationCacheKey] = {}
         cached: list[tuple[RecordSearchCandidate, Record | None]] = []
         misses: list[RecordSearchCandidate] = []
         if self._hydration_cache is not None and self._policy_version is not None:
@@ -854,6 +855,7 @@ class RecordSearchPipeline:
                     )
                     hit, record = self._hydration_cache.lookup(key)
                     versioned.append((candidate, key))
+                    versioned_keys[candidate.storage_key] = key
                 except Exception as error:  # noqa: BLE001 - cache is optional
                     misses.append(candidate)
                     diagnostics.append(
@@ -895,6 +897,11 @@ class RecordSearchPipeline:
                     [candidate.identity for candidate in misses],
                 ),
             )
+            if result[2] is not None:
+                for candidate in misses:
+                    key = versioned_keys.get(candidate.storage_key)
+                    if key is not None:
+                        self._hydration_cache.fail(key, result[2])
             records = self._consume_stage(result, failures)
             if records is None:
                 return cached
@@ -937,6 +944,9 @@ class RecordSearchPipeline:
             loaded,
         ):
             if error is not None:
+                key = versioned_keys.get(candidate.storage_key)
+                if key is not None:
+                    self._hydration_cache.fail(key, error)
                 self._handle_error("hydration", error, failures)
                 continue
             hydrated.append((candidate, record))
@@ -1006,6 +1016,7 @@ class RecordSearchPipeline:
             try:
                 self._hydration_cache.set(key, record)
             except Exception as error:  # noqa: BLE001 - cache is optional
+                self._hydration_cache.fail(key, error)
                 diagnostics.append(
                     f"hydration_cache:error:{type(error).__name__}"
                 )

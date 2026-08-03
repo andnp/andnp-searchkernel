@@ -341,6 +341,47 @@ async def test_hydration_cache_single_flight_caches_missing_records() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cache_failure_releases_single_flight_waiters() -> None:
+    candidate_cache: CandidateResultCache[list[str]] = CandidateResultCache()
+    candidate_key = CandidateCacheKey.build(
+        query="candidate-failure",
+        filters={},
+        requested_limit=1,
+        acquisition_limit=1,
+        adaptive_limit=None,
+        routing_fingerprint="r",
+        encoder_namespace=None,
+        epochs=SearchEpochs(),
+        policy_version=None,
+    )
+    assert await candidate_cache.async_wait_for_miss(candidate_key) == (True, None)
+    candidate_waiter = asyncio.create_task(
+        candidate_cache.async_wait_for_miss(candidate_key)
+    )
+    await asyncio.sleep(0)
+    candidate_error = RuntimeError("candidate failure")
+    candidate_cache.fail(candidate_key, candidate_error)
+    with pytest.raises(RuntimeError, match="candidate failure"):
+        await candidate_waiter
+
+    hydration_cache: HydrationCache[Record] = HydrationCache()
+    hydration_key = HydrationCacheKey.build(
+        RecordIdentity(None, "note", "hydration-failure"),
+        record_version=1,
+        policy_version="policy/v1",
+    )
+    assert await hydration_cache.async_wait_for_miss(hydration_key) == (True, None)
+    hydration_waiter = asyncio.create_task(
+        hydration_cache.async_wait_for_miss(hydration_key)
+    )
+    await asyncio.sleep(0)
+    hydration_error = RuntimeError("hydration failure")
+    hydration_cache.fail(hydration_key, hydration_error)
+    with pytest.raises(RuntimeError, match="hydration failure"):
+        await hydration_waiter
+
+
+@pytest.mark.asyncio
 async def test_record_pipeline_warm_candidates_skip_retrieval_until_epoch_changes() -> None:
     class Keyword:
         def __init__(self) -> None:

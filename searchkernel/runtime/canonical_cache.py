@@ -228,6 +228,13 @@ class CandidateResultCache[ValueT]:
         self._cache.set(key, value)
         self._complete_inflight(key, value)
 
+    def fail(self, key: CandidateCacheKey, error: BaseException) -> None:
+        """Release waiters when the owner cannot populate the cache."""
+        with self._flight_lock:
+            inflight = self._inflight.pop(key, None)
+        if inflight is not None:
+            _complete_failure(inflight, error)
+
     async def async_wait_for_miss(
         self, key: CandidateCacheKey
     ) -> tuple[bool, ValueT | None]:
@@ -345,6 +352,13 @@ class HydrationCache[ValueT]:
             inflight = self._inflight.pop(key, None)
         if inflight is not None:
             _complete_success(inflight, value)
+
+    def fail(self, key: HydrationCacheKey, error: BaseException) -> None:
+        """Release waiters when the owner cannot populate the cache."""
+        with self._flight_lock:
+            inflight = self._inflight.pop(key, None)
+        if inflight is not None:
+            _complete_failure(inflight, error)
 
     async def async_wait_for_miss(
         self, key: HydrationCacheKey
