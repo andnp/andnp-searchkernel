@@ -382,6 +382,41 @@ async def test_cache_failure_releases_single_flight_waiters() -> None:
 
 
 @pytest.mark.asyncio
+async def test_owner_failure_releases_unfinished_single_flight_waiters() -> None:
+    cache: CandidateResultCache[list[str]] = CandidateResultCache()
+    key = CandidateCacheKey.build(
+        query="owner-failure",
+        filters={},
+        requested_limit=1,
+        acquisition_limit=1,
+        adaptive_limit=None,
+        routing_fingerprint="r",
+        encoder_namespace=None,
+        epochs=SearchEpochs(),
+        policy_version=None,
+    )
+
+    claimed = asyncio.Event()
+    release = asyncio.Event()
+
+    async def owner() -> None:
+        assert await cache.async_wait_for_miss(key) == (True, None)
+        claimed.set()
+        await release.wait()
+        raise RuntimeError("owner failed")
+
+    first = asyncio.create_task(owner())
+    await claimed.wait()
+    second = asyncio.create_task(cache.async_wait_for_miss(key))
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(RuntimeError, match="owner failed"):
+        await first
+    with pytest.raises(RuntimeError, match="owner failed"):
+        await second
+
+
+@pytest.mark.asyncio
 async def test_record_pipeline_warm_candidates_skip_retrieval_until_epoch_changes() -> None:
     class Keyword:
         def __init__(self) -> None:

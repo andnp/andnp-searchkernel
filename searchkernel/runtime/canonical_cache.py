@@ -241,6 +241,11 @@ class CandidateResultCache[ValueT]:
         """Claim a miss or await the caller already computing this key."""
         inflight, leader = self._start_or_join(key)
         if leader:
+            _watch_single_flight_owner(
+                self._owner_failed,
+                key,
+                inflight,
+            )
             return True, None
         await asyncio.to_thread(inflight.completed.wait)
         return False, _finish_waiter(inflight)
@@ -295,6 +300,14 @@ class CandidateResultCache[ValueT]:
             inflight = _InFlight()
             self._inflight[key] = inflight
             return inflight, True
+
+    def _owner_failed(
+        self,
+        key: CandidateCacheKey,
+        inflight: _InFlight[ValueT],
+        error: BaseException,
+    ) -> None:
+        self.fail(key, error)
 
 
 class HydrationCache[ValueT]:
@@ -366,6 +379,11 @@ class HydrationCache[ValueT]:
         """Claim a miss or await the caller already computing this key."""
         inflight, leader = self._start_or_join(key)
         if leader:
+            _watch_single_flight_owner(
+                self._owner_failed,
+                key,
+                inflight,
+            )
             return True, None
         await asyncio.to_thread(inflight.completed.wait)
         return False, _finish_waiter(inflight)
@@ -407,6 +425,14 @@ class HydrationCache[ValueT]:
             self._inflight[key] = inflight
             return inflight, True
 
+    def _owner_failed(
+        self,
+        key: HydrationCacheKey,
+        inflight: _InFlight[ValueT | None],
+        error: BaseException,
+    ) -> None:
+        self.fail(key, error)
+
 
 def _complete_success[T](inflight: _InFlight[T], value: T) -> None:
     inflight.value = copy.deepcopy(value)
@@ -416,6 +442,26 @@ def _complete_success[T](inflight: _InFlight[T], value: T) -> None:
 def _complete_failure[T](inflight: _InFlight[T], error: BaseException) -> None:
     inflight.error = error
     inflight.completed.set()
+
+
+def _watch_single_flight_owner[ValueT](
+    fail: Callable[[object, _InFlight[ValueT], BaseException], None],
+    key: object,
+    inflight: _InFlight[ValueT],
+) -> None:
+    owner = asyncio.current_task()
+    if owner is None:
+        return
+
+    def owner_done(task: asyncio.Task[object]) -> None:
+        try:
+            error = task.exception()
+        except asyncio.CancelledError as task_error:
+            error = task_error
+        if error is not None:
+            fail(key, inflight, error)
+
+    owner.add_done_callback(owner_done)
 
 
 def _finish_waiter[T](inflight: _InFlight[T]) -> T:
