@@ -51,7 +51,7 @@ from searchkernel.storage.db import DatabaseManager, SQLiteTuning
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 _LOCAL_KEYWORD_SCHEMA = "local_records_fts"
-_LOCAL_KEYWORD_SCHEMA_VERSION = 2
+_LOCAL_KEYWORD_SCHEMA_VERSION = 3
 _LOCAL_FTS_TABLE = "local_records_fts"
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
@@ -346,7 +346,22 @@ class LocalRecordBackend:
     @staticmethod
     def _metadata_keyword_text(metadata: dict[str, Any]) -> str:
         values: list[str] = []
-        for key in ("tags", "keywords", "source_keywords", "aliases"):
+        for key in (
+            "tags",
+            "keywords",
+            "source_keywords",
+            "aliases",
+            "file_path",
+            "source_file",
+            "path",
+            "filename",
+            "file_name",
+            "files_changed",
+            "symbols",
+            "symbol",
+            "file_tokens",
+            "commit_file_tokens",
+        ):
             value = metadata.get(key)
             if value is None:
                 continue
@@ -360,7 +375,14 @@ class LocalRecordBackend:
 
     @staticmethod
     def _metadata_uri(metadata: dict[str, Any]) -> str:
-        for key in ("uri", "source_file", "file_path", "path"):
+        for key in (
+            "uri",
+            "source_file",
+            "file_path",
+            "path",
+            "filename",
+            "file_name",
+        ):
             value = metadata.get(key)
             if value:
                 return str(value)
