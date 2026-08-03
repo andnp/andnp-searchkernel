@@ -231,6 +231,17 @@ class LocalRecordBackend:
                 ON local_records (status);
             CREATE INDEX IF NOT EXISTS idx_local_records_workspace
                 ON local_records (workspace_id);
+            CREATE TABLE IF NOT EXISTS local_chunk_state (
+                chunk_storage_key TEXT PRIMARY KEY,
+                parent_storage_key TEXT NOT NULL,
+                chunk_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                metadata TEXT NOT NULL,
+                FOREIGN KEY (chunk_storage_key) REFERENCES local_records(storage_key)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_local_chunk_parent
+                ON local_chunk_state (parent_storage_key, chunk_index, chunk_id);
             CREATE TABLE IF NOT EXISTS local_vectors_v2 (
                 storage_key TEXT NOT NULL,
                 encoder_namespace TEXT NOT NULL,
@@ -500,6 +511,94 @@ class LocalRecordBackend:
         )
 
     @staticmethod
+    def _chunk_state_values(record: Record) -> tuple[Any, ...] | None:
+        if not record.metadata.get("_searchkernel_chunk"):
+            return None
+        parent_key = record.metadata.get("_chunk_parent_storage_key")
+        chunk_id = record.metadata.get("_chunk_id")
+        chunk_index = record.metadata.get("_chunk_index")
+        chunk_metadata = record.metadata.get("_chunk_metadata", {})
+        if not isinstance(parent_key, str) or not isinstance(chunk_id, str):
+            raise TypeError("chunk records require parent and chunk identities")
+        if not isinstance(chunk_index, int) or not isinstance(chunk_metadata, dict):
+            raise TypeError("chunk records require valid retrieval metadata")
+        return (
+            record.storage_key,
+            parent_key,
+            chunk_id,
+            chunk_index,
+            json.dumps(chunk_metadata, sort_keys=True),
+        )
+
+    def _sync_chunk_state(
+        self,
+        conn: sqlite3.Connection,
+        records: Sequence[Record],
+    ) -> None:
+        chunk_rows = [
+            values
+            for record in records
+            if (values := self._chunk_state_values(record)) is not None
+        ]
+        if not chunk_rows:
+            return
+        parent_keys = sorted({row[1] for row in chunk_rows})
+        incoming_keys = {row[0] for row in chunk_rows}
+        placeholders = ",".join("?" for _ in parent_keys)
+        stale_rows = conn.execute(
+            f"""
+            SELECT r.storage_key, r.rowid, r.title, r.body, r.indexed_text, r.uri, r.keywords
+            FROM local_records r
+            WHERE r.storage_key IN (
+                SELECT chunk_storage_key
+                FROM local_chunk_state
+                WHERE parent_storage_key IN ({placeholders})
+            )
+            """,
+            parent_keys,
+        ).fetchall()
+        stale_rows = [row for row in stale_rows if row["storage_key"] not in incoming_keys]
+        if self._fts5_available and stale_rows:
+            conn.executemany(
+                f"""
+                INSERT INTO {_LOCAL_FTS_TABLE}
+                    ({_LOCAL_FTS_TABLE}, rowid, title, body, uri, keywords)
+                VALUES ('delete', ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row["rowid"],
+                        row["title"],
+                        row["indexed_text"] or row["body"],
+                        row["uri"],
+                        row["keywords"],
+                    )
+                    for row in stale_rows
+                ],
+            )
+        stale_keys = [row["storage_key"] for row in stale_rows]
+        if stale_keys:
+            for key_chunk in self._key_chunks(stale_keys):
+                placeholders = ",".join("?" for _ in key_chunk)
+                conn.execute(
+                    f"DELETE FROM local_records WHERE storage_key IN ({placeholders})",
+                    key_chunk,
+                )
+        conn.executemany(
+            """
+            INSERT INTO local_chunk_state (
+                chunk_storage_key, parent_storage_key, chunk_id, chunk_index, metadata
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chunk_storage_key) DO UPDATE SET
+                parent_storage_key = excluded.parent_storage_key,
+                chunk_id = excluded.chunk_id,
+                chunk_index = excluded.chunk_index,
+                metadata = excluded.metadata
+            """,
+            chunk_rows,
+        )
+
+    @staticmethod
     def _key_chunks(keys: Sequence[str]) -> Iterable[list[str]]:
         # Keep IN statements below SQLite's default bound-parameter limit.
         for start in range(0, len(keys), 900):
@@ -586,7 +685,6 @@ class LocalRecordBackend:
                     for row in old_rows.values()
                 ],
             )
-
         conn.executemany(
             """
             INSERT INTO local_records (
@@ -641,6 +739,7 @@ class LocalRecordBackend:
                     for row in new_rows
                 ],
             )
+        self._sync_chunk_state(conn, rows)
 
     def _upsert_records(self, records: Iterable[Record]) -> None:
         rows = list(records)
@@ -1400,6 +1499,52 @@ class LocalRecordBackend:
             for row in rows
         }
         return {key: records.get(key) for key in keys}
+
+    def chunk_parent(self, record_id: RecordIdentity | str) -> RecordIdentity | None:
+        """Return the canonical parent identity for a persisted chunk."""
+        storage_key = (
+            record_id.storage_key if isinstance(record_id, RecordIdentity) else record_id
+        )
+        with self._lock:
+            conn = self._db.get_connection()
+            row = conn.execute(
+                """
+                SELECT parent_storage_key
+                FROM local_chunk_state
+                WHERE chunk_storage_key = ?
+                """,
+                (storage_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return RecordIdentity.from_storage_key(row[0])
+
+    def chunk_records(
+        self,
+        parent_id: RecordIdentity | str,
+    ) -> dict[str, Record]:
+        """Hydrate persisted chunks for one canonical parent."""
+        parent_key = (
+            parent_id.storage_key if isinstance(parent_id, RecordIdentity) else parent_id
+        )
+        with self._lock:
+            conn = self._db.get_connection()
+            rows = conn.execute(
+                """
+                SELECT chunk_storage_key
+                FROM local_chunk_state
+                WHERE parent_storage_key = ?
+                ORDER BY chunk_index, chunk_id
+                """,
+                (parent_key,),
+            ).fetchall()
+        identities = [RecordIdentity.from_storage_key(row[0]) for row in rows]
+        hydrated = self.hydrate_records(identities)
+        return {
+            key: record
+            for key, record in hydrated.items()
+            if record is not None
+        }
 
     def delete(self, record_ids: list[str]) -> None:
         if not record_ids:
