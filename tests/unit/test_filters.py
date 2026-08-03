@@ -2,7 +2,37 @@
 Unit tests for search filtering functions.
 """
 
-from searchkernel.search.filters import filter_by_confidence, limit_per_document
+from searchkernel.search.filters import (
+    filter_by_confidence,
+    limit_per_document,
+    limit_per_group,
+)
+
+
+def test_limit_per_group_uses_caller_defined_grouping():
+    results = [
+        ("note-a", 0.95),
+        ("commit-a", 0.90),
+        ("note-b", 0.85),
+        ("note-c", 0.80),
+        ("commit-b", 0.75),
+    ]
+
+    assert limit_per_group(
+        results,
+        group_key=lambda result: result[0].split("-", 1)[0],
+        max_per_group=2,
+    ) == [
+        ("note-a", 0.95),
+        ("commit-a", 0.90),
+        ("note-b", 0.85),
+        ("commit-b", 0.75),
+    ]
+
+
+def test_limit_per_group_disabled_returns_all_results():
+    results = [("same", 1.0), ("same", 0.5)]
+    assert limit_per_group(results, lambda result: result[0], 0) == results
 
 
 class TestFilterByConfidence:

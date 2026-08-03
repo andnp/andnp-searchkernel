@@ -1,3 +1,6 @@
+import sqlite3
+import string
+
 from searchkernel.indices.keyword_scoring import (
     looks_like_artifact_query,
     normalize_artifact_value,
@@ -12,7 +15,7 @@ from searchkernel.indices.keyword_scoring import (
 
 
 def test_sanitize_fts_query_removes_match_operators():
-    assert sanitize_fts_query('worker.enabled - "debug"') == "worker.enabled debug"
+    assert sanitize_fts_query('worker.enabled - "debug"') == "worker enabled debug"
     assert sanitize_fts_query('"alpha beta"') == '"alpha beta"'
     assert sanitize_fts_query("alph*") == "alph*"
     assert sanitize_fts_query("alpha OR beta") == 'alpha "OR" beta'
@@ -24,6 +27,18 @@ def test_sanitize_fts_query_removes_match_operators():
         "The MCP server has a method called list_tools that returns Tool objects."
     ) == "The MCP server has a method called list_tools that returns Tool objects"
     assert sanitize_fts_query("   ") == '""'
+
+
+def test_sanitize_fts_query_accepts_arbitrary_punctuation_for_fts5():
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE VIRTUAL TABLE search USING fts5(body)")
+    connection.execute("INSERT INTO search(body) VALUES (?)", ("alpha beta",))
+
+    for punctuation in string.punctuation:
+        sanitized = sanitize_fts_query(f"alpha{punctuation}beta")
+        connection.execute(
+            "SELECT rowid FROM search WHERE search MATCH ?", (sanitized,)
+        ).fetchall()
 
 
 def test_looks_like_artifact_query_detects_path_like_values():

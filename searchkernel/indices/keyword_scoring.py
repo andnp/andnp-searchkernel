@@ -17,7 +17,11 @@ def sanitize_fts_query(query: str) -> str:
             continue
         raw = raw.rstrip(".,;!?")
         prefix = not quoted and raw.rstrip().endswith("*")
-        sanitized = re.sub(r"[\"\'*\^(){}[\]<>|~!?:,;/\\\-+&]", " ", raw)
+        # FTS5 treats several punctuation characters as query syntax even
+        # though they are common in natural-language input. Keep only word
+        # characters and whitespace in bare terms; phrase and prefix intent
+        # is restored below from the original token shape.
+        sanitized = re.sub(r"[^\w\s]", " ", raw)
         words = sanitized.split()
         if not words:
             continue
