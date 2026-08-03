@@ -221,6 +221,60 @@ def test_keyword_search_supports_tokens_phrases_prefixes_artifacts_and_symbols(
     ]
 
 
+def test_keyword_search_falls_back_for_natural_language_queries(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record("note", "alpha", "alpha"),
+        _record("note", "beta", "beta"),
+    ]
+    backend.index(records)
+
+    assert [hit.source_id for hit in backend.search_keyword("alpha beta", 10)] == [
+        "alpha",
+        "beta",
+    ]
+
+
+def test_keyword_search_keeps_artifact_queries_exact(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.index(
+        [
+            _record("note", "alpha", "alpha"),
+            _record("note", "beta", "beta"),
+        ]
+    )
+
+    assert backend.search_keyword("alpha.beta", 10) == []
+
+
+def test_keyword_search_applies_filters_to_natural_language_fallback(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record(
+            "note",
+            "kept",
+            "alpha",
+            metadata={"project_id": "keep"},
+        ),
+        _record(
+            "note",
+            "excluded",
+            "beta",
+            metadata={"project_id": "drop"},
+        ),
+    ]
+    backend.index(records)
+
+    assert [
+        hit.source_id
+        for hit in backend.search_keyword(
+            "alpha beta",
+            10,
+            {"project_filter": ["keep"]},
+        )
+    ] == ["kept"]
+
+
 def test_keyword_search_handles_case_sanitization_and_keyword_metadata(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     record = _record(
