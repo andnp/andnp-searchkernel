@@ -401,6 +401,33 @@ def test_keyword_search_handles_case_sanitization_and_keyword_metadata(tmp_path)
     ]
 
 
+def test_keyword_search_retrieves_artifact_metadata_without_uri(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.index(
+        [
+            _record(
+                "git_commit",
+                "commit",
+                "unrelated commit body",
+                metadata={
+                    "file_tokens": ["src/searchkernel/search.py"],
+                    "symbols": ["RecordSearchPipeline"],
+                    "commit_file_tokens": ["search.py"],
+                },
+            ),
+            _record("git_commit", "other", "unrelated record"),
+        ]
+    )
+
+    assert [
+        hit.source_id
+        for hit in backend.search_keyword("src/searchkernel/search.py", 10)
+    ] == ["commit"]
+    assert [hit.source_id for hit in backend.search_keyword(
+        "RecordSearchPipeline", 10
+    )] == ["commit"]
+
+
 def test_keyword_search_applies_all_sql_filters(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     records = [
