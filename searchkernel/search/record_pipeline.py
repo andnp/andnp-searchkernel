@@ -93,7 +93,12 @@ class QueryEmbeddingProvider(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RecordSearchQueryContext(Mapping[str, object]):
-    """Read-only query state supplied to query-aware policy callbacks."""
+    """Read-only query state supplied to query-aware policy callbacks.
+
+    The optional ``retrieval_mode`` filter defaults to ``"hybrid"``. An
+    application may set it to ``"semantic"`` (or ``"semantic_only"``) to
+    retain vector retrieval while disabling keyword and graph lanes.
+    """
 
     query: str
     filters: Mapping[str, object]
@@ -348,7 +353,12 @@ class RecordSearchPipeline:
         limit: int = 10,
         filters: dict[str, object] | None = None,
     ) -> RecordSearchOutcome:
-        """Return deterministic hydrated results for ``query``."""
+        """Return deterministic hydrated results for ``query``.
+
+        ``filters["retrieval_mode"]`` accepts ``"hybrid"`` (the default),
+        ``"semantic"``, or ``"semantic_only"``. Semantic-only requests keep
+        vector retrieval and disable keyword and graph retrieval.
+        """
         if limit < 1:
             raise ValueError("limit must be positive")
         if not query.strip():
@@ -365,6 +375,7 @@ class RecordSearchPipeline:
         )
         filters = dict(filters or {})
         filters.setdefault("statuses", ["active"])
+        semantic_only = _semantic_only_requested(filters)
         query_context = RecordSearchQueryContext(
             query=query,
             filters=filters,
@@ -373,10 +384,12 @@ class RecordSearchPipeline:
         plan = self._router.route(
             query,
             limit=limit,
-            keyword_available=self._keyword_store is not None,
+            keyword_available=(
+                self._keyword_store is not None and not semantic_only
+            ),
             vector_available=self._vector_store is not None,
-            graph_available=self._graph_store is not None,
-            graph_enabled=self._config.graph_enabled,
+            graph_available=self._graph_store is not None and not semantic_only,
+            graph_enabled=self._config.graph_enabled and not semantic_only,
             rerank_available=self._reranker is not None,
         )
         diagnostics.extend(_plan_diagnostics(plan))
@@ -1520,6 +1533,22 @@ def _plan_diagnostics(plan: QueryPlan) -> list[str]:
         for reason in plan.diagnostic_skip_reasons
     )
     return diagnostics
+
+
+def _semantic_only_requested(filters: Mapping[str, object]) -> bool:
+    mode = filters.get("retrieval_mode", "hybrid")
+    if not isinstance(mode, str):
+        raise TypeError(
+            "retrieval_mode must be 'hybrid', 'semantic', or 'semantic_only'"
+        )
+    normalized_mode = mode.strip().lower()
+    if normalized_mode == "hybrid":
+        return False
+    if normalized_mode in {"semantic", "semantic_only"}:
+        return True
+    raise ValueError(
+        "retrieval_mode must be 'hybrid', 'semantic', or 'semantic_only'"
+    )
 
 
 def _artifact_results_are_confident(

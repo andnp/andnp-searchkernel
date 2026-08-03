@@ -103,6 +103,7 @@ class FakeGraphStore:
         self,
         neighbors: dict[str, list[GraphNeighbor | tuple[str, str, float]]],
     ) -> None:
+        self.calls: list[str] = []
         self._neighbors = {
             key: [
                 neighbor
@@ -134,6 +135,7 @@ class FakeGraphStore:
         depth: int = 1,
     ) -> list[GraphNeighbor]:
         key = record_id.source_id
+        self.calls.append(key)
         return self._neighbors.get(key, [])
 
 
@@ -194,6 +196,61 @@ async def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
 
     assert [result.record_id for result in outcome.results] == ["a", "b", "c"]
     assert outcome.results[0].provenance.strategies == ("keyword", "vector")
+
+
+@pytest.mark.parametrize("retrieval_mode", ["semantic", "semantic_only"])
+async def test_semantic_retrieval_mode_routes_only_vector(
+    retrieval_mode: str,
+) -> None:
+    records = {record_id: _record(record_id) for record_id in ("vector", "graph")}
+    keyword_store = FakeKeywordStore([("keyword", 1.0)])
+    graph_store = FakeGraphStore({"vector": [("graph", "related", 1.0)]})
+
+    class AnyQueryEmbedder(FakeEmbedder):
+        def embed_query(self, query: str) -> list[float]:
+            return [1.0, 0.0]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=keyword_store,
+        vector_store=FakeVectorStore([("vector", 0.9)]),
+        graph_store=graph_store,
+        embedding_provider=AnyQueryEmbedder(),
+        hydrator=_hydrator(records),
+        config=RecordSearchConfig(capture_trace=True),
+    )
+
+    outcome = await pipeline.async_search(
+        "what relates to query?",
+        limit=1,
+        filters={"retrieval_mode": retrieval_mode},
+    )
+
+    assert [result.record_id for result in outcome.results] == ["vector"]
+    assert keyword_store.queries == []
+    assert graph_store.calls == []
+    assert outcome.trace is not None
+    assert outcome.trace.to_dict()["provenance"]["query_plan"]["lanes"] == (
+        "vector",
+    )
+
+
+async def test_retrieval_mode_defaults_to_hybrid_and_rejects_unknown_values() -> None:
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        hydrator=_hydrator({"a": _record("a")}),
+        config=RecordSearchConfig(capture_trace=True),
+    )
+
+    outcome = await pipeline.async_search("query", limit=1)
+    assert outcome.trace is not None
+    assert outcome.trace.to_dict()["provenance"]["query_plan"]["lanes"] == (
+        "keyword",
+    )
+
+    with pytest.raises(ValueError, match="retrieval_mode"):
+        await pipeline.async_search(
+            "query", limit=1, filters={"retrieval_mode": "keyword"}
+        )
 
 
 async def test_vector_candidate_acquisition_supports_async_store_adapter() -> None:
