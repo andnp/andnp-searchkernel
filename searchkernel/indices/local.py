@@ -56,7 +56,6 @@ _LOCAL_FTS_TABLE = "local_records_fts"
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
 _FUZZY_QUERY_MAX_TERMS = 4
-_FUZZY_CANDIDATE_LIMIT = 256
 _FUZZY_ROW_TOKEN_LIMIT = 256
 _FUZZY_TERM_RATIO = 0.82
 _VECTOR_EMBEDDING_BYTES = np.dtype("<f4").itemsize
@@ -1112,62 +1111,49 @@ class LocalRecordBackend:
         clauses, parameters = self._keyword_filter_sql(filters)
         clauses.insert(0, f"{_LOCAL_FTS_TABLE} MATCH ?")
         parameters.insert(0, prefix_query)
+        with self._lock:
+            conn = self._db.get_connection()
+            rows = conn.execute(
+                f"""
+                SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                       r.status, r.title, r.body, r.indexed_text, r.uri,
+                       r.keywords, r.metadata
+                FROM {_LOCAL_FTS_TABLE}
+                JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
+                WHERE {" AND ".join(clauses)}
+                ORDER BY bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0),
+                         r.storage_key ASC
+                LIMIT ?
+                """,
+                (*parameters, _FALLBACK_SCAN_MAX_ROWS),
+            ).fetchall()
         hits: list[RecordHit] = []
-        offset = 0
-        while offset < _FALLBACK_SCAN_MAX_ROWS:
-            with self._lock:
-                conn = self._db.get_connection()
-                rows = conn.execute(
-                    f"""
-                    SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                           r.status, r.title, r.body, r.indexed_text, r.uri,
-                           r.keywords, r.metadata
-                    FROM {_LOCAL_FTS_TABLE}
-                    JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
-                    WHERE {" AND ".join(clauses)}
-                    ORDER BY bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0)
-                    LIMIT ? OFFSET ?
-                    """,
-                    (
-                        *parameters,
-                        min(
-                            _FUZZY_CANDIDATE_LIMIT,
-                            _FALLBACK_SCAN_MAX_ROWS - offset,
+        for row in rows:
+            if filters and not self._matches(row, filters):
+                continue
+            text = " ".join(
+                (
+                    row["title"] or "",
+                    row["indexed_text"] or row["body"] or "",
+                    row["uri"] or "",
+                    row["keywords"] or "",
+                )
+            )
+            tokens = list(dict.fromkeys(
+                _TOKEN_RE.findall(text.lower())
+            ))[:_FUZZY_ROW_TOKEN_LIMIT]
+            scores = [_fuzzy_term_score(term, tokens) for term in terms]
+            if all(score >= _FUZZY_TERM_RATIO for score in scores):
+                hits.append(
+                    RecordHit(
+                        RecordIdentity(
+                            row["workspace_id"],
+                            row["source_kind"],
+                            row["source_id"],
                         ),
-                        offset,
-                    ),
-                ).fetchall()
-            if not rows:
-                break
-            for row in rows:
-                if filters and not self._matches(row, filters):
-                    continue
-                text = " ".join(
-                    (
-                        row["title"] or "",
-                        row["indexed_text"] or row["body"] or "",
-                        row["uri"] or "",
-                        row["keywords"] or "",
+                        sum(scores),
                     )
                 )
-                tokens = list(dict.fromkeys(
-                    _TOKEN_RE.findall(text.lower())
-                ))[:_FUZZY_ROW_TOKEN_LIMIT]
-                scores = [_fuzzy_term_score(term, tokens) for term in terms]
-                if all(score >= _FUZZY_TERM_RATIO for score in scores):
-                    hits.append(
-                        RecordHit(
-                            RecordIdentity(
-                                row["workspace_id"],
-                                row["source_kind"],
-                                row["source_id"],
-                            ),
-                            sum(scores),
-                        )
-                    )
-            offset += len(rows)
-            if len(rows) < _FUZZY_CANDIDATE_LIMIT:
-                break
         hits.sort(key=lambda item: (-item.score, item.storage_key))
         return hits[:k]
 
