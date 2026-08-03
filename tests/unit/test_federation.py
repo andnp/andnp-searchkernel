@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
+import searchkernel.runtime.federation as federation_runtime
 from searchkernel.ports.federation import (
     SearchHit,
     SearchRequest,
@@ -379,3 +380,67 @@ async def test_federation_adds_end_to_end_provenance_to_every_hit():
         (item.provenance.source, item.provenance.request_id)
         for item in response.hits
     ] == [(first.identity, "request-42")] * 2
+
+
+@pytest.mark.asyncio
+async def test_federation_creates_only_bounded_worker_tasks(monkeypatch):
+    created = 0
+    original_create_task = asyncio.create_task
+
+    def count_task(coro):
+        nonlocal created
+        created += 1
+        return original_create_task(coro)
+
+    monkeypatch.setattr(federation_runtime.asyncio, "create_task", count_task)
+    sources = [source(str(index), ()) for index in range(20)]
+    executor = FederationExecutor(
+        [RegisteredSearchSource(item.identity, item) for item in sources],
+        config=FederationConfig(max_concurrency=3),
+    )
+
+    await executor.search(SearchRequest("query"))
+
+    assert created == 3
+
+
+@pytest.mark.asyncio
+async def test_federation_stream_marks_provisional_results_and_one_authoritative_result():
+    fast = source("fast", (hit("fast", "quick", 1),), delay=0.001)
+    slow = source("slow", (hit("slow", "later", 1),), delay=0.02)
+    executor = FederationExecutor(
+        [
+            RegisteredSearchSource(fast.identity, fast),
+            RegisteredSearchSource(slow.identity, slow),
+        ],
+        config=FederationConfig(max_concurrency=2),
+    )
+
+    events = [
+        event
+        async for event in executor.search_events(SearchRequest("query", top_k=5))
+    ]
+
+    assert [event.kind for event in events] == [
+        "source",
+        "provisional",
+        "source",
+        "provisional",
+        "authoritative",
+    ]
+    assert events[0].source == fast.identity
+    assert events[0].source_response is not None
+    assert all(not event.authoritative for event in events[:-1])
+    assert [
+        event.result.authoritative
+        for event in events
+        if event.kind == "provisional" and event.result is not None
+    ] == [False, False]
+    assert events[-1].authoritative
+    assert events[-1].result is not None
+    assert events[-1].result.authoritative
+    assert [item.source_id for item in events[-1].result.hits] == ["quick", "later"]
+    assert [item.source for item in events[-1].result.source_responses] == [
+        fast.identity,
+        slow.identity,
+    ]

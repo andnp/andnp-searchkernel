@@ -7,11 +7,12 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from searchkernel.domain import RecordIdentity, RecordStatus
 
 FEDERATION_CONTRACT_VERSION = "v1"
+FederationEventKind = Literal["source", "provisional", "authoritative"]
 MAX_QUERY_LENGTH = 4_096
 MAX_RERANK_TEXT_LENGTH = 4_096
 MAX_SNIPPET_LENGTH = 8_192
@@ -712,6 +713,7 @@ __all__ = [
     "MAX_SNIPPET_LENGTH",
     "MAX_TOP_K",
     "CallerAuthorizationContext",
+    "FederationEventKind",
     "JsonValue",
     "SearchHit",
     "SearchHitProvenance",

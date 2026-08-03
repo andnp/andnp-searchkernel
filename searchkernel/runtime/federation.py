@@ -6,15 +6,16 @@ import asyncio
 import inspect
 import math
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from searchkernel.ports.federation import (
     FEDERATION_CONTRACT_VERSION,
     MAX_RERANK_TEXT_LENGTH,
+    FederationEventKind,
     SearchHit,
     SearchRequest,
     SearchResponse,
@@ -61,6 +62,7 @@ class FederatedSearchResponse:
     source_responses: tuple[SearchResponse, ...] = ()
     fusion_scores: Mapping[str, float] = field(default_factory=dict)
     elapsed_ms: float = 0.0
+    authoritative: bool = True
 
     @property
     def degraded(self) -> bool:
@@ -70,6 +72,51 @@ class FederatedSearchResponse:
     def results(self) -> tuple[SearchHit, ...]:
         """Alias matching the result naming used by other search APIs."""
         return self.hits
+
+
+@dataclass(frozen=True, slots=True)
+class FederationEvent:
+    """An opt-in progressive update with an explicit finality contract."""
+
+    kind: FederationEventKind
+    source: SourceIdentity | None = None
+    source_response: SearchResponse | None = None
+    result: FederatedSearchResponse | None = None
+    diagnostic: FederationDiagnostic | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("source", "provisional", "authoritative"):
+            raise ValueError(f"unsupported federation event kind: {self.kind}")
+        if self.kind == "source":
+            if self.source is None or self.result is not None:
+                raise ValueError("source events require a source and no result")
+            return
+        if self.result is None or self.source is not None:
+            raise ValueError(f"{self.kind} events require only a result")
+        if self.kind == "provisional" and self.result.authoritative:
+            raise ValueError("provisional results must not be authoritative")
+        if self.kind == "authoritative" and not self.result.authoritative:
+            raise ValueError("authoritative events require an authoritative result")
+
+    @property
+    def event_type(self) -> FederationEventKind:
+        """Alias for consumers that use event-type terminology."""
+        return self.kind
+
+    @property
+    def authoritative(self) -> bool:
+        """Whether this event carries the one final fused result."""
+        return self.kind == "authoritative"
+
+    @property
+    def provisional(self) -> bool:
+        """Whether this event carries an explicitly non-final result."""
+        return self.kind == "provisional"
+
+    @property
+    def response(self) -> SearchResponse | None:
+        """Compatibility alias for the source response payload."""
+        return self.source_response
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,92 +204,101 @@ class FederationExecutor:
         started = time.perf_counter()
         selected, skipped = self._select_sources(request)
         diagnostics = list(skipped)
-        if not selected:
-            return FederatedSearchResponse(
-                partial=bool(diagnostics),
-                degradations=tuple(diagnostics),
-                elapsed_ms=_elapsed_ms(started),
-            )
-
-        semaphore = asyncio.Semaphore(self.config.max_concurrency)
-        tasks = [
-            asyncio.create_task(
-                self._search_source(
-                    registration,
-                    request,
-                    semaphore,
-                )
-            )
-            for registration in selected
-        ]
-        try:
-            outcomes = await asyncio.gather(*tasks)
-        except asyncio.CancelledError:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
-
         responses: list[SearchResponse] = []
         source_hits: list[list[_SourceHit]] = []
-        for registration, outcome in zip(selected, outcomes, strict=True):
-            response, source_diagnostic = outcome
-            if source_diagnostic is not None:
-                diagnostics.append(source_diagnostic)
-            if response is None:
-                continue
-            responses.append(response)
-            if response.partial:
-                diagnostics.append(
-                    FederationDiagnostic(
-                        source=response.source,
-                        status="partial",
-                        message="source returned partial results",
-                    )
-                )
-            source_hits.append(
-                [
-                    _SourceHit(
-                        source_index=index,
-                        source=response.source,
-                        hit=_with_provenance(hit, response.source, request),
-                    )
-                    for index, hit in enumerate(
-                        sorted(
-                            response.hits,
-                            key=lambda item: (
-                                item.source_rank,
-                                _identity_key(item),
-                            ),
-                        )
-                    )
-                ]
+        outcomes: list[tuple[SearchResponse | None, FederationDiagnostic | None] | None] = [
+            None
+        ] * len(selected)
+        async for index, outcome in self._run_sources(selected, request):
+            outcomes[index] = outcome
+        for outcome in outcomes:
+            assert outcome is not None
+            self._add_outcome(
+                outcome,
+                request,
+                responses,
+                source_hits,
+                diagnostics,
             )
-
-        fused_hits, fusion_scores = _fuse_hits(source_hits, self.config.rrf_k)
-        rerank_diagnostic = await self._rerank(
-            request.query,
-            fused_hits,
-            fusion_scores,
+        return await self._build_response(
+            request,
+            started,
+            responses,
+            source_hits,
+            diagnostics,
+            authoritative=True,
         )
-        if rerank_diagnostic is not None:
-            diagnostics.append(rerank_diagnostic)
 
-        warnings = tuple(
-            warning
-            for response in responses
-            for warning in response.warnings
-        ) + tuple(_diagnostic_warning(diagnostic) for diagnostic in diagnostics)
-        return FederatedSearchResponse(
-            hits=tuple(fused_hits[: request.top_k]),
-            partial=bool(diagnostics),
-            degradations=tuple(diagnostics),
-            warnings=warnings,
-            source_responses=tuple(responses),
-            fusion_scores=fusion_scores,
-            elapsed_ms=_elapsed_ms(started),
+    async def stream(self, request: SearchRequest) -> AsyncIterator[FederationEvent]:
+        """Yield opt-in source/provisional updates, then one final result."""
+        started = time.perf_counter()
+        selected, skipped = self._select_sources(request)
+        diagnostics = list(skipped)
+        responses: list[SearchResponse] = []
+        source_hits: list[list[_SourceHit]] = []
+        outcomes: list[tuple[SearchResponse | None, FederationDiagnostic | None] | None] = [
+            None
+        ] * len(selected)
+        async for index, outcome in self._run_sources(selected, request):
+            registration = selected[index]
+            outcomes[index] = outcome
+            response, source_diagnostic = outcome
+            yield FederationEvent(
+                kind="source",
+                source=registration.identity,
+                source_response=response,
+                diagnostic=source_diagnostic,
+            )
+            self._add_outcome(
+                outcome,
+                request,
+                responses,
+                source_hits,
+                diagnostics,
+            )
+            if response is not None:
+                provisional = await self._build_response(
+                    request,
+                    started,
+                    responses,
+                    source_hits,
+                    diagnostics,
+                    authoritative=False,
+                    rerank=False,
+                )
+                yield FederationEvent(kind="provisional", result=provisional)
+
+        final_diagnostics = list(skipped)
+        final_responses: list[SearchResponse] = []
+        final_source_hits: list[list[_SourceHit]] = []
+        for outcome in outcomes:
+            assert outcome is not None
+            self._add_outcome(
+                outcome,
+                request,
+                final_responses,
+                final_source_hits,
+                final_diagnostics,
+            )
+        authoritative = await self._build_response(
+            request,
+            started,
+            final_responses,
+            final_source_hits,
+            final_diagnostics,
+            authoritative=True,
         )
+        yield FederationEvent(kind="authoritative", result=authoritative)
+
+    async def search_events(self, request: SearchRequest) -> AsyncIterator[FederationEvent]:
+        """Named alias for :meth:`stream` for event-oriented callers."""
+        async for event in self.stream(request):
+            yield event
+
+    async def events(self, request: SearchRequest) -> AsyncIterator[FederationEvent]:
+        """Short alias for the opt-in progressive event stream."""
+        async for event in self.stream(request):
+            yield event
 
     async def execute(self, request: SearchRequest) -> FederatedSearchResponse:
         """Explicit executor alias for callers that prefer command semantics."""
@@ -286,7 +342,6 @@ class FederationExecutor:
         self,
         registration: RegisteredSearchSource,
         request: SearchRequest,
-        semaphore: asyncio.Semaphore,
     ) -> tuple[SearchResponse | None, FederationDiagnostic | None]:
         capabilities = _safe_capabilities(registration.source)
         top_k = request.top_k
@@ -310,11 +365,10 @@ class FederationExecutor:
                 exception_type="TimeoutError",
             )
         try:
-            async with semaphore:
-                result = await asyncio.wait_for(
-                    registration.source.search(source_request),
-                    timeout=timeout,
-                )
+            result = await asyncio.wait_for(
+                registration.source.search(source_request),
+                timeout=timeout,
+            )
             if not isinstance(result, SearchResponse):
                 raise TypeError("SearchSource.search must return SearchResponse")
             return result, None
@@ -334,6 +388,127 @@ class FederationExecutor:
                 message=str(error) or type(error).__name__,
                 exception_type=type(error).__name__,
             )
+
+    async def _run_sources(
+        self,
+        selected: Sequence[RegisteredSearchSource],
+        request: SearchRequest,
+    ) -> AsyncIterator[tuple[int, tuple[SearchResponse | None, FederationDiagnostic | None]]]:
+        """Run sources with at most ``max_concurrency`` active worker tasks."""
+        if not selected:
+            return
+        queue: asyncio.Queue[
+            tuple[int, tuple[SearchResponse | None, FederationDiagnostic | None]]
+        ] = asyncio.Queue(maxsize=self.config.max_concurrency)
+        next_index = 0
+
+        async def worker() -> None:
+            nonlocal next_index
+            while next_index < len(selected):
+                index = next_index
+                next_index += 1
+                try:
+                    outcome = await self._search_source(selected[index], request)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001 - isolate worker failures
+                    outcome = (
+                        None,
+                        FederationDiagnostic(
+                            source=selected[index].identity,
+                            status="unavailable",
+                            message=str(error) or type(error).__name__,
+                            exception_type=type(error).__name__,
+                        ),
+                    )
+                await queue.put((index, outcome))
+
+        tasks = [
+            asyncio.create_task(worker())
+            for _ in range(min(self.config.max_concurrency, len(selected)))
+        ]
+        try:
+            for _ in selected:
+                yield await queue.get()
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _add_outcome(
+        self,
+        outcome: tuple[SearchResponse | None, FederationDiagnostic | None],
+        request: SearchRequest,
+        responses: list[SearchResponse],
+        source_hits: list[list[_SourceHit]],
+        diagnostics: list[FederationDiagnostic],
+    ) -> None:
+        response, source_diagnostic = outcome
+        if source_diagnostic is not None:
+            diagnostics.append(source_diagnostic)
+        if response is None:
+            return
+        responses.append(response)
+        if response.partial:
+            diagnostics.append(
+                FederationDiagnostic(
+                    source=response.source,
+                    status="partial",
+                    message="source returned partial results",
+                )
+            )
+        source_hits.append(
+            [
+                _SourceHit(
+                    source_index=index,
+                    source=response.source,
+                    hit=_with_provenance(hit, response.source, request),
+                )
+                for index, hit in enumerate(
+                    sorted(
+                        response.hits,
+                        key=lambda item: (item.source_rank, _identity_key(item)),
+                    )
+                )
+            ]
+        )
+
+    async def _build_response(
+        self,
+        request: SearchRequest,
+        started: float,
+        responses: Sequence[SearchResponse],
+        source_hits: Sequence[Sequence[_SourceHit]],
+        diagnostics: Sequence[FederationDiagnostic],
+        *,
+        authoritative: bool,
+        rerank: bool = True,
+    ) -> FederatedSearchResponse:
+        fused_hits, fusion_scores = _fuse_hits(source_hits, self.config.rrf_k)
+        all_diagnostics = list(diagnostics)
+        if rerank:
+            rerank_diagnostic = await self._rerank(
+                request.query,
+                fused_hits,
+                fusion_scores,
+            )
+            if rerank_diagnostic is not None:
+                all_diagnostics.append(rerank_diagnostic)
+        warnings = tuple(
+            warning for response in responses for warning in response.warnings
+        ) + tuple(_diagnostic_warning(diagnostic) for diagnostic in all_diagnostics)
+        return FederatedSearchResponse(
+            hits=tuple(fused_hits[: request.top_k]),
+            partial=bool(all_diagnostics),
+            degradations=tuple(all_diagnostics),
+            warnings=warnings,
+            source_responses=tuple(responses),
+            fusion_scores=fusion_scores,
+            elapsed_ms=_elapsed_ms(started),
+            authoritative=authoritative,
+        )
 
     async def _rerank(
         self,
@@ -489,7 +664,7 @@ def _with_provenance(
 def _fuse_hits(
     source_hits: Sequence[Sequence[_SourceHit]],
     rrf_k: float,
-) -> tuple[list[SearchHit], dict[SearchHit, float]]:
+) -> tuple[list[SearchHit], dict[str, float]]:
     union_find = _UnionFind()
     identity_nodes: dict[str, int] = {}
     uri_nodes: dict[str, int] = {}
@@ -564,7 +739,7 @@ def _identity_key(hit: SearchHit) -> str:
 
 
 def _validate_rerank_score(value: object) -> float:
-    score = float(value)
+    score = float(cast(float, value))
     if not math.isfinite(score):
         raise ValueError("reranker scores must be finite")
     return -score
@@ -610,6 +785,8 @@ __all__ = [
     "FederatedSearchResponse",
     "FederationConfig",
     "FederationDiagnostic",
+    "FederationEvent",
+    "FederationEventKind",
     "FederationExecutor",
     "RegisteredSearchSource",
 ]
