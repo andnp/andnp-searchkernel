@@ -324,6 +324,39 @@ def test_keyword_fuzzy_search_narrows_similarity_candidates(
     assert calls <= 3 * 256
 
 
+def test_keyword_fuzzy_search_preserves_filtered_recall_beyond_batch(
+    tmp_path,
+) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record(
+            "note",
+            f"excluded-{index:03d}",
+            "The reciprocal rank fusion algorithm",
+            metadata={"kind": "excluded"},
+        )
+        for index in range(300)
+    ]
+    records.append(
+        _record(
+            "note",
+            "target",
+            "The reciprocal rank fusion algorithm",
+            metadata={"kind": "target"},
+        )
+    )
+    backend.index(records)
+
+    assert [
+        hit.source_id
+        for hit in backend.search_keyword(
+            "reciprical rank fuson",
+            1,
+            {"metadata_equals": {"kind": "target"}},
+        )
+    ] == ["target"]
+
+
 def test_keyword_search_applies_filters_to_natural_language_fallback(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     records = [
