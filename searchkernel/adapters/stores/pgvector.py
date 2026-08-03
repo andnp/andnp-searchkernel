@@ -566,7 +566,10 @@ class Psycopg3Connection:
 
         self.dsn = dsn
         self.pool = psycopg_pool.ConnectionPool(
-            dsn, min_size=min_connections, max_size=max_connections
+            dsn,
+            min_size=min_connections,
+            max_size=max_connections,
+            kwargs={"prepare_threshold": None},
         )
 
     def get_connection(self):
