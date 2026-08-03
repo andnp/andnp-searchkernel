@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any, Literal, Protocol, cast
 
 from searchkernel.domain import (
+    ChunkResult,
     GraphNeighbor,
     Record,
     RecordHit,
@@ -218,6 +219,7 @@ class RecordSearchConfig:
     score_ratio_floor: float = 0.5
     minimum_score: float = 0.0
     maximum_score_gap: float = 1.0
+    max_chunk_matches: int = 3
     failure_mode: Literal["strict", "lenient"] = "strict"
 
 
@@ -691,6 +693,11 @@ class RecordSearchPipeline:
             failures,
             diagnostics,
         )
+        hydrated = await self._aggregate_chunk_results(
+            hydrated,
+            failures,
+            limit=result_limit,
+        )
         if self._policy.post_process is not None:
             hydrated = list(self._policy.post_process(hydrated))
 
@@ -746,6 +753,7 @@ class RecordSearchPipeline:
                         record=result.record,
                         score=score,
                         provenance=result.provenance,
+                        chunk_matches=result.chunk_matches,
                     )
                 )
         except Exception as error:  # noqa: BLE001 - reranking is optional
@@ -755,6 +763,93 @@ class RecordSearchPipeline:
         reranked.sort(key=lambda item: (-item.score, item.storage_key))
         diagnostics.append(f"rerank:applied:{len(reranked)}")
         return [*reranked, *results[len(selected) :]]
+
+    async def _aggregate_chunk_results(
+        self,
+        results: Sequence[RecordSearchResult],
+        failures: list[RecordSearchFailure],
+        *,
+        limit: int,
+    ) -> list[RecordSearchResult]:
+        grouped: dict[str, list[RecordSearchResult]] = {}
+        ordinary: list[RecordSearchResult] = []
+        for result in results:
+            if not result.record.metadata.get("_searchkernel_chunk"):
+                ordinary.append(result)
+                continue
+            parent_key = result.record.metadata.get("_chunk_parent_storage_key")
+            if not isinstance(parent_key, str):
+                ordinary.append(result)
+                continue
+            grouped.setdefault(parent_key, []).append(result)
+
+        if not grouped:
+            return list(results)
+
+        by_parent = {result.storage_key: result for result in ordinary}
+        aggregated = list(ordinary)
+        for parent_key, matches in grouped.items():
+            parent = by_parent.get(parent_key)
+            if parent is None:
+                try:
+                    parent_record = await self._hydrate(
+                        RecordIdentity.from_storage_key(parent_key)
+                    )
+                except Exception as error:  # noqa: BLE001 - staged hydration failure
+                    self._handle_error("hydration", error, failures)
+                    continue
+                if parent_record is None:
+                    continue
+                best = max(matches, key=lambda item: (-item.score, item.storage_key))
+                parent = RecordSearchResult(
+                    record=parent_record,
+                    score=best.score,
+                    provenance=best.provenance.clone(),
+                )
+                aggregated.append(parent)
+
+            chunk_matches = [
+                ChunkResult(
+                    chunk_id=str(match.record.metadata["_chunk_id"]),
+                    record_id=parent.record.source_id,
+                    score=match.score,
+                    content=match.record.body,
+                    parent_chunk_id=cast(
+                        str | None,
+                        match.record.metadata.get("_chunk_metadata", {}).get(
+                            "parent_chunk_id"
+                        ),
+                    ),
+                    provenance=match.provenance,
+                    metadata=dict(match.record.metadata.get("_chunk_metadata", {})),
+                )
+                for match in matches
+            ]
+            chunk_matches.sort(
+                key=lambda item: (
+                    -item.score,
+                    int(item.metadata.get("start_pos", 0)),
+                    item.chunk_id,
+                )
+            )
+            combined = tuple(
+                [*parent.chunk_matches, *chunk_matches][
+                    : self._config.max_chunk_matches
+                ]
+            )
+            replacement = RecordSearchResult(
+                record=parent.record,
+                score=max(parent.score, *(match.score for match in matches)),
+                provenance=parent.provenance,
+                chunk_matches=combined,
+            )
+            aggregated = [
+                replacement if item.storage_key == parent.storage_key else item
+                for item in aggregated
+            ]
+
+        aggregated.sort(key=lambda item: (-item.score, item.storage_key))
+        return aggregated[:limit]
 
     async def _capture_optional_stage(
         self,
@@ -1413,6 +1508,8 @@ class RecordSearchPipeline:
             raise ValueError("max_graph_concurrency must be positive")
         if self._config.max_hydration_concurrency < 1:
             raise ValueError("max_hydration_concurrency must be positive")
+        if self._config.max_chunk_matches < 1:
+            raise ValueError("max_chunk_matches must be positive")
         if self._config.failure_mode not in {"strict", "lenient"}:
             raise ValueError("failure_mode must be 'strict' or 'lenient'")
 

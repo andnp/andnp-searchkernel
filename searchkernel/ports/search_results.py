@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from searchkernel.domain import Record, SearchResultProvenance
+from searchkernel.domain import ChunkResult, Record, SearchResultProvenance
 
 FailureStage = Literal[
     "keyword",
@@ -34,6 +34,7 @@ class RecordSearchResult:
     record: Record
     score: float
     provenance: SearchResultProvenance
+    chunk_matches: tuple[ChunkResult, ...] = ()
 
     @property
     def record_id(self) -> str:
@@ -42,6 +43,11 @@ class RecordSearchResult:
     @property
     def storage_key(self) -> str:
         return self.record.storage_key
+
+    @property
+    def excerpts(self) -> tuple[ChunkResult, ...]:
+        """Return the best chunk excerpts contributing to this result."""
+        return self.chunk_matches
 
 
 @dataclass(frozen=True, slots=True)
