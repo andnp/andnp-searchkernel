@@ -397,6 +397,32 @@ def test_keyword_search_applies_metadata_and_exclusion_filters(tmp_path) -> None
     ]
 
 
+def test_keyword_project_filters_match_numeric_metadata_ids(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    kept = _record(
+        "note",
+        "kept",
+        "common",
+        metadata={"project_id": 123},
+    )
+    excluded = _record(
+        "note",
+        "excluded",
+        "common",
+        metadata={"project_id": 456},
+    )
+    backend.index([kept, excluded])
+
+    assert [
+        hit.source_id
+        for hit in backend.search_keyword(
+            "common",
+            10,
+            {"project_filter": ["123"], "excluded_projects": ["456"]},
+        )
+    ] == ["kept"]
+
+
 @pytest.mark.asyncio
 async def test_scoped_keyword_candidates_match_public_pipeline_boundary(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")

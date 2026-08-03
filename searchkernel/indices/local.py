@@ -965,7 +965,8 @@ class LocalRecordBackend:
             project_values = LocalRecordBackend._filter_values(project_values)
             if project_values:
                 clauses.append(
-                    "json_extract(r.metadata, '$.project_id') IN ({})".format(
+                    "CAST(json_extract(r.metadata, '$.project_id') AS TEXT) "
+                    "IN ({})".format(
                         ", ".join("?" for _ in project_values)
                     )
                 )
@@ -978,9 +979,8 @@ class LocalRecordBackend:
             excluded_projects = LocalRecordBackend._filter_values(excluded_projects)
             clauses.append(
                 "(json_extract(r.metadata, '$.project_id') IS NULL OR "
-                "json_extract(r.metadata, '$.project_id') NOT IN ({}))".format(
-                    ", ".join("?" for _ in excluded_projects)
-                )
+                "CAST(json_extract(r.metadata, '$.project_id') AS TEXT) "
+                "NOT IN ({}))".format(", ".join("?" for _ in excluded_projects))
             )
             parameters.extend(str(value) for value in excluded_projects)
 
