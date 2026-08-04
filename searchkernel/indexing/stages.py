@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from searchkernel.domain import Chunk, Record
+from searchkernel.domain import Chunk, Record, RecordIdentity, canonical_storage_key
 from searchkernel.indexing.semantic import SemanticInput, semantic_input_for_chunk
 from searchkernel.search.edge_types import infer_edge_type
 
@@ -75,14 +75,21 @@ def build_graph_payload(
     nodes: list[tuple[str, dict]] = []
     edges: list[tuple[str, str, str, str]] = []
     for prepared in records:
-        nodes.append((prepared.record.source_id, prepared.graph_metadata))
-        nodes.extend((chunk.chunk_id, chunk.metadata) for chunk in prepared.chunks)
+        identity = prepared.record.identity
+        nodes.append((identity.storage_key, prepared.graph_metadata))
+        nodes.extend(
+            (
+                _graph_storage_key(identity, chunk.chunk_id),
+                chunk.metadata,
+            )
+            for chunk in prepared.chunks
+        )
         if isinstance(prepared.parser, LinkExtractingParser):
             links = prepared.parser.extract_links_with_context(prepared.file_path)
             edges.extend(
                 (
-                    prepared.record.source_id,
-                    link.target,
+                    identity.storage_key,
+                    _graph_storage_key(identity, link.target),
                     infer_edge_type(link.header_context, link.target).value,
                     link.header_context,
                 )
@@ -90,10 +97,27 @@ def build_graph_payload(
             )
         else:
             edges.extend(
-                (prepared.record.source_id, link, "links_to", "")
+                (
+                    identity.storage_key,
+                    _graph_storage_key(identity, link),
+                    "links_to",
+                    "",
+                )
                 for link in prepared.record.metadata.get("links", [])
             )
     return nodes, edges
+
+
+def _graph_storage_key(identity: RecordIdentity, value: str) -> str:
+    """Normalize source-local graph references to canonical record identities."""
+    try:
+        return RecordIdentity.from_storage_key(value).storage_key
+    except (TypeError, ValueError):
+        return canonical_storage_key(
+            identity.workspace_id,
+            identity.source_kind,
+            value,
+        )
 
 
 def iter_prepared_index_batches(

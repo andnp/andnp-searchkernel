@@ -1,6 +1,7 @@
 """Unit tests for indexing stages and batch preparation."""
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -98,6 +99,29 @@ class TestPreparedIndexBatch:
         assert len(batch.chunks) == 1
         assert len(batch.semantic_inputs) == 1
         assert batch.semantic_inputs[0].source_id == "chunk-1"
+
+    def test_graph_payload_uses_canonical_record_link_identities(self) -> None:
+        source = make_test_record(doc_id="doc-1")
+        target = make_test_record(doc_id="doc-2")
+
+        class LinkParser:
+            def extract_links_with_context(self, file_path: str) -> list:
+                return [SimpleNamespace(target=target.source_id, header_context="See")]
+
+        prepared = PreparedIndexRecord(
+            file_path="/test.md",
+            parser=LinkParser(),
+            record=source,
+            chunks=[],
+            graph_metadata={},
+        )
+
+        batch = PreparedIndexBatch.from_records([prepared])
+
+        assert batch.graph_nodes == [(source.storage_key, {})]
+        assert batch.graph_edges == [
+            (source.storage_key, target.storage_key, "links_to", "See")
+        ]
 
     def test_prepared_batch_from_multiple_records(self) -> None:
         prepared_records = []
