@@ -795,6 +795,25 @@ def test_keyword_migrates_existing_local_records_schema(tmp_path: Path) -> None:
     assert backend.check_keyword_index()
 
 
+def test_keyword_skips_metadata_backfill_for_current_schema(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "current.db"
+    LocalRecordBackend(db_path)
+
+    def fail_backfill(cls, conn) -> None:
+        raise AssertionError("current schemas must skip metadata backfill")
+
+    monkeypatch.setattr(
+        LocalRecordBackend,
+        "_migrate_keyword_columns",
+        classmethod(fail_backfill),
+    )
+
+    LocalRecordBackend(db_path)
+
+
 def test_local_schema_initializes_current_storage_tables(tmp_path: Path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     tables = {
