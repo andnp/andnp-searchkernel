@@ -691,6 +691,14 @@ class RecordSearchPipeline:
 
             candidates = self._apply_score_adjustments(candidates)
             candidates = self._sort_candidates(candidates)
+            if plan.signals.relationship and plan.graph_enabled:
+                candidates = self._apply_graph_priority(
+                    candidates,
+                    direct_keys={
+                        candidate.storage_key for candidate in base_candidates
+                    },
+                    plan=plan,
+                )
             candidates = await self._expand_parents(candidates, failures)
             if candidate_key is not None:
                 self._candidate_cache_policy.set(
@@ -1625,6 +1633,18 @@ class RecordSearchPipeline:
         direct_keys: set[str],
         plan: QueryPlan,
     ) -> list[RecordSearchCandidate]:
+        if plan.signals.relationship:
+            direct: list[RecordSearchCandidate] = []
+            graph: list[RecordSearchCandidate] = []
+            remainder: list[RecordSearchCandidate] = []
+            for candidate in candidates:
+                if candidate.storage_key in direct_keys:
+                    direct.append(candidate)
+                elif "graph" in candidate.provenance.strategies:
+                    graph.append(candidate)
+                else:
+                    remainder.append(candidate)
+            return [*direct[:1], *graph, *direct[1:], *remainder]
         if not plan.adaptive_graph:
             return list(candidates)
         adjusted = [
