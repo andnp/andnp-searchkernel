@@ -659,7 +659,7 @@ async def test_graph_expansion_reads_only_bounded_seed_neighbors() -> None:
         ) -> None:
             pass
 
-        def neighbors(
+        async def neighbors(
             self,
             record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
