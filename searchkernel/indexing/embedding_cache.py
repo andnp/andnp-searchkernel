@@ -27,7 +27,12 @@ class SQLiteEmbeddingCache:
     """A small SQLite cache whose files are independent of vector indices."""
 
     def __init__(
-        self, path: str | os.PathLike[str], encoder_namespace: str, dimension: int = 0
+        self,
+        path: str | os.PathLike[str],
+        encoder_namespace: str,
+        dimension: int = 0,
+        *,
+        validate: bool = False,
     ) -> None:
         if dimension < 0:
             raise ValueError("embedding dimension must not be negative")
@@ -37,7 +42,7 @@ class SQLiteEmbeddingCache:
         self._lock = threading.RLock()
         self._metrics = EmbeddingCacheMetrics()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = self._open_or_recover()
+        self._connection = self._open_or_recover(validate=validate)
 
     @property
     def metrics(self) -> EmbeddingCacheMetrics:
@@ -153,13 +158,12 @@ class SQLiteEmbeddingCache:
         except (AttributeError, sqlite3.Error):
             return
 
-    def _open_or_recover(self) -> sqlite3.Connection:
+    def _open_or_recover(self, *, validate: bool = False) -> sqlite3.Connection:
         connection: sqlite3.Connection | None = None
         try:
             connection = self._open()
-            result = connection.execute("PRAGMA integrity_check").fetchone()
-            if result != ("ok",):
-                raise sqlite3.DatabaseError("database integrity check failed")
+            if validate:
+                self._validate_integrity(connection)
             return connection
         except sqlite3.DatabaseError as error:
             if connection is not None:
@@ -169,6 +173,12 @@ class SQLiteEmbeddingCache:
             self._discard_files()
             self._add_metrics(invalidations=1)
             return self._open()
+
+    @staticmethod
+    def _validate_integrity(connection: sqlite3.Connection) -> None:
+        result = connection.execute("PRAGMA integrity_check").fetchone()
+        if result != ("ok",):
+            raise sqlite3.DatabaseError("database integrity check failed")
 
     def _open(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.path), timeout=5, check_same_thread=False)

@@ -499,6 +499,31 @@ class TestSQLiteEmbeddingCache:
             results = cache2.get_many(["hash-1"])
             assert "hash-1" in results
 
+    def test_cache_integrity_check_is_opt_in(self, monkeypatch) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.db"
+            SQLiteEmbeddingCache(path, "namespace-1", dimension=3).close()
+            calls = 0
+
+            def count_checks(connection) -> None:
+                nonlocal calls
+                calls += 1
+
+            monkeypatch.setattr(
+                SQLiteEmbeddingCache,
+                "_validate_integrity",
+                staticmethod(count_checks),
+            )
+            SQLiteEmbeddingCache(path, "namespace-1", dimension=3).close()
+            SQLiteEmbeddingCache(
+                path,
+                "namespace-1",
+                dimension=3,
+                validate=True,
+            ).close()
+
+            assert calls == 1
+
 
 class TestLlamaIndexEmbeddingCacheAdapter:
     """Test the llama_index BaseKVStore-shaped cache adapter."""
