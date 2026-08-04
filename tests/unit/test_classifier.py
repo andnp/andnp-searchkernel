@@ -2,6 +2,7 @@ import pytest
 
 from searchkernel.search.classifier import (
     QueryType,
+    analyze_query,
     classify_query,
     get_adaptive_weights,
 )
@@ -91,3 +92,16 @@ class TestGetAdaptiveWeights:
         assert semantic == 2.0
         assert keyword == pytest.approx(2.25)
         assert graph == 0.5
+
+
+@pytest.mark.parametrize(
+    ("query", "direction"),
+    [
+        ("Which pages link to Hybrid Search Strategy?", "incoming"),
+        ("show me notes that embed this one", "incoming"),
+        ("What pages does Hybrid Search Strategy link to?", "outgoing"),
+        ("What documents are neighbors of Hybrid Search Strategy?", "outgoing"),
+    ],
+)
+def test_relationship_queries_select_graph_direction(query, direction):
+    assert analyze_query(query).graph_direction == direction

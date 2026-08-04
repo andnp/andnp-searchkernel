@@ -1,6 +1,9 @@
 import re
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Literal
+
+RelationshipDirection = Literal["incoming", "outgoing"]
 
 
 class QueryType(Enum):
@@ -24,6 +27,18 @@ _RELATIONSHIP_PATTERN = re.compile(
     r"adjacent|upstream|downstream|inbound|outbound|"
     r"embed(?:s|ded|ding)?|transclud(?:e|es|ed|ing)?|"
     r"similar|point(?:s|ed)?\s+to)\b",
+    re.IGNORECASE,
+)
+_INBOUND_RELATIONSHIP_PATTERN = re.compile(
+    r"\b(?:inbound|upstream|embed(?:s|ded|ding)?|"
+    r"transclud(?:e|es|ed|ing)?)\b|"
+    r"^\s*(?:which|what)\s+(?:pages|documents|notes)\s+"
+    r"(?:link(?:s)?\s+to|point(?:s)?\s+to)\b",
+    re.IGNORECASE,
+)
+_OUTBOUND_RELATIONSHIP_PATTERN = re.compile(
+    r"\b(?:outbound|downstream)\b|"
+    r"\b(?:does|do)\b.*\blink(?:s|ed)?\s+to\b",
     re.IGNORECASE,
 )
 
@@ -72,6 +87,7 @@ class QuerySignals:
     navigational: bool
     exploratory: bool
     relationship: bool
+    graph_direction: RelationshipDirection = "outgoing"
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -132,7 +148,16 @@ def analyze_query(query: str) -> QuerySignals:
         navigational=_has_navigational_signals(query),
         exploratory=_has_exploratory_signals(query),
         relationship=bool(_RELATIONSHIP_PATTERN.search(query)),
+        graph_direction=_relationship_direction(query),
     )
+
+
+def _relationship_direction(query: str) -> RelationshipDirection:
+    if _INBOUND_RELATIONSHIP_PATTERN.search(query) and not (
+        _OUTBOUND_RELATIONSHIP_PATTERN.search(query)
+    ):
+        return "incoming"
+    return "outgoing"
 
 
 def classify_query(query: str) -> QueryType:

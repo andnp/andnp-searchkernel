@@ -1176,6 +1176,86 @@ async def test_relationship_target_resolver_preserves_no_neighbor_behavior() -> 
     assert outcome.missing_record_ids == ()
 
 
+async def test_relationship_target_resolver_uses_incoming_graph_direction() -> None:
+    seed = _source_record("note", "explanation")
+    target = _source_record("note", "hybrid-search-strategy")
+    inbound = _source_record("note", "inbound")
+    outsider = _source_record("note", "outsider")
+    seed.workspace_id = "workspace-a"
+    target.workspace_id = "workspace-a"
+    inbound.workspace_id = "workspace-a"
+    outsider.workspace_id = "workspace-b"
+    records = {
+        record.source_id: record for record in (seed, target, inbound, outsider)
+    }
+    calls: list[str] = []
+
+    class Graph:
+        def neighbors(
+            self,
+            record_id: RecordIdentity,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+            max_neighbors: int | None = None,
+        ) -> list[GraphNeighbor]:
+            raise AssertionError("outgoing traversal should not run")
+
+        def incoming_neighbors(
+            self,
+            record_id: RecordIdentity,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+            max_neighbors: int | None = None,
+            filters: dict[str, object] | None = None,
+        ) -> list[GraphNeighbor]:
+            calls.append(record_id.source_id)
+            assert filters == {
+                "statuses": ["active"],
+                "workspace_id": "workspace-a",
+                "source_kinds": ["note"],
+            }
+            return [
+                GraphNeighbor(inbound.identity, "links_to", 0.8),
+                GraphNeighbor(outsider.identity, "links_to", 2.0),
+            ]
+
+    class Store:
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit]:
+            return [RecordHit(seed.identity, 1.0)]
+
+    async def resolve(
+        query: str,
+        context: RecordSearchQueryContext,
+    ) -> list[RecordHit]:
+        return [RecordHit(target.identity, 2.0)]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=Store(),
+        graph_store=Graph(),
+        hydrator=_hydrator(records),
+        policy=RecordSearchPolicy(graph_target_resolver=resolve),
+        config=RecordSearchConfig(adaptive_graph_enabled=False),
+    )
+
+    outcome = await pipeline.async_search(
+        "Which pages link to Hybrid Search Strategy?",
+        limit=3,
+        filters={"workspace_id": "workspace-a", "source_kinds": ["note"]},
+    )
+
+    assert calls == ["hybrid-search-strategy"]
+    assert [result.record_id for result in outcome.results] == [
+        "explanation",
+        "inbound",
+    ]
+    assert outcome.results[1].provenance.strategies == ("graph",)
+
+
 async def test_chunk_target_hits_normalize_to_document_graph_neighbors() -> None:
     seed = RecordIdentity("project-a", "note", "explanation")
     target = RecordIdentity("project-a", "note", "hybrid-search-strategy")

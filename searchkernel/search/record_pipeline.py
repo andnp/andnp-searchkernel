@@ -1539,7 +1539,21 @@ class RecordSearchPipeline:
         filters: Mapping[str, object],
     ) -> dict[str, Sequence[GraphNeighbor]]:
         identities = [candidate.identity for candidate in graph_seeds]
-        neighbors_many = getattr(graph_store, "neighbors_many", None)
+        incoming = plan.signals.graph_direction == "incoming"
+        neighbors_many = getattr(
+            graph_store,
+            "incoming_neighbors_many" if incoming else "neighbors_many",
+            None,
+        )
+        if not callable(neighbors_many):
+            neighbors_many = getattr(graph_store, "neighbors_many", None)
+        neighbor_loader = getattr(
+            graph_store,
+            "incoming_neighbors" if incoming else "neighbors",
+            graph_store.neighbors,
+        )
+        if not callable(neighbor_loader):
+            neighbor_loader = graph_store.neighbors
         normalized: dict[str, Sequence[GraphNeighbor]] = {}
         if callable(neighbors_many):
             kwargs: dict[str, Any] = {"depth": plan.graph_depth}
@@ -1579,12 +1593,12 @@ class RecordSearchPipeline:
         ) -> tuple[str, Sequence[GraphNeighbor]]:
             async with semaphore:
                 kwargs: dict[str, Any] = {"depth": plan.graph_depth}
-                if _supports_keyword(graph_store.neighbors, "max_neighbors"):
+                if _supports_keyword(neighbor_loader, "max_neighbors"):
                     kwargs["max_neighbors"] = self._config.max_neighbors_per_seed
-                if _supports_keyword(graph_store.neighbors, "filters"):
+                if _supports_keyword(neighbor_loader, "filters"):
                     kwargs["filters"] = filters
-                neighbors = await _call_async(
-                    graph_store.neighbors,
+                loaded_neighbors = await _call_async(
+                    neighbor_loader,
                     seed.identity,
                     **kwargs,
                 )
@@ -1592,7 +1606,7 @@ class RecordSearchPipeline:
                     Sequence[GraphNeighbor],
                     tuple(
                         neighbor
-                        for neighbor in neighbors
+                        for neighbor in loaded_neighbors
                         if _graph_neighbor_matches_filters(neighbor, filters)
                     ),
                 )

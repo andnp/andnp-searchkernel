@@ -2105,6 +2105,38 @@ class LocalRecordBackend:
         depth: int = 1,
         max_neighbors: int | None = None,
     ) -> list[GraphNeighbor]:
+        return self._neighbors_direction(
+            record_id,
+            edge_types,
+            depth,
+            max_neighbors,
+            incoming=False,
+        )
+
+    def incoming_neighbors(
+        self,
+        record_id: RecordIdentity | str,
+        edge_types: list[str] | None = None,
+        depth: int = 1,
+        max_neighbors: int | None = None,
+    ) -> list[GraphNeighbor]:
+        return self._neighbors_direction(
+            record_id,
+            edge_types,
+            depth,
+            max_neighbors,
+            incoming=True,
+        )
+
+    def _neighbors_direction(
+        self,
+        record_id: RecordIdentity | str,
+        edge_types: list[str] | None,
+        depth: int,
+        max_neighbors: int | None,
+        *,
+        incoming: bool,
+    ) -> list[GraphNeighbor]:
         if depth < 1:
             raise ValueError("depth must be positive")
         _validate_neighbor_limit(max_neighbors)
@@ -2115,6 +2147,8 @@ class LocalRecordBackend:
         identity_key = self._canonical_graph_storage_key(identity_key)
         frontier = {identity_key}
         best: dict[str, tuple[str, float]] = {}
+        source_column = "target_id" if incoming else "source_id"
+        target_column = "source_id" if incoming else "target_id"
         with self._lock:
             conn = self._db.get_connection()
             for hop in range(depth):
@@ -2126,8 +2160,8 @@ class LocalRecordBackend:
                     SELECT e.source_id, e.target_id, e.edge_type, e.weight
                     FROM local_graph_edges e
                     JOIN local_records target_record
-                        ON target_record.storage_key = e.target_id
-                    WHERE e.source_id IN ({placeholders})
+                        ON target_record.storage_key = e.{target_column}
+                    WHERE e.{source_column} IN ({placeholders})
                     """,
                     tuple(frontier),
                 ).fetchall()
@@ -2136,14 +2170,19 @@ class LocalRecordBackend:
                     if allowed is not None and row["edge_type"] not in allowed:
                         continue
                     try:
-                        target_id = self._canonical_graph_storage_key(row["target_id"])
+                        target_id = self._canonical_graph_storage_key(
+                            row[target_column]
+                        )
                     except ValueError:
                         continue
-                    if row["target_id"] == identity_key:
+                    if row[target_column] == identity_key:
                         continue
                     weight = float(row["weight"])
                     if hop:
-                        parent_weight = best.get(row["source_id"], ("", 1.0))[1]
+                        parent_weight = best.get(
+                            row[source_column],
+                            ("", 1.0),
+                        )[1]
                         weight *= parent_weight
                     current = best.get(target_id)
                     if current is None or weight > current[1]:
@@ -2169,6 +2208,35 @@ class LocalRecordBackend:
         depth: int,
         max_neighbors: int | None = None,
     ) -> dict[str, list[GraphNeighbor]]:
+        return self._neighbors_many_direction(
+            identities,
+            depth=depth,
+            max_neighbors=max_neighbors,
+            incoming=False,
+        )
+
+    def incoming_neighbors_many(
+        self,
+        identities: Sequence[RecordIdentity],
+        *,
+        depth: int,
+        max_neighbors: int | None = None,
+    ) -> dict[str, list[GraphNeighbor]]:
+        return self._neighbors_many_direction(
+            identities,
+            depth=depth,
+            max_neighbors=max_neighbors,
+            incoming=True,
+        )
+
+    def _neighbors_many_direction(
+        self,
+        identities: Sequence[RecordIdentity],
+        *,
+        depth: int,
+        max_neighbors: int | None,
+        incoming: bool,
+    ) -> dict[str, list[GraphNeighbor]]:
         """Retrieve neighbors for multiple seeds with one query per hop."""
         if depth < 1:
             raise ValueError("depth must be positive")
@@ -2178,6 +2246,8 @@ class LocalRecordBackend:
         best_by_seed: dict[str, dict[str, tuple[str, float]]] = {
             seed_key: {} for seed_key in seed_keys
         }
+        source_column = "target_id" if incoming else "source_id"
+        target_column = "source_id" if incoming else "target_id"
         with self._lock:
             conn = self._db.get_connection()
             for hop in range(depth):
@@ -2193,23 +2263,25 @@ class LocalRecordBackend:
                     SELECT e.source_id, e.target_id, e.edge_type, e.weight
                     FROM local_graph_edges e
                     JOIN local_records target_record
-                        ON target_record.storage_key = e.target_id
-                    WHERE e.source_id IN ({placeholders})
+                        ON target_record.storage_key = e.{target_column}
+                    WHERE e.{source_column} IN ({placeholders})
                     """,
                     tuple(owners),
                 ).fetchall()
                 next_frontiers = {seed_key: set() for seed_key in seed_keys}
                 for row in rows:
                     try:
-                        target_id = self._canonical_graph_storage_key(row["target_id"])
+                        target_id = self._canonical_graph_storage_key(
+                            row[target_column]
+                        )
                     except ValueError:
                         continue
-                    for seed_key in owners.get(row["source_id"], ()):
+                    for seed_key in owners.get(row[source_column], ()):
                         if target_id == seed_key:
                             continue
                         if hop:
                             parent_weight = best_by_seed[seed_key].get(
-                                row["source_id"], ("", 1.0)
+                                row[source_column], ("", 1.0)
                             )[1]
                             weight = float(row["weight"]) * parent_weight
                         else:
@@ -2447,6 +2519,20 @@ class LocalGraphStore:
             max_neighbors,
         )
 
+    def incoming_neighbors(
+        self,
+        record_id: RecordIdentity | str,
+        edge_types: list[str] | None = None,
+        depth: int = 1,
+        max_neighbors: int | None = None,
+    ) -> list[GraphNeighbor]:
+        return self._backend.incoming_neighbors(
+            record_id,
+            edge_types,
+            depth,
+            max_neighbors,
+        )
+
     def neighbors_many(
         self,
         identities: Sequence[RecordIdentity],
@@ -2455,6 +2541,19 @@ class LocalGraphStore:
         max_neighbors: int | None = None,
     ) -> dict[str, list[GraphNeighbor]]:
         return self._backend.neighbors_many(
+            identities,
+            depth=depth,
+            max_neighbors=max_neighbors,
+        )
+
+    def incoming_neighbors_many(
+        self,
+        identities: Sequence[RecordIdentity],
+        *,
+        depth: int,
+        max_neighbors: int | None = None,
+    ) -> dict[str, list[GraphNeighbor]]:
+        return self._backend.incoming_neighbors_many(
             identities,
             depth=depth,
             max_neighbors=max_neighbors,

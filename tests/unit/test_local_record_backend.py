@@ -189,6 +189,35 @@ def test_local_graph_top_neighbors_are_bounded_and_deterministic(tmp_path) -> No
     ) == {source.storage_key: expected}
 
 
+def test_local_graph_supports_incoming_neighbors_with_canonical_order(tmp_path) -> None:
+    backend, _keyword, _vector, graph = _backend(tmp_path)
+    target = _record("note", "target", "target", workspace_id="project-a")
+    inbound_a = _record("note", "inbound-a", "inbound a", workspace_id="project-a")
+    inbound_b = _record("note", "inbound-b", "inbound b", workspace_id="project-a")
+    outbound = _record("note", "outbound", "outbound", workspace_id="project-a")
+    outsider = _record("note", "outsider", "outsider", workspace_id="project-b")
+    backend.index([target, inbound_a, inbound_b, outbound, outsider])
+    graph.upsert_edges(
+        [
+            (inbound_b.storage_key, target.storage_key, "links_to", 0.9),
+            (inbound_a.storage_key, target.storage_key, "links_to", 0.9),
+            (target.storage_key, outbound.storage_key, "links_to", 1.0),
+            (outsider.storage_key, target.storage_key, "links_to", 2.0),
+        ]
+    )
+
+    expected = [
+        GraphNeighbor(outsider.identity, "links_to", 2.0),
+        GraphNeighbor(inbound_a.identity, "links_to", 0.9),
+        GraphNeighbor(inbound_b.identity, "links_to", 0.9),
+    ]
+    assert graph.incoming_neighbors(target.identity) == expected
+    assert graph.incoming_neighbors_many([target.identity], depth=1) == {
+        target.storage_key: expected
+    }
+    assert graph.incoming_neighbors(inbound_a.identity) == []
+
+
 def test_keyword_search_supports_tokens_phrases_prefixes_artifacts_and_symbols(
     tmp_path,
 ) -> None:
