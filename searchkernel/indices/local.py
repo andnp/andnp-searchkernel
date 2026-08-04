@@ -16,7 +16,7 @@ import math
 import re
 import sqlite3
 import threading
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
@@ -51,7 +51,7 @@ from searchkernel.storage.db import DatabaseManager, SQLiteTuning
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 _LOCAL_KEYWORD_SCHEMA = "local_records_fts"
-_LOCAL_KEYWORD_SCHEMA_VERSION = 3
+_LOCAL_KEYWORD_SCHEMA_VERSION = 4
 _LOCAL_FTS_TABLE = "local_records_fts"
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
@@ -351,27 +351,49 @@ class LocalRecordBackend:
             "keywords",
             "source_keywords",
             "aliases",
+            "header_path",
+            "headers",
             "file_path",
             "source_file",
             "path",
             "filename",
             "file_name",
+            "paths",
+            "filenames",
             "files_changed",
             "symbols",
             "symbol",
+            "symbol_path",
+            "symbol_paths",
             "file_tokens",
             "commit_file_tokens",
+            "path_tokens",
+            "symbol_tokens",
+            "tokens",
+            "exact_tokens",
         ):
             value = metadata.get(key)
             if value is None:
                 continue
-            if isinstance(value, set):
-                values.extend(str(item) for item in sorted(value, key=str))
-            elif isinstance(value, (list, tuple)):
-                values.extend(str(item) for item in value)
-            else:
-                values.append(str(value))
+            values.extend(LocalRecordBackend._metadata_keyword_values(value))
         return " ".join(" ".join(value.strip().lower().split()) for value in values if value)
+
+    @staticmethod
+    def _metadata_keyword_values(value: Any) -> list[str]:
+        if isinstance(value, Mapping):
+            return [
+                item
+                for key in sorted(value, key=str)
+                for item in LocalRecordBackend._metadata_keyword_values(value[key])
+            ]
+        if isinstance(value, (list, tuple, set, frozenset)):
+            items = sorted(value, key=str) if isinstance(value, (set, frozenset)) else value
+            return [
+                item
+                for nested in items
+                for item in LocalRecordBackend._metadata_keyword_values(nested)
+            ]
+        return [str(value)]
 
     @staticmethod
     def _metadata_uri(metadata: dict[str, Any]) -> str:
