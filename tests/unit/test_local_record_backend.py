@@ -519,6 +519,35 @@ def test_keyword_search_ranks_embedded_artifact_source_above_mentions(tmp_path) 
     ] == ["exact", "mention"]
 
 
+def test_keyword_search_prefers_exact_heading_across_workspaces(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.index(
+        [
+            _record(
+                "note",
+                "exact",
+                "Exact section content",
+                workspace_id="project-a",
+                title="Guide",
+                metadata={"header_path": "6.1. Overview"},
+            ),
+            _record(
+                "note",
+                "near",
+                "Near section content",
+                workspace_id="project-b",
+                title="6.1. Overview",
+                metadata={"header_path": "6.1. Overview (Legacy)"},
+            ),
+        ]
+    )
+
+    assert [
+        hit.source_id
+        for hit in backend.search_keyword("6.1. Overview", 10)
+    ] == ["exact", "near"]
+
+
 def test_keyword_search_applies_all_sql_filters(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     records = [

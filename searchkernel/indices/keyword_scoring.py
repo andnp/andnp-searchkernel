@@ -95,7 +95,7 @@ def score_header_locality(
     for depth, segment in enumerate(header_segments):
         depth_decay = max(0.45, 1.0 - (depth * 0.25))
         if segment == normalized_query:
-            score = max(score, 44.0 * depth_decay)
+            score = max(score, 112.0 * depth_decay)
             continue
         if has_phrase_boundary_match(segment, normalized_query):
             score = max(score, 20.0 * depth_decay)
