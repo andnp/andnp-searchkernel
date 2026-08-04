@@ -1180,6 +1180,96 @@ async def test_relationship_target_resolver_preserves_no_neighbor_behavior() -> 
     assert outcome.missing_record_ids == ()
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "What documents are neighbors of Hybrid Search Strategy?",
+        "What pages does Hybrid Search Strategy link to?",
+    ],
+)
+async def test_relationship_resolver_keeps_direct_target_as_graph_seed(
+    query: str,
+) -> None:
+    explanation = _source_record("note", "explanation")
+    target = _source_record("note", "hybrid-search-strategy")
+    neighbor = _source_record("note", "neighbor")
+    outsider = _source_record("note", "outsider")
+    for record in (explanation, target, neighbor):
+        record.workspace_id = "project-a"
+    outsider.workspace_id = "project-b"
+    records = {
+        record.source_id: record
+        for record in (explanation, target, neighbor, outsider)
+    }
+    calls: list[RecordIdentity] = []
+
+    class Store:
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit]:
+            return [
+                RecordHit(explanation.identity, 1.0),
+                RecordHit(target.identity, 0.2),
+            ]
+
+    class Graph:
+        def neighbors(
+            self,
+            record_id: RecordIdentity,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+            max_neighbors: int | None = None,
+            filters: dict[str, object] | None = None,
+        ) -> list[GraphNeighbor]:
+            calls.append(record_id)
+            assert filters == {
+                "statuses": ["active"],
+                "workspace_id": "project-a",
+                "source_kinds": ["note"],
+            }
+            return [
+                GraphNeighbor(neighbor.identity, "links_to", 0.9),
+                GraphNeighbor(outsider.identity, "links_to", 2.0),
+            ]
+
+    async def resolve(
+        query: str,
+        context: RecordSearchQueryContext,
+    ) -> list[RecordHit]:
+        return [RecordHit(target.identity, 2.0)]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=Store(),
+        graph_store=Graph(),
+        hydrator=_hydrator(records),
+        policy=RecordSearchPolicy(graph_target_resolver=resolve),
+        config=RecordSearchConfig(
+            adaptive_graph_enabled=False,
+            max_graph_seeds=1,
+        ),
+    )
+
+    outcome = await pipeline.async_search(
+        query,
+        limit=3,
+        filters={"workspace_id": "project-a", "source_kinds": ["note"]},
+    )
+
+    assert calls == [target.identity]
+    assert [result.record_id for result in outcome.results] == [
+        "explanation",
+        "neighbor",
+        "hybrid-search-strategy",
+    ]
+    assert outcome.results[1].provenance.strategies == ("graph",)
+    assert outcome.results[1].provenance.strategy_details["graph"].rank == 1
+    assert outcome.results[1].score == pytest.approx(1 / 61)
+    assert all(result.record.workspace_id == "project-a" for result in outcome.results)
+
+
 async def test_relationship_target_resolver_uses_incoming_graph_direction() -> None:
     seed = _source_record("note", "explanation")
     target = _source_record("note", "hybrid-search-strategy")

@@ -1025,7 +1025,6 @@ class RecordSearchPipeline:
         resolved = await _call_async(resolver, context.query, context)
         if not isinstance(resolved, Sequence):
             raise TypeError("graph_target_resolver must return a sequence")
-        direct_keys = {candidate.storage_key for candidate in candidates}
         normalized_hits = [
             RecordHit(
                 await self._canonical_graph_target_identity(hit.identity),
@@ -1037,7 +1036,7 @@ class RecordSearchPipeline:
         if len(normalized_hits) != len(resolved):
             raise TypeError("graph_target_resolver returned a non-canonical hit")
         targets: list[RecordSearchCandidate] = []
-        seen = set(direct_keys)
+        seen: set[str] = set()
         for rank, hit in enumerate(
             sorted(
                 normalized_hits,
