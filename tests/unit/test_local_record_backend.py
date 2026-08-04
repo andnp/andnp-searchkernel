@@ -488,6 +488,37 @@ def test_keyword_search_handles_artifact_variants_and_missing_tokens(tmp_path) -
     assert backend.search_keyword("src/searchkernel/missing.py", 10) == []
 
 
+def test_keyword_search_ranks_embedded_artifact_source_above_mentions(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.index(
+        [
+            _record(
+                "note",
+                "exact",
+                "handle_query_documents implementation",
+                title="document_tools.py",
+                uri="mcp/tools/document_tools.py",
+            ),
+            _record(
+                "note",
+                "mention",
+                "References mcp/tools/document_tools.py and "
+                "handle_query_documents.",
+                title="Other",
+                uri="docs/other.py",
+            ),
+        ]
+    )
+
+    assert [
+        hit.source_id
+        for hit in backend.search_keyword(
+            "mcp/tools/document_tools.py, handle_query_documents",
+            10,
+        )
+    ] == ["exact", "mention"]
+
+
 def test_keyword_search_applies_all_sql_filters(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     records = [

@@ -110,10 +110,25 @@ def looks_like_artifact_query(query: str) -> bool:
     normalized = query.strip()
     if not normalized:
         return False
-    return (
-        len(normalized.split()) == 1
-        and _ARTIFACT_QUERY_RE.search(normalized) is not None
-    )
+    if len(normalized.split()) == 1:
+        return _ARTIFACT_QUERY_RE.search(normalized) is not None
+    return bool(_embedded_artifact_tokens(normalized))
+
+
+def _embedded_artifact_tokens(query: str) -> list[str]:
+    tokens: list[str] = []
+    for raw_token in query.split():
+        token = normalize_artifact_value(raw_token.strip(".,;!?()[]{}<>\"'`"))
+        if not token:
+            continue
+        if (
+            "/" in token
+            or "\\" in token
+            or ":" in token
+            or re.search(r"\.[a-z0-9]{1,12}$", token) is not None
+        ):
+            tokens.append(token)
+    return tokens
 
 
 def score_field_aware_match(
@@ -133,8 +148,6 @@ def score_field_aware_match(
     normalized_content = normalize_field_text(content)
     normalized_source = normalize_artifact_value(source_file)
     normalized_query_artifact = normalize_artifact_value(query)
-    basename_query = Path(normalized_query_artifact).name
-    source_basename = Path(normalized_source).name if normalized_source else ""
     header_segments = split_header_segments(headers)
 
     score = 0.0
@@ -146,20 +159,33 @@ def score_field_aware_match(
         header_segments,
     )
 
-    if normalized_source == normalized_query_artifact:
-        score += 60.0
-    elif source_basename == normalized_query_artifact:
-        score += 56.0
-    elif basename_query and source_basename == basename_query:
-        score += 52.0
-    elif normalized_source.endswith(f"/{normalized_query_artifact}"):
-        score += 48.0
-    elif basename_query and normalized_source.endswith(f"/{basename_query}"):
-        score += 44.0
-    elif normalized_query_artifact in normalized_source:
-        score += 16.0
-    elif basename_query and basename_query in normalized_source:
-        score += 12.0
+    artifact_queries = _embedded_artifact_tokens(query) or [normalized_query_artifact]
+    for artifact_query in artifact_queries:
+        score = max(score, score_title_locality(artifact_query, normalized_title))
+        score = max(
+            score,
+            score_header_locality(
+                artifact_query,
+                normalized_headers,
+                header_segments,
+            ),
+        )
+        basename_query = Path(artifact_query).name
+        source_basename = Path(normalized_source).name if normalized_source else ""
+        if normalized_source == artifact_query:
+            score += 60.0
+        elif source_basename == artifact_query:
+            score += 56.0
+        elif basename_query and source_basename == basename_query:
+            score += 52.0
+        elif normalized_source.endswith(f"/{artifact_query}"):
+            score += 48.0
+        elif basename_query and normalized_source.endswith(f"/{basename_query}"):
+            score += 44.0
+        elif artifact_query in normalized_source:
+            score += 16.0
+        elif basename_query and basename_query in normalized_source:
+            score += 12.0
 
     if normalized_query in normalized_content:
         score += 4.0
@@ -175,6 +201,19 @@ def score_artifact_match(
     headers: str,
     source_file: str,
 ) -> float:
+    queries = _embedded_artifact_tokens(normalized_query)
+    if queries and queries != [normalized_query]:
+        return max(
+            score_artifact_match(
+                query,
+                Path(query).name,
+                content,
+                title,
+                headers,
+                source_file,
+            )
+            for query in queries
+        )
     normalized_content = normalize_artifact_value(content)
     normalized_headers = normalize_artifact_value(headers)
     normalized_title = normalize_artifact_value(title)

@@ -44,6 +44,12 @@ def test_sanitize_fts_query_accepts_arbitrary_punctuation_for_fts5():
 def test_looks_like_artifact_query_detects_path_like_values():
     assert looks_like_artifact_query("bootstrap.checkpoint.json")
     assert looks_like_artifact_query("docs/runtime_state")
+    assert looks_like_artifact_query(
+        "mcp/tools/document_tools.py handle_query_documents"
+    )
+    assert looks_like_artifact_query(
+        "mcp/tools/document_tools.py, handle_query_documents"
+    )
     assert not looks_like_artifact_query(
         "The MCP server exposes list_tools and inputSchema"
     )

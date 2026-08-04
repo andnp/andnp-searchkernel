@@ -1058,7 +1058,7 @@ class LocalRecordBackend:
         if match_query == '""':
             return []
         needs_artifact_rerank = _keyword_scoring.looks_like_artifact_query(query)
-        if needs_artifact_rerank:
+        if needs_artifact_rerank and len(query.strip().split()) == 1:
             match_query = '"' + match_query.replace('"', "") + '"'
         limit = k
         if needs_artifact_rerank:
