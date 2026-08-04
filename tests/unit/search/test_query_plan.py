@@ -103,6 +103,9 @@ def test_relationship_query_enables_graph_expansion() -> None:
         "which neighbors surround this module?",
         "what pages point to this document?",
         "show adjacent records",
+        "which inbound pages embed this document?",
+        "show outbound transcluded notes",
+        "what similar documents reference this one?",
     ],
 )
 def test_relationship_paraphrases_enable_graph_expansion(query: str) -> None:

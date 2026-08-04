@@ -1,7 +1,7 @@
 import asyncio
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import cast
 
@@ -1002,6 +1002,148 @@ async def test_graph_expansion_preserves_scoped_neighbor_provenance(
         result.provenance.strategies == ("graph",)
         for result in outcome.results[1:]
     )
+
+
+async def test_relationship_target_resolver_selects_canonical_neighbors() -> None:
+    seed = RecordIdentity("workspace-a", "note", "explanation")
+    target = RecordIdentity("workspace-a", "note", "hybrid-search-strategy")
+    neighbors = (
+        RecordIdentity("workspace-a", "note", "outbound"),
+        RecordIdentity("workspace-a", "note", "inbound"),
+    )
+    identities = (seed, target, *neighbors)
+    records = {
+        identity.storage_key: Record(
+            workspace_id=identity.workspace_id,
+            source_kind=identity.source_kind,
+            source_id=identity.source_id,
+            title=identity.source_id,
+            body=identity.source_id,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        for identity in identities
+    }
+    resolver_calls: list[tuple[str, Mapping[str, object]]] = []
+
+    class Store:
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit]:
+            return [RecordHit(seed, 1.0)]
+
+    class Graph:
+        def __init__(self) -> None:
+            self.calls: list[RecordIdentity] = []
+
+        def neighbors(
+            self,
+            record_id: RecordIdentity,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+            max_neighbors: int | None = None,
+            filters: dict[str, object] | None = None,
+        ) -> list[GraphNeighbor]:
+            self.calls.append(record_id)
+            assert filters == {
+                "statuses": ["active"],
+                "workspace_id": "workspace-a",
+                "project_id": "project-a",
+            }
+            return [
+                GraphNeighbor(neighbors[0], "links_to", 1.0),
+                GraphNeighbor(neighbors[1], "links_to", 1.0),
+            ]
+
+    graph = Graph()
+
+    async def resolve(
+        query: str,
+        context: RecordSearchQueryContext,
+    ) -> list[RecordHit]:
+        resolver_calls.append((query, context.filters))
+        return [RecordHit(target, 2.0)]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=Store(),
+        graph_store=graph,
+        hydrator=lambda identity: records.get(identity.storage_key),
+        policy=RecordSearchPolicy(graph_target_resolver=resolve),
+        config=RecordSearchConfig(adaptive_graph_enabled=False),
+    )
+
+    outcome = await pipeline.async_search(
+        "Which pages link to Hybrid Search Strategy?",
+        limit=3,
+        filters={"workspace_id": "workspace-a", "project_id": "project-a"},
+    )
+
+    assert resolver_calls == [
+        (
+            "Which pages link to Hybrid Search Strategy?",
+            {
+                "statuses": ["active"],
+                "workspace_id": "workspace-a",
+                "project_id": "project-a",
+            },
+        )
+    ]
+    assert graph.calls == [target]
+    assert [result.record_id for result in outcome.results] == [
+        "explanation",
+        "inbound",
+        "outbound",
+    ]
+    assert all(
+        result.provenance.strategies == ("graph",)
+        for result in outcome.results[1:]
+    )
+    assert all(
+        result.provenance.record_identity == result.record.identity
+        for result in outcome.results
+    )
+
+
+async def test_relationship_target_resolver_preserves_no_neighbor_behavior() -> None:
+    seed = _record("explanation")
+    target = _record("target")
+    calls: list[str] = []
+
+    class Graph:
+        def neighbors(
+            self,
+            record_id: RecordIdentity,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+            max_neighbors: int | None = None,
+        ) -> list[GraphNeighbor]:
+            calls.append(record_id.source_id)
+            return []
+
+    async def resolve(
+        query: str,
+        context: RecordSearchQueryContext,
+    ) -> list[RecordHit]:
+        return [RecordHit(target.identity, 2.0)]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("explanation", 1.0)]),
+        graph_store=Graph(),
+        hydrator=_hydrator({"explanation": seed, "target": target}),
+        policy=RecordSearchPolicy(graph_target_resolver=resolve),
+        config=RecordSearchConfig(adaptive_graph_enabled=False),
+    )
+
+    outcome = await pipeline.async_search(
+        "What documents are neighbors of target?",
+        limit=2,
+    )
+
+    assert calls == ["target"]
+    assert [result.record_id for result in outcome.results] == ["explanation"]
 
 
 async def test_keyword_and_embedding_work_overlap_without_candidate_gating() -> None:
