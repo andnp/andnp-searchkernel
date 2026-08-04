@@ -30,15 +30,18 @@ _RELATIONSHIP_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _INBOUND_RELATIONSHIP_PATTERN = re.compile(
-    r"\b(?:inbound|upstream|embed(?:s|ded|ding)?|"
-    r"transclud(?:e|es|ed|ing)?)\b|"
+    r"\b(?:inbound|upstream)\b|"
     r"^\s*(?:which|what)\s+(?:pages|documents|notes)\s+"
-    r"(?:link(?:s)?\s+to|point(?:s)?\s+to)\b",
+    r"(?:link(?:s)?\s+to|point(?:s)?\s+to|"
+    r"embed(?:s|ded|ding)?|transclud(?:e|es|ed|ing)?)\b|"
+    r"\b(?:pages|documents|notes)\s+that\s+"
+    r"(?:embed(?:s|ded|ding)?|transclud(?:e|es|ed|ing)?)\b",
     re.IGNORECASE,
 )
 _OUTBOUND_RELATIONSHIP_PATTERN = re.compile(
     r"\b(?:outbound|downstream)\b|"
-    r"\b(?:does|do)\b.*\blink(?:s|ed)?\s+to\b",
+    r"\b(?:does|do)\b.*\b(?:link(?:s|ed)?\s+to|"
+    r"embed(?:s|ded|ding)?|transclud(?:e|es|ed|ing)?)\b",
     re.IGNORECASE,
 )
 
