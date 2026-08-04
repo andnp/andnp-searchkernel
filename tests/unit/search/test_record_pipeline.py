@@ -449,6 +449,27 @@ async def test_candidate_filter_runs_before_graph_expansion() -> None:
     assert "graph" in outcome.results[-1].provenance.strategies
 
 
+async def test_relationship_query_prioritizes_linked_records_over_unrelated_direct_hits() -> None:
+    records = {
+        record_id: _record(record_id)
+        for record_id in ("seed", "linked", "direct")
+    }
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("seed", 1.0), ("direct", 0.9)]),
+        graph_store=FakeGraphStore({"seed": [("linked", "related", 1.0)]}),
+        hydrator=_hydrator(records),
+    )
+
+    outcome = await pipeline.async_search("what relates to the seed?", limit=3)
+
+    assert [result.record_id for result in outcome.results] == [
+        "seed",
+        "linked",
+        "direct",
+    ]
+    assert outcome.results[1].provenance.strategies == ("graph",)
+
+
 async def test_parent_expansion_preserves_canonical_identity_and_first_rank() -> None:
     records = {
         record_id: _record(record_id)
