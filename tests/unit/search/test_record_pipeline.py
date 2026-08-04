@@ -1004,14 +1004,25 @@ async def test_graph_expansion_preserves_scoped_neighbor_provenance(
     )
 
 
-async def test_relationship_target_resolver_selects_canonical_neighbors() -> None:
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Which pages link to Hybrid Search Strategy?",
+        "What documents are neighbors of Hybrid Search Strategy?",
+        "show me notes that embed this one",
+    ],
+)
+async def test_relationship_target_resolver_selects_canonical_neighbors(
+    query: str,
+) -> None:
     seed = RecordIdentity("workspace-a", "note", "explanation")
     target = RecordIdentity("workspace-a", "note", "hybrid-search-strategy")
     neighbors = (
         RecordIdentity("workspace-a", "note", "outbound"),
         RecordIdentity("workspace-a", "note", "inbound"),
     )
-    identities = (seed, target, *neighbors)
+    outsider = RecordIdentity("workspace-b", "note", "other-project")
+    identities = (seed, target, *neighbors, outsider)
     records = {
         identity.storage_key: Record(
             workspace_id=identity.workspace_id,
@@ -1021,6 +1032,7 @@ async def test_relationship_target_resolver_selects_canonical_neighbors() -> Non
             body=identity.source_id,
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
             updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            uri=f"/docs/{identity.source_id}.md",
         )
         for identity in identities
     }
@@ -1056,6 +1068,7 @@ async def test_relationship_target_resolver_selects_canonical_neighbors() -> Non
             return [
                 GraphNeighbor(neighbors[0], "links_to", 1.0),
                 GraphNeighbor(neighbors[1], "links_to", 1.0),
+                GraphNeighbor(outsider, "links_to", 2.0),
             ]
 
     graph = Graph()
@@ -1076,14 +1089,14 @@ async def test_relationship_target_resolver_selects_canonical_neighbors() -> Non
     )
 
     outcome = await pipeline.async_search(
-        "Which pages link to Hybrid Search Strategy?",
+        query,
         limit=3,
         filters={"workspace_id": "workspace-a", "project_id": "project-a"},
     )
 
     assert resolver_calls == [
         (
-            "Which pages link to Hybrid Search Strategy?",
+            query,
             {
                 "statuses": ["active"],
                 "workspace_id": "workspace-a",
@@ -1097,14 +1110,28 @@ async def test_relationship_target_resolver_selects_canonical_neighbors() -> Non
         "inbound",
         "outbound",
     ]
-    assert all(
-        result.provenance.strategies == ("graph",)
-        for result in outcome.results[1:]
+    assert [result.record.uri for result in outcome.results] == [
+        "/docs/explanation.md",
+        "/docs/inbound.md",
+        "/docs/outbound.md",
+    ]
+    assert [result.score for result in outcome.results] == pytest.approx(
+        [1 / 61, 1 / 61, 1 / 62]
     )
+    assert [result.provenance.strategies for result in outcome.results] == [
+        ("keyword",),
+        ("graph",),
+        ("graph",),
+    ]
+    assert [
+        result.provenance.strategy_details["graph"].rank
+        for result in outcome.results[1:]
+    ] == [1, 2]
     assert all(
         result.provenance.record_identity == result.record.identity
         for result in outcome.results
     )
+    assert all(result.record.workspace_id == "workspace-a" for result in outcome.results)
 
 
 async def test_relationship_target_resolver_preserves_no_neighbor_behavior() -> None:
@@ -1144,6 +1171,9 @@ async def test_relationship_target_resolver_preserves_no_neighbor_behavior() -> 
 
     assert calls == ["target"]
     assert [result.record_id for result in outcome.results] == ["explanation"]
+    assert outcome.results[0].provenance.strategies == ("keyword",)
+    assert outcome.failures == ()
+    assert outcome.missing_record_ids == ()
 
 
 async def test_keyword_and_embedding_work_overlap_without_candidate_gating() -> None:
