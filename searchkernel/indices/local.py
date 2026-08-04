@@ -459,7 +459,16 @@ class LocalRecordBackend:
             )
             """
         )
-        self._migrate_keyword_columns(conn)
+        version_row = conn.execute(
+            "SELECT version FROM local_keyword_schema WHERE name = ?",
+            (_LOCAL_KEYWORD_SCHEMA,),
+        ).fetchone()
+        needs_keyword_migration = (
+            version_row is None
+            or version_row[0] != _LOCAL_KEYWORD_SCHEMA_VERSION
+        )
+        if needs_keyword_migration:
+            self._migrate_keyword_columns(conn)
 
         table_columns = self._fts_table_columns(conn)
         needs_rebuild = table_columns != _LOCAL_FTS_COLUMNS
@@ -495,10 +504,6 @@ class LocalRecordBackend:
         else:
             self._fts5_available = True
 
-        version_row = conn.execute(
-            "SELECT version FROM local_keyword_schema WHERE name = ?",
-            (_LOCAL_KEYWORD_SCHEMA,),
-        ).fetchone()
         if self._fts5_available and (
             needs_rebuild
             or version_row is None
