@@ -916,6 +916,94 @@ async def test_graph_neighbors_preserve_canonical_identity() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("depth", "expected"),
+    [(1, ["one-hop"]), (2, ["one-hop", "two-hop"])],
+)
+async def test_graph_expansion_preserves_scoped_neighbor_provenance(
+    depth: int,
+    expected: list[str],
+) -> None:
+    seed = RecordIdentity("workspace-a", "note", "seed")
+    one_hop = RecordIdentity("workspace-a", "note", "one-hop")
+    two_hop = RecordIdentity("workspace-a", "note", "two-hop")
+    cross_project = RecordIdentity("workspace-b", "git_commit", "noise")
+    records = {
+        identity.storage_key: Record(
+            workspace_id=identity.workspace_id,
+            source_kind=identity.source_kind,
+            source_id=identity.source_id,
+            title=identity.source_id,
+            body=identity.source_id,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        for identity in (seed, one_hop, two_hop, cross_project)
+    }
+
+    class Store:
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit]:
+            return [RecordHit(seed, 1.0)]
+
+    class Graph:
+        def neighbors(
+            self,
+            record_id: RecordIdentity,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+            max_neighbors: int | None = None,
+            filters: dict[str, object] | None = None,
+        ) -> list[GraphNeighbor]:
+            assert record_id == seed
+            assert filters == {
+                "statuses": ["active"],
+                "workspace_id": "workspace-a",
+                "source_kinds": ["note"],
+            }
+            neighbors = [GraphNeighbor(one_hop, "links_to", 1.0)]
+            if depth > 1:
+                neighbors.append(GraphNeighbor(two_hop, "references", 0.8))
+            neighbors.append(GraphNeighbor(cross_project, "links_to", 2.0))
+            return neighbors
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=Store(),
+        graph_store=Graph(),
+        hydrator=lambda identity: records.get(identity.storage_key),
+        config=RecordSearchConfig(graph_depth=depth),
+    )
+
+    outcome = await pipeline.async_search(
+        "what is linked to the seed?",
+        limit=3,
+        filters={
+            "workspace_id": "workspace-a",
+            "source_kinds": ["note"],
+        },
+    )
+
+    assert [result.record_id for result in outcome.results] == ["seed", *expected]
+    assert all(
+        result.record.workspace_id == "workspace-a" for result in outcome.results
+    )
+    assert all(
+        result.record.source_kind == "note" for result in outcome.results
+    )
+    assert all(
+        result.provenance.record_identity == result.record.identity
+        for result in outcome.results
+    )
+    assert all(
+        result.provenance.strategies == ("graph",)
+        for result in outcome.results[1:]
+    )
+
+
 async def test_keyword_and_embedding_work_overlap_without_candidate_gating() -> None:
     records = {"a": _record("a")}
     keyword_started = asyncio.Event()
