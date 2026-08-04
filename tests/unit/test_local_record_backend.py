@@ -428,6 +428,37 @@ def test_keyword_search_retrieves_artifact_metadata_without_uri(tmp_path) -> Non
     )] == ["commit"]
 
 
+def test_keyword_search_handles_artifact_variants_and_missing_tokens(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.index(
+        [
+            _record(
+                "note",
+                "target",
+                "unrelated body",
+                metadata={
+                    "header_path": "Search > RecordSearchPipeline",
+                    "file_path": "src/searchkernel/search/record_pipeline.py",
+                    "exact_tokens": ["RecordSearchPipeline"],
+                },
+            ),
+            _record("git_commit", "unrelated", "unrelated body"),
+        ]
+    )
+
+    assert [
+        hit.source_id
+        for hit in backend.search_keyword(
+            r"src\searchkernel\search\record_pipeline.py,", 10
+        )
+    ] == ["target"]
+    assert [
+        hit.source_id
+        for hit in backend.search_keyword("RecordSearchPipeline!", 10)
+    ] == ["target"]
+    assert backend.search_keyword("src/searchkernel/missing.py", 10) == []
+
+
 def test_keyword_search_applies_all_sql_filters(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     records = [
