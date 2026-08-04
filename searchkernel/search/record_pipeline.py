@@ -22,6 +22,7 @@ from searchkernel.domain import (
     SearchResultProvenance,
     Vector,
 )
+from searchkernel.domain.vector_filters import candidate_storage_keys
 from searchkernel.ports import (
     AsyncEmbeddingProvider,
     AsyncGraphStore,
@@ -614,7 +615,11 @@ class RecordSearchPipeline:
 
             if plan.graph_enabled and base_candidates:
                 try:
-                    graph_ranking = await self._expand_graph(base_candidates, plan)
+                    graph_ranking = await self._expand_graph(
+                        base_candidates,
+                        plan,
+                        filters,
+                    )
                     if graph_ranking:
                         rankings["graph"] = graph_ranking
                         if self._config.graph_fusion == "max":
@@ -1387,12 +1392,18 @@ class RecordSearchPipeline:
         self,
         candidates: Sequence[RecordSearchCandidate],
         plan: QueryPlan,
+        filters: Mapping[str, object],
     ) -> list[RecordHit]:
         graph_store = self._graph_store
         if graph_store is None:
             return []
         graph_seeds = self._sort_candidates(candidates)[
             : plan.graph_seed_budget
+        ]
+        graph_seeds = [
+            seed
+            for seed in graph_seeds
+            if _graph_identity_matches_filters(seed.identity, filters)
         ]
         seed_scores = {
             candidate.storage_key: candidate.score
@@ -1408,6 +1419,7 @@ class RecordSearchPipeline:
             graph_store,
             graph_seeds,
             plan,
+            filters,
         )
         for seed_key in seed_scores:
             raw_neighbors = neighbors_by_seed.get(seed_key, ())
@@ -1446,6 +1458,7 @@ class RecordSearchPipeline:
         graph_store: GraphStore | AsyncGraphStore,
         graph_seeds: Sequence[RecordSearchCandidate],
         plan: QueryPlan,
+        filters: Mapping[str, object],
     ) -> dict[str, Sequence[GraphNeighbor]]:
         identities = [candidate.identity for candidate in graph_seeds]
         neighbors_many = getattr(graph_store, "neighbors_many", None)
@@ -1454,6 +1467,8 @@ class RecordSearchPipeline:
             kwargs: dict[str, Any] = {"depth": plan.graph_depth}
             if _supports_keyword(neighbors_many, "max_neighbors"):
                 kwargs["max_neighbors"] = self._config.max_neighbors_per_seed
+            if _supports_keyword(neighbors_many, "filters"):
+                kwargs["filters"] = filters
             result = await _call_async(
                 neighbors_many,
                 identities,
@@ -1463,6 +1478,14 @@ class RecordSearchPipeline:
                 cast(Mapping[object, Sequence[GraphNeighbor]], result),
                 graph_seeds,
             )
+            normalized = {
+                key: tuple(
+                    neighbor
+                    for neighbor in values
+                    if _graph_neighbor_matches_filters(neighbor, filters)
+                )
+                for key, values in normalized.items()
+            }
             if len(normalized) == len(graph_seeds):
                 return normalized
             graph_seeds = [
@@ -1480,6 +1503,8 @@ class RecordSearchPipeline:
                 kwargs: dict[str, Any] = {"depth": plan.graph_depth}
                 if _supports_keyword(graph_store.neighbors, "max_neighbors"):
                     kwargs["max_neighbors"] = self._config.max_neighbors_per_seed
+                if _supports_keyword(graph_store.neighbors, "filters"):
+                    kwargs["filters"] = filters
                 neighbors = await _call_async(
                     graph_store.neighbors,
                     seed.identity,
@@ -1487,7 +1512,11 @@ class RecordSearchPipeline:
                 )
                 return seed.storage_key, cast(
                     Sequence[GraphNeighbor],
-                    neighbors,
+                    tuple(
+                        neighbor
+                        for neighbor in neighbors
+                        if _graph_neighbor_matches_filters(neighbor, filters)
+                    ),
                 )
 
         loaded = await _gather_tasks(
@@ -1733,6 +1762,44 @@ def _normalize_graph_neighbor(
     neighbor: GraphNeighbor,
 ) -> tuple[str, str, float]:
     return neighbor.identity.storage_key, neighbor.edge_type, neighbor.weight
+
+
+def _graph_identity_matches_filters(
+    identity: RecordIdentity,
+    filters: Mapping[str, object],
+) -> bool:
+    workspace_id = filters.get("workspace_id")
+    if workspace_id is not None and identity.workspace_id != workspace_id:
+        return False
+
+    source_values = filters.get("source_kinds")
+    if source_values is None:
+        source_values = filters.get("source_kind")
+    if source_values is None:
+        source_values = filters.get("source_filter")
+    if source_values is not None:
+        if isinstance(source_values, str):
+            allowed_sources = {source_values}
+        elif isinstance(source_values, Sequence):
+            allowed_sources = {str(value) for value in source_values}
+        else:
+            allowed_sources = {str(source_values)}
+        if identity.source_kind not in allowed_sources:
+            return False
+
+    candidate_values = filters.get("candidate_ids")
+    if candidate_values is None:
+        candidate_values = filters.get("candidate_storage_keys")
+    if candidate_values is None:
+        return True
+    return identity.storage_key in candidate_storage_keys(candidate_values)
+
+
+def _graph_neighbor_matches_filters(
+    neighbor: GraphNeighbor,
+    filters: Mapping[str, object],
+) -> bool:
+    return _graph_identity_matches_filters(neighbor.identity, filters)
 
 
 def _normalize_graph_neighbor_map(
