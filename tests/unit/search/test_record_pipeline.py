@@ -1176,6 +1176,201 @@ async def test_relationship_target_resolver_preserves_no_neighbor_behavior() -> 
     assert outcome.missing_record_ids == ()
 
 
+async def test_chunk_target_hits_normalize_to_document_graph_neighbors() -> None:
+    seed = RecordIdentity("project-a", "note", "explanation")
+    target = RecordIdentity("project-a", "note", "hybrid-search-strategy")
+    target_chunk_a = RecordIdentity(
+        "project-a",
+        "note",
+        "hybrid-search-strategy_chunk_26",
+    )
+    target_chunk_b = RecordIdentity(
+        "project-a",
+        "note",
+        "hybrid-search-strategy_chunk_27",
+    )
+    neighbors = (
+        RecordIdentity("project-a", "note", "neighbor-a"),
+        RecordIdentity("project-a", "note", "neighbor-b"),
+    )
+    outsider = RecordIdentity("project-b", "note", "other-project")
+
+    def record(
+        identity: RecordIdentity,
+        *,
+        doc_id: str | None = None,
+    ) -> Record:
+        return Record(
+            workspace_id=identity.workspace_id,
+            source_kind=identity.source_kind,
+            source_id=identity.source_id,
+            title=identity.source_id,
+            body=identity.source_id,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            metadata={"doc_id": doc_id} if doc_id is not None else {},
+            uri=f"/docs/{identity.source_id}.md",
+        )
+
+    records = {
+        identity.storage_key: record(identity)
+        for identity in (seed, *neighbors, outsider)
+    }
+    records[target_chunk_a.storage_key] = record(
+        target_chunk_a,
+        doc_id=target.source_id,
+    )
+    records[target_chunk_b.storage_key] = record(
+        target_chunk_b,
+        doc_id=target.source_id,
+    )
+    graph_calls: list[RecordIdentity] = []
+
+    class Store:
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit]:
+            return [RecordHit(seed, 1.0)]
+
+    class Graph:
+        def neighbors(
+            self,
+            record_id: RecordIdentity,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+            max_neighbors: int | None = None,
+            filters: dict[str, object] | None = None,
+        ) -> list[GraphNeighbor]:
+            graph_calls.append(record_id)
+            assert filters == {
+                "statuses": ["active"],
+                "workspace_id": "project-a",
+                "project_id": "project-a",
+            }
+            return [
+                GraphNeighbor(neighbors[1], "links_to", 1.0),
+                GraphNeighbor(outsider, "links_to", 2.0),
+                GraphNeighbor(neighbors[0], "links_to", 1.0),
+            ]
+
+    async def resolve(
+        query: str,
+        context: RecordSearchQueryContext,
+    ) -> list[RecordHit]:
+        return [
+            RecordHit(target_chunk_b, 1.5),
+            RecordHit(target_chunk_a, 2.0),
+        ]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=Store(),
+        graph_store=Graph(),
+        hydrator=lambda identity: records.get(identity.storage_key),
+        policy=RecordSearchPolicy(graph_target_resolver=resolve),
+        config=RecordSearchConfig(adaptive_graph_enabled=False),
+    )
+
+    outcome = await pipeline.async_search(
+        "What pages does Hybrid Search Strategy link to?",
+        limit=3,
+        filters={"workspace_id": "project-a", "project_id": "project-a"},
+    )
+
+    assert graph_calls == [target]
+    assert [result.record_id for result in outcome.results] == [
+        "explanation",
+        "neighbor-a",
+        "neighbor-b",
+    ]
+    assert [result.record.uri for result in outcome.results] == [
+        "/docs/explanation.md",
+        "/docs/neighbor-a.md",
+        "/docs/neighbor-b.md",
+    ]
+    assert [result.score for result in outcome.results] == pytest.approx(
+        [1 / 61, 1 / 61, 1 / 62]
+    )
+    assert [result.provenance.strategies for result in outcome.results] == [
+        ("keyword",),
+        ("graph",),
+        ("graph",),
+    ]
+    assert all(
+        result.record.workspace_id == "project-a"
+        for result in outcome.results
+    )
+
+
+async def test_chunk_target_normalization_preserves_empty_neighbor_behavior() -> None:
+    seed = _record("explanation")
+    target_chunk = Record(
+        workspace_id="project-a",
+        source_kind="note",
+        source_id="isolated_chunk_1",
+        title="Isolated Target",
+        body="target chunk",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        metadata={"doc_id": "isolated"},
+    )
+    target = Record(
+        workspace_id="project-a",
+        source_kind="note",
+        source_id="isolated",
+        title="Isolated Target",
+        body="target",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    graph_calls: list[RecordIdentity] = []
+
+    class Graph:
+        def neighbors(
+            self,
+            record_id: RecordIdentity,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+            max_neighbors: int | None = None,
+        ) -> list[GraphNeighbor]:
+            graph_calls.append(record_id)
+            return []
+
+    async def resolve(
+        query: str,
+        context: RecordSearchQueryContext,
+    ) -> list[RecordHit]:
+        return [RecordHit(target_chunk.identity, 2.0)]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("explanation", 1.0)]),
+        graph_store=Graph(),
+        hydrator=_hydrator(
+            {
+                "explanation": seed,
+                target_chunk.source_id: target_chunk,
+                target.source_id: target,
+            }
+        ),
+        policy=RecordSearchPolicy(graph_target_resolver=resolve),
+        config=RecordSearchConfig(adaptive_graph_enabled=False),
+    )
+
+    outcome = await pipeline.async_search(
+        "What documents are neighbors of Isolated Target?",
+        limit=2,
+        filters={"workspace_id": "project-a"},
+    )
+
+    assert graph_calls == [target.identity]
+    assert [result.record_id for result in outcome.results] == ["explanation"]
+    assert outcome.results[0].provenance.strategies == ("keyword",)
+    assert outcome.failures == ()
+    assert outcome.missing_record_ids == ()
+
+
 async def test_keyword_and_embedding_work_overlap_without_candidate_gating() -> None:
     records = {"a": _record("a")}
     keyword_started = asyncio.Event()

@@ -1026,14 +1026,25 @@ class RecordSearchPipeline:
         if not isinstance(resolved, Sequence):
             raise TypeError("graph_target_resolver must return a sequence")
         direct_keys = {candidate.storage_key for candidate in candidates}
+        normalized_hits = [
+            RecordHit(
+                await self._canonical_graph_target_identity(hit.identity),
+                hit.score,
+            )
+            for hit in resolved
+            if isinstance(hit, RecordHit)
+        ]
+        if len(normalized_hits) != len(resolved):
+            raise TypeError("graph_target_resolver returned a non-canonical hit")
         targets: list[RecordSearchCandidate] = []
         seen = set(direct_keys)
         for rank, hit in enumerate(
-            sorted(resolved, key=lambda item: (-item.score, item.storage_key)),
+            sorted(
+                normalized_hits,
+                key=lambda item: (-item.score, item.storage_key),
+            ),
             start=1,
         ):
-            if not isinstance(hit, RecordHit):
-                raise TypeError("graph_target_resolver returned a non-canonical hit")
             if hit.storage_key in seen or not _graph_identity_matches_filters(
                 hit.identity, filters
             ):
@@ -1049,6 +1060,24 @@ class RecordSearchPipeline:
             )
             seen.add(hit.storage_key)
         return targets or list(candidates)
+
+    async def _canonical_graph_target_identity(
+        self,
+        identity: RecordIdentity,
+    ) -> RecordIdentity:
+        if not _looks_like_chunk_identity(identity.source_id):
+            return identity
+        parent_resolver = getattr(self._hydrator, "chunk_parent", None)
+        if callable(parent_resolver):
+            parent = await _call_async(parent_resolver, identity)
+            if parent is not None:
+                if not isinstance(parent, RecordIdentity):
+                    raise TypeError("chunk_parent returned a non-canonical identity")
+                return parent
+        record = await self._hydrate(identity)
+        if record is None:
+            return identity
+        return _parent_identity_from_record(record) or identity
 
     def _consume_stage(
         self,
@@ -1789,6 +1818,29 @@ async def _resolve_parent_identity(
 
 def _is_chunk_candidate(candidate: RecordSearchCandidate) -> bool:
     return "#chunk:" in candidate.record_id
+
+
+def _looks_like_chunk_identity(source_id: str) -> bool:
+    return "#chunk:" in source_id or "_chunk_" in source_id
+
+
+def _parent_identity_from_record(record: Record) -> RecordIdentity | None:
+    for key in ("_chunk_parent_storage_key", "parent_storage_key"):
+        value = record.metadata.get(key)
+        if isinstance(value, str):
+            try:
+                return RecordIdentity.from_storage_key(value)
+            except ValueError:
+                continue
+    for key in ("doc_id", "document_id", "parent_id"):
+        value = record.metadata.get(key)
+        if isinstance(value, str) and value and value != record.source_id:
+            return RecordIdentity(
+                record.workspace_id,
+                record.source_kind,
+                value,
+            )
+    return None
 
 
 def _graph_hit(
