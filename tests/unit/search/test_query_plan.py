@@ -1,3 +1,5 @@
+import pytest
+
 from searchkernel.search.classifier import QueryType
 from searchkernel.search.query_plan import QueryRouter, QueryRouterConfig
 
@@ -93,6 +95,27 @@ def test_relationship_query_enables_graph_expansion() -> None:
     assert plan.signals.relationship
     assert plan.graph_enabled
     assert "graph:query_not_relationship" not in plan.diagnostic_skip_reasons
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "which neighbors surround this module?",
+        "what pages point to this document?",
+        "show adjacent records",
+    ],
+)
+def test_relationship_paraphrases_enable_graph_expansion(query: str) -> None:
+    plan = QueryRouter().route(
+        query,
+        limit=1,
+        keyword_available=True,
+        vector_available=False,
+        graph_available=True,
+    )
+
+    assert plan.signals.relationship
+    assert plan.graph_enabled
 
 
 def test_adaptive_graph_requires_strong_base_seed_signal() -> None:

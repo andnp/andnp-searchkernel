@@ -20,7 +20,8 @@ _ARTIFACT_PATTERN = re.compile(
 _RELATIONSHIP_PATTERN = re.compile(
     r"\b(?:call(?:er|ee)?s?|depend(?:s|ency|encies)?|"
     r"import(?:s|ed)?|referenc(?:e|es|ed)|relat(?:ed|es)|"
-    r"link(?:ed|s)?|connect(?:ed|s)?|upstream|downstream)\b",
+    r"link(?:ed|s)?|connect(?:ed|s)?|neighbor(?:s|ing)?|"
+    r"adjacent|upstream|downstream|point(?:s|ed)?\s+to)\b",
     re.IGNORECASE,
 )
 
