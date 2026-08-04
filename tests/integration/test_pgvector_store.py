@@ -901,6 +901,27 @@ class TestGraphStore:
         assert "test:2" in neighbor_ids
         assert "test:3" in neighbor_ids
 
+    def test_incoming_neighbors_return_sources_of_target_edges(self, pg_conn):
+        store = PGGraphStore(pg_conn)
+        target = RecordIdentity("workspace-a", "note", "target")
+        inbound = RecordIdentity("workspace-a", "note", "inbound")
+        outbound = RecordIdentity("workspace-a", "note", "outbound")
+        store.upsert_edges(
+            [
+                GraphEdge(inbound, target, "links_to", 0.9),
+                GraphEdge(target, outbound, "links_to", 0.8),
+            ]
+        )
+
+        assert store.incoming_neighbors(target) == [
+            GraphNeighbor(inbound, "links_to", pytest.approx(0.9))
+        ]
+        assert store.incoming_neighbors_many([target], depth=1) == {
+            target.storage_key: [
+                GraphNeighbor(inbound, "links_to", pytest.approx(0.9))
+            ]
+        }
+
     def test_edge_upsert_updates_weight_and_missing_neighbors_are_empty(self, pg_conn):
         """Test graph edge conflict updates and empty lookups."""
         store = PGGraphStore(pg_conn)

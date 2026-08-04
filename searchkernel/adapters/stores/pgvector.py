@@ -1588,6 +1588,38 @@ class PGGraphStore:
         depth: int = 1,
         max_neighbors: int | None = None,
     ) -> Sequence[GraphNeighbor]:
+        return self._neighbors_direction(
+            record_id,
+            edge_types,
+            depth,
+            max_neighbors,
+            incoming=False,
+        )
+
+    def incoming_neighbors(
+        self,
+        record_id: RecordIdentity,
+        edge_types: list[str] | None = None,
+        depth: int = 1,
+        max_neighbors: int | None = None,
+    ) -> Sequence[GraphNeighbor]:
+        return self._neighbors_direction(
+            record_id,
+            edge_types,
+            depth,
+            max_neighbors,
+            incoming=True,
+        )
+
+    def _neighbors_direction(
+        self,
+        record_id: RecordIdentity,
+        edge_types: list[str] | None = None,
+        depth: int = 1,
+        max_neighbors: int | None = None,
+        *,
+        incoming: bool,
+    ) -> Sequence[GraphNeighbor]:
         """Retrieve neighbors of a record.
 
         Args:
@@ -1602,6 +1634,18 @@ class PGGraphStore:
             raise ValueError("depth must be positive")
         if max_neighbors is not None and max_neighbors <= 0:
             raise ValueError("max_neighbors must be positive")
+        seed_workspace = "source_workspace_id" if not incoming else "target_workspace_id"
+        seed_kind = "source_kind" if not incoming else "target_kind"
+        seed_id = "source_id" if not incoming else "target_id"
+        neighbor_workspace = "target_workspace_id" if not incoming else "source_workspace_id"
+        neighbor_kind = "target_kind" if not incoming else "source_kind"
+        neighbor_id = "target_id" if not incoming else "source_id"
+        walk_workspace = "target_workspace_id" if not incoming else "source_workspace_id"
+        walk_kind = "target_kind" if not incoming else "source_kind"
+        walk_id = "target_id" if not incoming else "source_id"
+        join_workspace = "source_workspace_id" if not incoming else "target_workspace_id"
+        join_kind = "source_kind" if not incoming else "target_kind"
+        join_id = "source_id" if not incoming else "target_id"
         conn = self.conn_pool.get_connection()
         cursor = None
         try:
@@ -1643,9 +1687,9 @@ class PGGraphStore:
                                )::text
                            ] AS path
                     FROM graph_edges
-                    WHERE source_workspace_id IS NOT DISTINCT FROM %s
-                      AND source_kind = %s
-                      AND source_id = %s
+                    WHERE {seed_workspace} IS NOT DISTINCT FROM %s
+                      AND {seed_kind} = %s
+                      AND {seed_id} = %s
                       {edge_filter}
                     UNION ALL
                     SELECT walk.source_workspace_id, walk.source_kind,
@@ -1654,43 +1698,43 @@ class PGGraphStore:
                            walk.weight * edge.weight, walk.hop + 1,
                            walk.path || (
                                jsonb_build_array(
-                                   NULLIF(edge.target_workspace_id, ''),
-                                   edge.target_kind,
-                                   edge.target_id
+                                   NULLIF(edge.{neighbor_workspace}, ''),
+                                   edge.{neighbor_kind},
+                                   edge.{neighbor_id}
                                )::text
                            )
                     FROM walk
                     JOIN graph_edges edge
-                      ON edge.source_workspace_id IS NOT DISTINCT FROM
-                         walk.target_workspace_id
-                     AND edge.source_kind = walk.target_kind
-                     AND edge.source_id = walk.target_id
+                      ON edge.{join_workspace} IS NOT DISTINCT FROM
+                         walk.{walk_workspace}
+                     AND edge.{join_kind} = walk.{walk_kind}
+                     AND edge.{join_id} = walk.{walk_id}
                     WHERE walk.hop < %s
                       AND NOT (
                           jsonb_build_array(
-                              NULLIF(edge.target_workspace_id, ''),
-                              edge.target_kind,
-                              edge.target_id
+                              NULLIF(edge.{neighbor_workspace}, ''),
+                              edge.{neighbor_kind},
+                              edge.{neighbor_id}
                           )::text
                       ) = ANY(walk.path)
                       AND TRUE {edge_filter.replace("edge_type", "edge.edge_type")}
                 ),
                 ranked AS (
-                    SELECT target_workspace_id, target_kind, target_id,
+                    SELECT {neighbor_workspace}, {neighbor_kind}, {neighbor_id},
                            edge_type, weight,
                            ROW_NUMBER() OVER (
-                               PARTITION BY target_workspace_id, target_kind,
-                                            target_id
+                               PARTITION BY {neighbor_workspace}, {neighbor_kind},
+                                            {neighbor_id}
                                ORDER BY weight DESC, edge_type
                            ) AS row_number
                     FROM walk
                 )
-                SELECT target_workspace_id, target_kind, target_id,
+                SELECT {neighbor_workspace}, {neighbor_kind}, {neighbor_id},
                        edge_type, weight
                 FROM ranked
                 WHERE row_number = 1
-                ORDER BY weight DESC, target_workspace_id, target_kind,
-                         target_id, edge_type
+                ORDER BY weight DESC, {neighbor_workspace}, {neighbor_kind},
+                         {neighbor_id}, edge_type
                 {limit_clause};
             """
 
@@ -1826,6 +1870,29 @@ class PGGraphStore:
             if cursor is not None:
                 cursor.close()
             self.conn_pool.put_connection(conn)
+
+
+    def incoming_neighbors_many(
+        self,
+        identities: Sequence[RecordIdentity],
+        *,
+        depth: int,
+        max_neighbors: int | None = None,
+    ) -> dict[str, list[GraphNeighbor]]:
+        unique_identities = list(
+            dict.fromkeys(identity.storage_key for identity in identities)
+        )
+        by_key = {identity.storage_key: identity for identity in identities}
+        return {
+            storage_key: list(
+                self.incoming_neighbors(
+                    by_key[storage_key],
+                    depth=depth,
+                    max_neighbors=max_neighbors,
+                )
+            )
+            for storage_key in unique_identities
+        }
 
 
 class PGCacheStore:
