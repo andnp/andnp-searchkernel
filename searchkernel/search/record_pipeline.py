@@ -211,7 +211,7 @@ class RecordSearchConfig:
     graph_depth: int = 1
     max_graph_seeds: int = 10
     graph_enabled: bool = True
-    adaptive_graph_enabled: bool = False
+    adaptive_graph_enabled: bool = True
     adaptive_graph_min_seed_score: float = 0.75
     adaptive_graph_min_seed_count: int = 1
     graph_only_penalty: float = 0.5

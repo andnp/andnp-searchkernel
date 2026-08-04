@@ -1311,6 +1311,7 @@ async def test_ordinary_query_does_not_touch_available_graph_store() -> None:
         keyword_store=FakeKeywordStore([("a", 1.0)]),
         graph_store=FailingGraph({}),
         hydrator=_hydrator({"a": _record("a")}),
+        config=RecordSearchConfig(adaptive_graph_enabled=False),
     )
 
     outcome = await pipeline.async_search("what is caching?", limit=1)
@@ -1327,7 +1328,7 @@ async def test_adaptive_graph_expands_strong_ordinary_seed_without_displacing_it
             {"seed": [("neighbor", "related", 1.0)]}
         ),
         hydrator=_hydrator(records),
-        config=RecordSearchConfig(adaptive_graph_enabled=True),
+        config=RecordSearchConfig(),
     )
 
     outcome = await pipeline.async_search("what is caching?", limit=2)
