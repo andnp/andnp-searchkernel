@@ -21,7 +21,9 @@ _RELATIONSHIP_PATTERN = re.compile(
     r"\b(?:call(?:er|ee)?s?|depend(?:s|ency|encies)?|"
     r"import(?:s|ed)?|referenc(?:e|es|ed)|relat(?:ed|es)|"
     r"link(?:ed|s)?|connect(?:ed|s)?|neighbor(?:s|ing)?|"
-    r"adjacent|upstream|downstream|point(?:s|ed)?\s+to)\b",
+    r"adjacent|upstream|downstream|inbound|outbound|"
+    r"embed(?:s|ded|ding)?|transclud(?:e|es|ed|ing)?|"
+    r"similar|point(?:s|ed)?\s+to)\b",
     re.IGNORECASE,
 )
 

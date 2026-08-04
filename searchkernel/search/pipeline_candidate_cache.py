@@ -135,6 +135,9 @@ class CandidateCachePolicy[CandidateT]:
                         "parent_expansion": (
                             self._policy.parent_expander is not None
                         ),
+                        "graph_target_resolution": (
+                            self._policy.graph_target_resolver is not None
+                        ),
                     }
                 ),
                 encoder_namespace=self.encoder_namespace(),

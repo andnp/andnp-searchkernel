@@ -75,6 +75,12 @@ ParentIdentityResolver = Callable[
     RecordIdentity | None | Awaitable[RecordIdentity | None],
 ]
 QueryEmbeddingCallable = Callable[[str], Vector | Awaitable[Vector]]
+GraphTargetResolver = Callable[
+    [str, "RecordSearchQueryContext"],
+    Sequence[RecordHit] | Awaitable[Sequence[RecordHit]],
+]
+
+
 class RecordHydrator(Protocol):
     """Hydrate a record without mutating source state."""
 
@@ -151,6 +157,7 @@ class RecordSearchPolicy:
     post_process: (
         Callable[[list[RecordSearchResult]], Sequence[RecordSearchResult]] | None
     ) = None
+    graph_target_resolver: GraphTargetResolver | None = None
     parent_expander: ParentRecordExpander | ParentIdentityResolver | None = None
 
 
@@ -615,8 +622,13 @@ class RecordSearchPipeline:
 
             if plan.graph_enabled and base_candidates:
                 try:
-                    graph_ranking = await self._expand_graph(
+                    graph_seeds = await self._resolve_graph_targets(
                         base_candidates,
+                        query_context,
+                        filters,
+                    )
+                    graph_ranking = await self._expand_graph(
+                        graph_seeds,
                         plan,
                         filters,
                     )
@@ -1000,6 +1012,43 @@ class RecordSearchPipeline:
             return None
         diagnostics.append("expansion:applied")
         return expanded
+
+    async def _resolve_graph_targets(
+        self,
+        candidates: Sequence[RecordSearchCandidate],
+        context: RecordSearchQueryContext,
+        filters: Mapping[str, object],
+    ) -> list[RecordSearchCandidate]:
+        resolver = self._policy.graph_target_resolver
+        if resolver is None or not context.query.strip():
+            return list(candidates)
+        resolved = await _call_async(resolver, context.query, context)
+        if not isinstance(resolved, Sequence):
+            raise TypeError("graph_target_resolver must return a sequence")
+        direct_keys = {candidate.storage_key for candidate in candidates}
+        targets: list[RecordSearchCandidate] = []
+        seen = set(direct_keys)
+        for rank, hit in enumerate(
+            sorted(resolved, key=lambda item: (-item.score, item.storage_key)),
+            start=1,
+        ):
+            if not isinstance(hit, RecordHit):
+                raise TypeError("graph_target_resolver returned a non-canonical hit")
+            if hit.storage_key in seen or not _graph_identity_matches_filters(
+                hit.identity, filters
+            ):
+                continue
+            provenance = SearchResultProvenance(record_identity=hit.identity)
+            provenance.add_strategy("graph_target", rank, hit.score)
+            targets.append(
+                RecordSearchCandidate(
+                    identity=hit.identity,
+                    score=hit.score,
+                    provenance=provenance,
+                )
+            )
+            seen.add(hit.storage_key)
+        return targets or list(candidates)
 
     def _consume_stage(
         self,
