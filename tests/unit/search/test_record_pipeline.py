@@ -675,7 +675,11 @@ async def test_graph_expansion_reads_only_bounded_seed_neighbors() -> None:
         keyword_store=FakeKeywordStore([("a", 1.0), ("b", 0.9), ("c", 0.8)]),
         graph_store=Graph(),
         hydrator=_hydrator(records),
-        config=RecordSearchConfig(max_graph_seeds=2, max_neighbors_per_seed=1),
+        config=RecordSearchConfig(
+            max_graph_seeds=2,
+            max_neighbors_per_seed=1,
+            max_graph_concurrency=2,
+        ),
         continue_on_error=True,
     )
 
