@@ -21,6 +21,7 @@ from searchkernel.runtime import (
     HydrationCacheKey,
 )
 from searchkernel.search.record_pipeline import (
+    RecordSearchCandidate,
     RecordSearchConfig,
     RecordSearchError,
     RecordSearchPipeline,
@@ -45,6 +46,18 @@ def _record(record_id: str) -> Record:
 
 def _hit(record_id: str, score: float) -> RecordHit:
     return RecordHit(RecordIdentity(None, "fake", record_id), score)
+
+
+def _source_record(source_kind: str, record_id: str) -> Record:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    return Record(
+        source_kind=source_kind,
+        source_id=record_id,
+        title=record_id,
+        body=f"body for {record_id}",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
 
 
 def _hits(results: Sequence[tuple[str, float]]) -> list[RecordHit]:
@@ -554,6 +567,55 @@ async def test_policy_can_adjust_scores_reject_results_and_post_process() -> Non
 
     assert [result.record_id for result in outcome.results] == ["b"]
     assert outcome.results[0].score > 0
+
+
+async def test_query_policy_calibrates_sources_without_hardcoded_query_modes() -> None:
+    document = _source_record("document", "doc")
+    commit = _source_record("git_commit", "commit")
+    store = FakeKeywordStore([])
+    store.results = [
+        RecordHit(commit.identity, 1.0),
+        RecordHit(document.identity, 0.9),
+    ]
+
+    def allowed_source(
+        candidate: RecordSearchCandidate,
+        context: RecordSearchQueryContext,
+    ) -> bool:
+        source_kind = candidate.source_kind
+        selected = context.filters.get("source_kinds")
+        if selected is not None:
+            return source_kind in selected
+        return source_kind != "git_commit"
+
+    def calibrate_source(
+        candidate: RecordSearchCandidate,
+        context: RecordSearchQueryContext,
+    ) -> float:
+        if context.filters.get("source_kinds"):
+            return candidate.score
+        return candidate.score * (2.0 if candidate.source_kind == "document" else 0.1)
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=store,
+        hydrator=_hydrator(
+            {"doc": document, "commit": commit},
+        ),
+        policy=RecordSearchPolicy(
+            query_candidate_filter=allowed_source,
+            query_score_adjuster=calibrate_source,
+        ),
+    )
+
+    ordinary = await pipeline.async_search("what is retrieval?", limit=2)
+    explicit_git = await pipeline.async_search(
+        "show history",
+        limit=2,
+        filters={"source_kinds": ["git_commit"]},
+    )
+
+    assert [result.record_id for result in ordinary.results] == ["doc"]
+    assert [result.record_id for result in explicit_git.results] == ["commit"]
 
 
 async def test_graph_expansion_is_bounded_and_missing_records_are_reported() -> None:

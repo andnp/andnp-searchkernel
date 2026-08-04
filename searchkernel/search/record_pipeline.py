@@ -125,6 +125,9 @@ class RecordSearchPolicy:
     """Optional application-owned filtering, ranking, and post-processing."""
 
     candidate_filter: Callable[[RecordSearchCandidate], bool] | None = None
+    query_candidate_filter: (
+        Callable[[RecordSearchCandidate, RecordSearchQueryContext], bool] | None
+    ) = None
     vector_candidate_ids: (
         Callable[
             [Sequence[RecordHit], RecordSearchQueryContext],
@@ -140,6 +143,9 @@ class RecordSearchPolicy:
         | None
     ) = None
     score_adjuster: Callable[[RecordSearchCandidate], float] | None = None
+    query_score_adjuster: (
+        Callable[[RecordSearchCandidate, RecordSearchQueryContext], float] | None
+    ) = None
     result_filter: Callable[[RecordSearchResult], bool] | None = None
     post_process: (
         Callable[[list[RecordSearchResult]], Sequence[RecordSearchResult]] | None
@@ -567,7 +573,9 @@ class RecordSearchPipeline:
                     ),
                 )
             base_candidates = self._build_candidates(fused_scores, rankings)
-            base_candidates = self._apply_candidate_policy(base_candidates)
+            base_candidates = self._apply_candidate_policy(
+                base_candidates, query_context
+            )
 
             if (
                 self._config.adaptive_graph_enabled
@@ -632,7 +640,9 @@ class RecordSearchPipeline:
                                 ),
                             )
                         candidates = self._build_candidates(fused_scores, rankings)
-                        candidates = self._apply_candidate_policy(candidates)
+                        candidates = self._apply_candidate_policy(
+                            candidates, query_context
+                        )
                         candidates = self._apply_graph_priority(
                             candidates,
                             direct_keys={
@@ -686,10 +696,11 @@ class RecordSearchPipeline:
                             ),
                         )
                         candidates = self._apply_candidate_policy(
-                            self._build_candidates(fused_scores, rankings)
+                            self._build_candidates(fused_scores, rankings),
+                            query_context,
                         )
 
-            candidates = self._apply_score_adjustments(candidates)
+            candidates = self._apply_score_adjustments(candidates, query_context)
             candidates = self._sort_candidates(candidates)
             if plan.signals.relationship and plan.graph_enabled:
                 candidates = self._apply_graph_priority(
@@ -1241,18 +1252,29 @@ class RecordSearchPipeline:
         return candidates
 
     def _apply_score_adjustments(
-        self, candidates: Sequence[RecordSearchCandidate]
+        self,
+        candidates: Sequence[RecordSearchCandidate],
+        context: RecordSearchQueryContext,
     ) -> list[RecordSearchCandidate]:
-        if self._policy.score_adjuster is None:
+        if (
+            self._policy.score_adjuster is None
+            and self._policy.query_score_adjuster is None
+        ):
             return list(candidates)
-        return [
-            RecordSearchCandidate(
-                identity=candidate.identity,
-                score=self._policy.score_adjuster(candidate),
-                provenance=candidate.provenance,
-            )
-            for candidate in candidates
-        ]
+        adjusted: list[RecordSearchCandidate] = []
+        for candidate in candidates:
+            score = candidate.score
+            if self._policy.score_adjuster is not None:
+                score = self._policy.score_adjuster(
+                    dataclass_replace(candidate, score=score)
+                )
+            if self._policy.query_score_adjuster is not None:
+                score = self._policy.query_score_adjuster(
+                    dataclass_replace(candidate, score=score),
+                    context,
+                )
+            adjusted.append(dataclass_replace(candidate, score=score))
+        return adjusted
 
     async def _expand_parents(
         self,
@@ -1348,14 +1370,17 @@ class RecordSearchPipeline:
         return expanded
 
     def _apply_candidate_policy(
-        self, candidates: Sequence[RecordSearchCandidate]
+        self,
+        candidates: Sequence[RecordSearchCandidate],
+        context: RecordSearchQueryContext,
     ) -> list[RecordSearchCandidate]:
-        if self._policy.candidate_filter is None:
-            return list(candidates)
+        candidate_filter = self._policy.candidate_filter
+        query_filter = self._policy.query_candidate_filter
         return [
             candidate
             for candidate in candidates
-            if self._policy.candidate_filter(candidate)
+            if candidate_filter is None or candidate_filter(candidate)
+            if query_filter is None or query_filter(candidate, context)
         ]
 
     async def _expand_graph(
