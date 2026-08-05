@@ -287,6 +287,30 @@ async def test_exact_canonical_identifier_variants_outrank_nearby_match(
     ]
 
 
+async def test_exact_identifier_survives_reranker_reordering() -> None:
+    class ReverseReranker:
+        model_name = "fake-reranker"
+
+        def rerank(self, query: str, documents: list[str]) -> list[float]:
+            return [0.1, 0.9]
+
+    exact = _record("ENG-939")
+    nearby = _record("ENG-940")
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("ENG-939", 1.0), ("ENG-940", 10.0)]),
+        hydrator=_hydrator({exact.source_id: exact, nearby.source_id: nearby}),
+        reranker=ReverseReranker(),
+        config=RecordSearchConfig(rerank_budget=2),
+    )
+
+    outcome = await pipeline.async_search("eng-939", limit=2)
+
+    assert [result.record_id for result in outcome.results] == [
+        exact.source_id,
+        nearby.source_id,
+    ]
+
+
 @pytest.mark.parametrize("retrieval_mode", ["semantic", "semantic_only"])
 async def test_semantic_retrieval_mode_routes_only_vector(
     retrieval_mode: str,

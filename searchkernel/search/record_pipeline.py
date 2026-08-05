@@ -814,6 +814,7 @@ class RecordSearchPipeline:
             failures,
             diagnostics,
         )
+        hydrated = self._apply_exact_identifier_result_priority(hydrated, query)
         hydrated = await self._aggregate_chunk_results(
             hydrated,
             failures,
@@ -1439,6 +1440,37 @@ class RecordSearchPipeline:
             for candidate in candidates
         ]
 
+    @staticmethod
+    def _apply_exact_identifier_result_priority(
+        results: Sequence[RecordSearchResult],
+        query: str,
+    ) -> list[RecordSearchResult]:
+        normalized_query = query.strip().casefold()
+        exact = [
+            result
+            for result in results
+            if normalized_query in _record_identifiers(result.record)
+        ]
+        if not exact:
+            return list(results)
+        boosted_score = max(result.score for result in results) + 1.0
+        exact_keys = {result.storage_key for result in exact}
+        adjusted = [
+            dataclass_replace(
+                result,
+                score=(
+                    boosted_score
+                    if result.storage_key in exact_keys
+                    else result.score
+                ),
+                provenance=_identifier_provenance(result.provenance, result.score),
+            )
+            if result.storage_key in exact_keys
+            else result
+            for result in results
+        ]
+        return sorted(adjusted, key=lambda item: (-item.score, item.storage_key))
+
     async def _expand_parents(
         self,
         candidates: Sequence[RecordSearchCandidate],
@@ -1930,18 +1962,28 @@ def _identifier_provenance(
 
 
 def _candidate_identifiers(candidate: RecordSearchCandidate) -> frozenset[str]:
-    qualified = f"{candidate.source_kind}:{candidate.record_id}"
-    if candidate.workspace_id is None:
+    return _identity_identifiers(candidate.identity)
+
+
+def _record_identifiers(record: Record) -> frozenset[str]:
+    return _identity_identifiers(
+        RecordIdentity(record.workspace_id, record.source_kind, record.source_id)
+    )
+
+
+def _identity_identifiers(identity: RecordIdentity) -> frozenset[str]:
+    qualified = f"{identity.source_kind}:{identity.source_id}"
+    if identity.workspace_id is None:
         return frozenset(
             value.casefold()
-            for value in (candidate.record_id, candidate.storage_key, qualified)
+            for value in (identity.source_id, identity.storage_key, qualified)
         )
-    scoped = f"{candidate.workspace_id}:{qualified}"
+    scoped = f"{identity.workspace_id}:{qualified}"
     return frozenset(
         value.casefold()
         for value in (
-            candidate.record_id,
-            candidate.storage_key,
+            identity.source_id,
+            identity.storage_key,
             qualified,
             scoped,
         )
