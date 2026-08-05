@@ -807,6 +807,7 @@ class RecordSearchPipeline:
         )
         if self._policy.post_process is not None:
             hydrated = list(self._policy.post_process(hydrated))
+        hydrated = hydrated[:limit]
 
         if trace is not None:
             trace.provenance = {

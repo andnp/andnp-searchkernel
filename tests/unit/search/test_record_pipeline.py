@@ -196,6 +196,27 @@ async def test_minimum_candidate_limit_applies_to_store_acquisition() -> None:
     assert keyword_store.queries[0][1] == 50
 
 
+@pytest.mark.parametrize("limit", [1, 3, 5])
+async def test_search_never_returns_more_than_requested_limit(limit: int) -> None:
+    record_ids = [f"record-{index}" for index in range(10)]
+    records = {record_id: _record(record_id) for record_id in record_ids}
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([(record_id, 1.0) for record_id in record_ids]),
+        hydrator=_hydrator(records),
+        config=RecordSearchConfig(
+            adaptive_enabled=True,
+            maximum_limit=10,
+            score_ratio_floor=0.0,
+            minimum_score=0.0,
+            maximum_score_gap=1.0,
+        ),
+    )
+
+    outcome = await pipeline.async_search("query", limit=limit)
+
+    assert len(outcome.results) == limit
+
+
 async def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b", "c")}
     pipeline = RecordSearchPipeline(
