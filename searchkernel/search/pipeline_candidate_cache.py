@@ -132,6 +132,13 @@ class CandidateCachePolicy[CandidateT]:
                         "expansion_similarity_threshold": (
                             self._config.expansion_similarity_threshold
                         ),
+                        "synonym_expansion_enabled": (
+                            self._config.synonym_expansion_enabled
+                        ),
+                        "synonym_expansion_max_terms": (
+                            self._config.synonym_expansion_max_terms
+                        ),
+                        "query_expander": self._policy.query_expander is not None,
                         "parent_expansion": (
                             self._policy.parent_expander is not None
                         ),

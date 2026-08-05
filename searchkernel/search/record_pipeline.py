@@ -158,6 +158,9 @@ class RecordSearchPolicy:
         Callable[[list[RecordSearchResult]], Sequence[RecordSearchResult]] | None
     ) = None
     graph_target_resolver: GraphTargetResolver | None = None
+    query_expander: (
+        Callable[[str], str | Sequence[str] | Awaitable[str | Sequence[str]]] | None
+    ) = None
     parent_expander: ParentRecordExpander | ParentIdentityResolver | None = None
 
 
@@ -231,6 +234,8 @@ class RecordSearchConfig:
     expansion_timeout_s: float = 0.25
     expansion_top_k: int = 3
     expansion_similarity_threshold: float = 0.5
+    synonym_expansion_enabled: bool = False
+    synonym_expansion_max_terms: int = 3
     capture_trace: bool = False
     adaptive_enabled: bool = False
     maximum_limit: int = 100
@@ -343,7 +348,10 @@ class RecordSearchPipeline:
                 graph_depth=self._config.graph_depth,
                 adaptive_graph_enabled=self._config.adaptive_graph_enabled,
                 rerank_budget=self._config.rerank_budget,
-                expansion_enabled=self._config.expansion_enabled,
+                expansion_enabled=(
+                    self._config.expansion_enabled
+                    or self._config.synonym_expansion_enabled
+                ),
                 base_semantic_weight=self._config.base_semantic_weight,
                 base_keyword_weight=self._config.base_keyword_weight,
                 base_graph_weight=self._config.base_graph_weight,
@@ -1002,6 +1010,30 @@ class RecordSearchPipeline:
         if strategy != "query_expansion":
             diagnostics.append(f"expansion:fallback:unsupported:{strategy}")
             return None
+        if self._config.synonym_expansion_enabled:
+            expander = self._policy.query_expander
+            if expander is not None:
+                try:
+                    expanded = await asyncio.wait_for(
+                        _call_async(expander, query),
+                        timeout=self._config.expansion_timeout_s,
+                    )
+                except TimeoutError:
+                    diagnostics.append("synonym_expansion:fallback:timeout")
+                except Exception as error:  # noqa: BLE001 - expansion is optional
+                    diagnostics.append(
+                        f"synonym_expansion:fallback:{type(error).__name__}"
+                    )
+                else:
+                    normalized = _normalize_query_expansion(
+                        query,
+                        expanded,
+                        self._config.synonym_expansion_max_terms,
+                    )
+                    if normalized is not None:
+                        diagnostics.append("synonym_expansion:applied")
+                        return normalized
+                    diagnostics.append("synonym_expansion:fallback:empty")
         vector_store = self._vector_store
         if getattr(vector_store, "query_expansion_supported", True) is False:
             diagnostics.append("expansion:skip:unsupported")
@@ -1775,6 +1807,8 @@ class RecordSearchPipeline:
             raise ValueError(
                 "expansion_similarity_threshold must not be negative"
             )
+        if self._config.synonym_expansion_max_terms < 1:
+            raise ValueError("synonym_expansion_max_terms must be positive")
         if self._config.graph_fusion not in {"rrf", "max"}:
             raise ValueError("graph_fusion must be 'rrf' or 'max'")
         if self._config.graph_depth < 1:
@@ -2131,6 +2165,27 @@ def _needs_conditional_expansion(
     if len(candidates) < requested_limit:
         return True
     return not candidates or candidates[0].score <= 0.0
+
+
+def _normalize_query_expansion(
+    query: str,
+    expanded: str | Sequence[str],
+    maximum_terms: int,
+) -> str | None:
+    if isinstance(expanded, str):
+        terms = [" ".join(expanded.split()[:maximum_terms])]
+    elif isinstance(expanded, Sequence):
+        terms = [
+            item.strip()
+            for item in expanded
+            if isinstance(item, str) and item.strip()
+        ][:maximum_terms]
+    else:
+        return None
+    additions = [term for term in terms if term.casefold() != query.casefold()]
+    if not additions:
+        return None
+    return " ".join((query.strip(), *additions))
 
 
 def _find_stage(

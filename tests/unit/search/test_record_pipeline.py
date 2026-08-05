@@ -2033,6 +2033,32 @@ async def test_conditional_expansion_is_called_once_after_weak_first_pass() -> N
     assert "expansion:applied" in outcome.diagnostics
 
 
+async def test_opt_in_query_expander_adds_bounded_synonyms() -> None:
+    keyword_store = FakeKeywordStore([("a", 1.0)])
+
+    def expand(query: str) -> list[str]:
+        assert query == "deploy issue"
+        return ["incident", "outage", "failure", "unbounded"]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=keyword_store,
+        hydrator=_hydrator({"a": _record("a")}),
+        policy=RecordSearchPolicy(query_expander=expand),
+        config=RecordSearchConfig(
+            synonym_expansion_enabled=True,
+            synonym_expansion_max_terms=2,
+        ),
+    )
+
+    outcome = await pipeline.async_search("deploy issue", limit=2)
+
+    assert any(
+        query == "deploy issue incident outage"
+        for query, _, _ in keyword_store.queries
+    )
+    assert "synonym_expansion:applied" in outcome.diagnostics
+
+
 async def test_conditional_expansion_obeys_latency_budget() -> None:
     class AnyEmbedder(FakeEmbedder):
         def embed_query(self, query: str) -> list[float]:
