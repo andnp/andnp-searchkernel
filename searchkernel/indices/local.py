@@ -1058,6 +1058,17 @@ class LocalRecordBackend:
         if match_query == '""':
             return []
         needs_artifact_rerank = _keyword_scoring.looks_like_artifact_query(query)
+        artifact_tokens = _keyword_scoring._embedded_artifact_tokens(query)
+        if needs_artifact_rerank and artifact_tokens:
+            artifact_queries = [
+                _keyword_scoring.sanitize_fts_query(token)
+                for token in artifact_tokens
+            ]
+            match_query = " OR ".join(
+                f"({artifact_query})"
+                for artifact_query in artifact_queries
+                if artifact_query != '""'
+            )
         if needs_artifact_rerank and len(query.strip().split()) == 1:
             match_query = '"' + match_query.replace('"', "") + '"'
         limit = k

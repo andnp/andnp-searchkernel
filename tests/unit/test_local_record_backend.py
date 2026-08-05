@@ -495,28 +495,27 @@ def test_keyword_search_ranks_embedded_artifact_source_above_mentions(tmp_path) 
             _record(
                 "note",
                 "exact",
-                "handle_query_documents implementation",
+                "unrelated body",
                 title="document_tools.py",
-                uri="mcp/tools/document_tools.py",
+                uri="mcp_markdown_ragdocs/mcp/tools/document_tools.py",
             ),
             _record(
                 "note",
                 "mention",
-                "References mcp/tools/document_tools.py and "
-                "handle_query_documents.",
+                "References handle_query_documents.",
                 title="Other",
                 uri="docs/other.py",
             ),
         ]
     )
 
-    assert [
-        hit.source_id
-        for hit in backend.search_keyword(
-            "mcp/tools/document_tools.py, handle_query_documents",
-            10,
-        )
-    ] == ["exact", "mention"]
+    for query in (
+        "mcp_markdown_ragdocs/mcp/tools/document_tools.py handle_query_documents",
+        "document_tools.py handle_query_documents",
+    ):
+        assert [
+            hit.source_id for hit in backend.search_keyword(query, 10)
+        ] == ["exact"]
 
 
 def test_keyword_search_prefers_exact_heading_across_workspaces(tmp_path) -> None:
