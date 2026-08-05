@@ -54,6 +54,8 @@ async def test_public_search_returns_canonical_record_outcome() -> None:
     assert result.record.identity == RecordIdentity("workspace", "note", "record-1")
     assert result.storage_key == record.storage_key
     assert result.provenance.record_identity == result.record.identity
+    assert result.score == pytest.approx(1 / 61)
+    assert result.normalized_score == 1.0
 
 
 @pytest.mark.asyncio
