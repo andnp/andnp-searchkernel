@@ -17,6 +17,7 @@ from searchkernel.ports import (
     search_results,
     stores,
 )
+from searchkernel.ports.federation import SearchDiagnostics
 from searchkernel.ports.search_results import RecordSearchOutcome, RecordSearchResult
 from searchkernel.runtime import reindex
 from searchkernel.search import orchestrator, query_plan
@@ -37,6 +38,7 @@ API_EXPORTS = {
     "ReindexRoutine": reindex.ReindexRoutine,
     "SearchKernel": SearchKernel,
     "SearchAvailability": SearchAvailability,
+    "SearchDiagnostics": SearchDiagnostics,
     "SearchOrchestrator": orchestrator.SearchOrchestrator,
     "SearchFilters": models.SearchFilters,
     "SearchResultProvenance": models.SearchResultProvenance,
