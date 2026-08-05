@@ -8,6 +8,10 @@ import pytest
 
 from searchkernel.eval.golden import GoldenEntry, GoldenSet, load_golden, save_golden
 
+GOLDEN_RETRIEVAL_CORPUS = (
+    Path(__file__).parents[1] / "fixtures" / "golden_retrieval_corpus.json"
+)
+
 
 class TestGoldenEntry:
     """Tests for GoldenEntry dataclass."""
@@ -275,3 +279,22 @@ class TestSaveGolden:
 
             assert path.exists()
             assert path.parent.exists()
+
+
+def test_golden_retrieval_corpus_is_repeatable_and_covers_search_slices() -> None:
+    first = load_golden(GOLDEN_RETRIEVAL_CORPUS)
+    second = load_golden(GOLDEN_RETRIEVAL_CORPUS)
+
+    assert first.to_dict() == second.to_dict()
+    assert {entry.query_type for entry in first} == {
+        "exact",
+        "conceptual",
+        "vague",
+        "multi_term",
+        "unrelated",
+        "duplicate",
+        "latency",
+    }
+    assert next(
+        entry for entry in first if entry.query_type == "unrelated"
+    ).relevant_ids == []

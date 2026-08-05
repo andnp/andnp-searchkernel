@@ -1,0 +1,66 @@
+{
+  "entries": [
+    {
+      "query": "ENG-939",
+      "relevant_ids": ["ENG-939"],
+      "query_type": "exact",
+      "source_kinds": ["issue"],
+      "tags": ["exact", "stable_identifier"],
+      "corpus_version": "searchkernel-golden-v1",
+      "split": "test"
+    },
+    {
+      "query": "deployment incident",
+      "relevant_ids": ["incident-42", "deploy-17"],
+      "query_type": "conceptual",
+      "source_kinds": ["issue", "runbook"],
+      "tags": ["conceptual", "synonym"],
+      "corpus_version": "searchkernel-golden-v1",
+      "split": "test"
+    },
+    {
+      "query": "that thing from before",
+      "relevant_ids": ["note-7"],
+      "query_type": "vague",
+      "source_kinds": ["note"],
+      "tags": ["vague"],
+      "corpus_version": "searchkernel-golden-v1",
+      "split": "test"
+    },
+    {
+      "query": "vector search stage diagnostics",
+      "relevant_ids": ["search-pipeline", "diagnostics-contract"],
+      "query_type": "multi_term",
+      "source_kinds": ["docs"],
+      "tags": ["multi_term"],
+      "corpus_version": "searchkernel-golden-v1",
+      "split": "test"
+    },
+    {
+      "query": "quantum banana filesystem",
+      "relevant_ids": [],
+      "query_type": "unrelated",
+      "tags": ["unrelated"],
+      "corpus_version": "searchkernel-golden-v1",
+      "split": "test"
+    },
+    {
+      "query": "canonical record chunks",
+      "relevant_ids": ["record-1"],
+      "query_type": "duplicate",
+      "source_kinds": ["note"],
+      "tags": ["duplicate", "deduplication"],
+      "corpus_version": "searchkernel-golden-v1",
+      "split": "test"
+    },
+    {
+      "query": "bounded latency retrieval",
+      "relevant_ids": ["latency-budget"],
+      "query_type": "latency",
+      "source_kinds": ["docs"],
+      "tags": ["latency", "performance"],
+      "corpus_version": "searchkernel-golden-v1",
+      "split": "test"
+    }
+  ]
+}
