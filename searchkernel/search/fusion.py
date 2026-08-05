@@ -2,6 +2,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 
+from searchkernel.search.normalization import normalize_scores
 from searchkernel.search.time_scoring import (
     TierConfig,
     TimeScoreMode,
@@ -57,6 +58,28 @@ def weighted_reciprocal_rank(
         k=k,
         strategy_weights=strategy_weights,
     )
+
+
+def fuse_calibrated_scores(
+    rankings: Mapping[str, Sequence[tuple[str, float]]],
+    *,
+    strategy_weights: Mapping[str, float] | None = None,
+) -> dict[str, float]:
+    """Fuse per-lane query-relative scores after calibrating each lane."""
+    weights = strategy_weights or {}
+    scores: dict[str, float] = {}
+    for strategy, ranking in rankings.items():
+        raw_scores = [score for _item_id, score in ranking]
+        if not all(math.isfinite(score) for score in raw_scores):
+            raise ValueError("lane scores must be finite")
+        weight = float(weights.get(strategy, 1.0))
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError("strategy weights must be finite and non-negative")
+        for (item_id, _raw_score), calibrated in zip(
+            ranking, normalize_scores(raw_scores)
+        ):
+            scores[item_id] = scores.get(item_id, 0.0) + weight * calibrated
+    return scores
 
 
 def apply_recency_boost(

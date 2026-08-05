@@ -71,6 +71,13 @@ Check `outcome.degraded` when partial execution matters to your application.
 Search is read-only: a query does not change source lifecycle, checkpoints,
 access state, or supersession state.
 
+Each result preserves its raw `score` and exposes a `normalized_score` in
+`[0, 1]`. The normalized value is query-relative to the returned result set,
+so it is useful for comparing results within one query but is not a
+cross-query probability. The pipeline defaults to reciprocal-rank fusion;
+`RecordSearchConfig(fusion_mode="calibrated")` opts into per-lane score
+calibration before hybrid fusion.
+
 ## Stores and providers are injected
 
 The record pipeline can combine the following contracts:

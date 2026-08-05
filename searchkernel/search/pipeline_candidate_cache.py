@@ -99,6 +99,7 @@ class CandidateCachePolicy[CandidateT]:
                         ),
                         "rrf_k": self._config.rrf_k,
                         "weighted_rrf_enabled": self._config.weighted_rrf_enabled,
+                        "fusion_mode": self._config.fusion_mode,
                         "base_semantic_weight": self._config.base_semantic_weight,
                         "base_keyword_weight": self._config.base_keyword_weight,
                         "base_graph_weight": self._config.base_graph_weight,

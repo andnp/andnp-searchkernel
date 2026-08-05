@@ -53,7 +53,10 @@ from searchkernel.search.bounded_graph import (
     TypedGraphEdge,
     expand_bounded_typed_graph,
 )
-from searchkernel.search.fusion import fuse_reciprocal_rank
+from searchkernel.search.fusion import (
+    fuse_calibrated_scores,
+    fuse_reciprocal_rank,
+)
 from searchkernel.search.normalization import normalize_scores
 from searchkernel.search.pipeline_candidate_acquisition import (
     CandidateAcquirer,
@@ -215,6 +218,7 @@ class RecordSearchConfig:
     vector_candidate_multiplier: int | None = None
     rrf_k: float = 60.0
     weighted_rrf_enabled: bool = False
+    fusion_mode: Literal["rrf", "calibrated"] = "rrf"
     base_semantic_weight: float = 1.0
     base_keyword_weight: float = 1.0
     base_graph_weight: float = 1.0
@@ -582,18 +586,7 @@ class RecordSearchPipeline:
                     strategy: len(ranking)
                     for strategy, ranking in rankings.items()
                 }
-                fused_scores = fuse_reciprocal_rank(
-                    {
-                        strategy: [hit.storage_key for hit in ranking]
-                        for strategy, ranking in rankings.items()
-                    },
-                    k=self._config.rrf_k,
-                    strategy_weights=(
-                        plan.fusion_weight_map
-                        if self._config.weighted_rrf_enabled
-                        else None
-                    ),
-                )
+                fused_scores = self._fuse_rankings(rankings, plan)
             base_candidates = self._build_candidates(fused_scores, rankings)
             base_candidates = self._apply_candidate_policy(
                 base_candidates, query_context
@@ -657,20 +650,7 @@ class RecordSearchPipeline:
                                     hit.score,
                                 )
                         else:
-                            fused_scores = fuse_reciprocal_rank(
-                                {
-                                    strategy: [
-                                        hit.storage_key for hit in ranking
-                                    ]
-                                    for strategy, ranking in rankings.items()
-                                },
-                                k=self._config.rrf_k,
-                                strategy_weights=(
-                                    plan.fusion_weight_map
-                                    if self._config.weighted_rrf_enabled
-                                    else None
-                                ),
-                            )
+                            fused_scores = self._fuse_rankings(rankings, plan)
                         candidates = self._build_candidates(fused_scores, rankings)
                         candidates = self._apply_candidate_policy(
                             candidates, query_context
@@ -714,20 +694,7 @@ class RecordSearchPipeline:
                     if expansion_ranking:
                         candidate_counts["expansion"] = len(expansion_ranking)
                         rankings["expansion"] = expansion_ranking
-                        fused_scores = fuse_reciprocal_rank(
-                            {
-                                strategy: [
-                                    hit.storage_key for hit in ranking
-                                ]
-                                for strategy, ranking in rankings.items()
-                            },
-                            k=self._config.rrf_k,
-                            strategy_weights=(
-                                plan.fusion_weight_map
-                                if self._config.weighted_rrf_enabled
-                                else None
-                            ),
-                        )
+                        fused_scores = self._fuse_rankings(rankings, plan)
                         candidates = self._apply_candidate_policy(
                             self._build_candidates(fused_scores, rankings),
                             query_context,
@@ -1395,6 +1362,33 @@ class RecordSearchPipeline:
             candidates.append(candidate)
         return candidates
 
+    def _fuse_rankings(
+        self,
+        rankings: Mapping[str, Sequence[RecordHit]],
+        plan: QueryPlan,
+    ) -> dict[str, float]:
+        weights = (
+            plan.fusion_weight_map if self._config.weighted_rrf_enabled else None
+        )
+        if self._config.fusion_mode == "calibrated":
+            return fuse_calibrated_scores(
+                {
+                    strategy: [
+                        (hit.storage_key, hit.score) for hit in ranking
+                    ]
+                    for strategy, ranking in rankings.items()
+                },
+                strategy_weights=weights,
+            )
+        return fuse_reciprocal_rank(
+            {
+                strategy: [hit.storage_key for hit in ranking]
+                for strategy, ranking in rankings.items()
+            },
+            k=self._config.rrf_k,
+            strategy_weights=weights,
+        )
+
     def _apply_score_adjustments(
         self,
         candidates: Sequence[RecordSearchCandidate],
@@ -1828,6 +1822,8 @@ class RecordSearchPipeline:
                 raise ValueError(f"{name} must be positive")
         if self._config.rrf_k <= 0:
             raise ValueError("rrf_k must be positive")
+        if self._config.fusion_mode not in {"rrf", "calibrated"}:
+            raise ValueError("fusion_mode must be 'rrf' or 'calibrated'")
         for name in (
             "base_semantic_weight",
             "base_keyword_weight",
