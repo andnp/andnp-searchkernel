@@ -98,6 +98,7 @@ class TestGetAdaptiveWeights:
     ("query", "direction"),
     [
         ("Which pages link to Hybrid Search Strategy?", "incoming"),
+        ("Which documents are linked from Hybrid Search Strategy?", "incoming"),
         ("show me notes that embed this one", "incoming"),
         ("Which documents transclude Hybrid Search Strategy?", "incoming"),
         ("What pages does Hybrid Search Strategy link to?", "outgoing"),

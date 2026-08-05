@@ -32,7 +32,7 @@ _RELATIONSHIP_PATTERN = re.compile(
 _INBOUND_RELATIONSHIP_PATTERN = re.compile(
     r"\b(?:inbound|upstream)\b|"
     r"^\s*(?:which|what)\s+(?:pages|documents|notes)\s+"
-    r"(?:link(?:s)?\s+to|point(?:s)?\s+to|"
+    r"(?:link(?:s)?\s+to|are\s+linked\s+from|point(?:s)?\s+to|"
     r"embed(?:s|ded|ding)?|transclud(?:e|es|ed|ing)?)\b|"
     r"\b(?:pages|documents|notes)\s+that\s+"
     r"(?:embed(?:s|ded|ding)?|transclud(?:e|es|ed|ing)?)\b",
