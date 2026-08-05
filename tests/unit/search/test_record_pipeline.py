@@ -2111,6 +2111,9 @@ async def test_trace_is_redacted_and_contains_routing_diagnostics() -> None:
     trace = outcome.trace.to_dict()
     assert "query" not in trace
     assert "diagnostics" in trace["provenance"]
+    assert outcome.candidate_count == 1
+    assert outcome.candidate_counts == {"keyword": 1}
+    assert outcome.stage_timings_ms["search"] >= 0
 
 
 async def test_rerank_runs_once_with_a_bounded_candidate_set() -> None:

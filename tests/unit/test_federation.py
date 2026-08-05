@@ -5,6 +5,7 @@ import pytest
 
 import searchkernel.runtime.federation as federation_runtime
 from searchkernel.ports.federation import (
+    SearchDiagnostics,
     SearchHit,
     SearchRequest,
     SearchResponse,
@@ -107,6 +108,25 @@ async def test_federation_fuses_local_ranks_deduplicates_uri_and_preserves_prove
     assert response.fusion_scores[response.hits[0].identity.storage_key] > (
         response.fusion_scores[response.hits[1].identity.storage_key]
     )
+
+
+@pytest.mark.asyncio
+async def test_federation_preserves_source_diagnostics() -> None:
+    source_identity = SourceIdentity("memory", "local")
+    source_response = SearchResponse(
+        source=source_identity,
+        diagnostics=SearchDiagnostics(
+            candidate_count=2,
+            candidate_counts={"keyword": 2},
+            failures=("vector unavailable",),
+            stage_timings_ms={"keyword": 1.0},
+        ),
+    )
+    response = await FederationExecutor(
+        [FakeSource(source_identity, response=source_response)]
+    ).search(SearchRequest("query"))
+
+    assert response.diagnostics == (source_response.diagnostics,)
 
 
 @pytest.mark.asyncio

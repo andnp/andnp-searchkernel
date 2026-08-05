@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from searchkernel.domain import ChunkResult, Record, SearchResultProvenance
@@ -68,6 +69,9 @@ class RecordSearchOutcome:
     missing_record_ids: tuple[str, ...] = ()
     cache_diagnostics: tuple[str, ...] = ()
     diagnostics: tuple[str, ...] = ()
+    candidate_count: int = 0
+    candidate_counts: Mapping[str, int] = field(default_factory=dict)
+    stage_timings_ms: Mapping[str, float] = field(default_factory=dict)
     trace: SearchTrace | None = None
 
     @property

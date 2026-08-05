@@ -16,6 +16,7 @@ from searchkernel.ports.federation import (
     FEDERATION_CONTRACT_VERSION,
     MAX_RERANK_TEXT_LENGTH,
     FederationEventKind,
+    SearchDiagnostics,
     SearchHit,
     SearchRequest,
     SearchResponse,
@@ -60,6 +61,7 @@ class FederatedSearchResponse:
     degradations: tuple[FederationDiagnostic, ...] = ()
     warnings: tuple[str, ...] = ()
     source_responses: tuple[SearchResponse, ...] = ()
+    diagnostics: tuple[SearchDiagnostics, ...] = ()
     fusion_scores: Mapping[str, float] = field(default_factory=dict)
     elapsed_ms: float = 0.0
     authoritative: bool = True
@@ -505,6 +507,11 @@ class FederationExecutor:
             degradations=tuple(all_diagnostics),
             warnings=warnings,
             source_responses=tuple(responses),
+            diagnostics=tuple(
+                response.diagnostics
+                for response in responses
+                if response.diagnostics is not None
+            ),
             fusion_scores=fusion_scores,
             elapsed_ms=_elapsed_ms(started),
             authoritative=authoritative,

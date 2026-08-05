@@ -413,6 +413,77 @@ class SearchHit(_JsonContract):
 
 
 @dataclass(frozen=True, slots=True)
+class SearchDiagnostics(_JsonContract):
+    """Structured candidate, failure, and stage timing data."""
+
+    candidate_count: int | None = None
+    candidate_counts: Mapping[str, int] = field(default_factory=dict)
+    failures: tuple[str, ...] = ()
+    stage_timings_ms: Mapping[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.candidate_count is not None and (
+            isinstance(self.candidate_count, bool)
+            or not isinstance(self.candidate_count, int)
+            or self.candidate_count < 0
+        ):
+            raise TypeError("candidate_count must be a non-negative integer")
+        normalized_counts: dict[str, int] = {}
+        for key, value in self.candidate_counts.items():
+            if (
+                not isinstance(key, str)
+                or isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise TypeError(
+                    "candidate_counts must map stage names to non-negative integers"
+                )
+            normalized_counts[key] = value
+        object.__setattr__(self, "candidate_counts", normalized_counts)
+        object.__setattr__(
+            self,
+            "failures",
+            _string_tuple(self.failures, "failures"),
+        )
+        normalized_timings: dict[str, float] = {}
+        for key, value in self.stage_timings_ms.items():
+            if not isinstance(key, str):
+                raise TypeError("stage_timings_ms keys must be strings")
+            normalized_timings[key] = _non_negative_float(value, "stage timing")
+        object.__setattr__(self, "stage_timings_ms", normalized_timings)
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "candidate_count": self.candidate_count,
+            "candidate_counts": dict(self.candidate_counts),
+            "failures": list(self.failures),
+            "stage_timings_ms": dict(self.stage_timings_ms),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> SearchDiagnostics:
+        value = _require_mapping(value, "diagnostics")
+        _require_exact_keys(
+            value,
+            {"candidate_count", "candidate_counts", "failures", "stage_timings_ms"},
+            "diagnostics",
+        )
+        candidate_counts = value.get("candidate_counts", {})
+        stage_timings = value.get("stage_timings_ms", {})
+        if not isinstance(candidate_counts, Mapping):
+            raise TypeError("candidate_counts must be an object")
+        if not isinstance(stage_timings, Mapping):
+            raise TypeError("stage_timings_ms must be an object")
+        return cls(
+            candidate_count=value.get("candidate_count"),
+            candidate_counts=dict(candidate_counts),
+            failures=_string_tuple(value.get("failures", ()), "failures"),
+            stage_timings_ms=dict(stage_timings),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SourceCapabilities(_JsonContract):
     """Features and bounds advertised by a federated source."""
 
@@ -606,6 +677,7 @@ class SearchResponse(_JsonContract):
     elapsed_ms: float = 0.0
     partial: bool = False
     warnings: tuple[str, ...] = ()
+    diagnostics: SearchDiagnostics | None = None
     capabilities: SourceCapabilities = field(default_factory=SourceCapabilities)
     contract_version: str = FEDERATION_CONTRACT_VERSION
 
@@ -625,6 +697,11 @@ class SearchResponse(_JsonContract):
             raise TypeError("partial must be a boolean")
         warnings = _string_tuple(self.warnings, "warnings")
         object.__setattr__(self, "warnings", warnings)
+        if self.diagnostics is not None and not isinstance(
+            self.diagnostics,
+            SearchDiagnostics,
+        ):
+            raise TypeError("diagnostics must be SearchDiagnostics or None")
         if not isinstance(self.capabilities, SourceCapabilities):
             raise TypeError("capabilities must be SourceCapabilities")
         _string(self.contract_version, "contract_version")
@@ -648,6 +725,9 @@ class SearchResponse(_JsonContract):
             "elapsed_ms": self.elapsed_ms,
             "partial": self.partial,
             "warnings": list(self.warnings),
+            "diagnostics": (
+                self.diagnostics.to_dict() if self.diagnostics is not None else None
+            ),
             "capabilities": self.capabilities.to_dict(),
         }
 
@@ -664,6 +744,7 @@ class SearchResponse(_JsonContract):
                 "elapsed_ms",
                 "partial",
                 "warnings",
+                "diagnostics",
                 "capabilities",
             },
             "response",
@@ -687,6 +768,13 @@ class SearchResponse(_JsonContract):
             elapsed_ms=value.get("elapsed_ms", 0.0),
             partial=value.get("partial", False),
             warnings=_string_tuple(value.get("warnings", ()), "warnings"),
+            diagnostics=(
+                SearchDiagnostics.from_dict(
+                    _require_mapping(value["diagnostics"], "diagnostics")
+                )
+                if value.get("diagnostics") is not None
+                else None
+            ),
             capabilities=SourceCapabilities.from_dict(
                 _require_mapping(value.get("capabilities", {}), "capabilities")
             ),
@@ -715,6 +803,7 @@ __all__ = [
     "CallerAuthorizationContext",
     "FederationEventKind",
     "JsonValue",
+    "SearchDiagnostics",
     "SearchHit",
     "SearchHitProvenance",
     "SearchRequest",

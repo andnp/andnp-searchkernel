@@ -389,6 +389,7 @@ class RecordSearchPipeline:
         missing_record_ids: list[str] = []
         cache_diagnostics: list[str] = []
         diagnostics: list[str] = []
+        candidate_counts: dict[str, int] = {}
         trace = (
             QueryTrace(query_text=query, include_query=False)
             if self._config.capture_trace
@@ -568,6 +569,10 @@ class RecordSearchPipeline:
 
             fused_scores: dict[str, float] = {}
             if rankings:
+                candidate_counts = {
+                    strategy: len(ranking)
+                    for strategy, ranking in rankings.items()
+                }
                 fused_scores = fuse_reciprocal_rank(
                     {
                         strategy: [hit.storage_key for hit in ranking]
@@ -816,6 +821,17 @@ class RecordSearchPipeline:
                 "diagnostics": tuple(diagnostics),
             }
             trace.close()
+        stage_timings_ms: dict[str, float] = {}
+        if trace is not None:
+            if trace.total_duration_ms is not None:
+                stage_timings_ms["search"] = trace.total_duration_ms
+            stage_timings_ms.update(
+                {
+                    name: span.duration_ms
+                    for name, span in trace.spans.items()
+                    if span.duration_ms is not None
+                }
+            )
 
         return RecordSearchOutcome(
             results=tuple(hydrated),
@@ -823,6 +839,9 @@ class RecordSearchPipeline:
             missing_record_ids=tuple(missing_record_ids),
             cache_diagnostics=tuple(cache_diagnostics),
             diagnostics=tuple(diagnostics),
+            candidate_count=len(candidates),
+            candidate_counts=candidate_counts,
+            stage_timings_ms=stage_timings_ms,
             trace=trace,
         )
 

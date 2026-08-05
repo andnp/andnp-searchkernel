@@ -5,6 +5,7 @@ import pytest
 from searchkernel.domain import RecordStatus
 from searchkernel.ports.federation import (
     CallerAuthorizationContext,
+    SearchDiagnostics,
     SearchHit,
     SearchHitProvenance,
     SearchRequest,
@@ -65,6 +66,12 @@ def test_response_json_round_trip_preserves_record_identity_and_provenance() -> 
         elapsed_ms=12.5,
         partial=True,
         warnings=("jira timed out",),
+        diagnostics=SearchDiagnostics(
+            candidate_count=4,
+            candidate_counts={"keyword": 3, "vector": 4},
+            failures=("graph unavailable",),
+            stage_timings_ms={"keyword": 1.5, "vector": 2.25},
+        ),
         capabilities=SourceCapabilities(supports_rerank_text=True),
     )
 
