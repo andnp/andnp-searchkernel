@@ -251,6 +251,42 @@ async def test_exact_identifier_outranks_nearby_keyword_match() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "query",
+    (
+        "/repo/src/search.py",
+        'record:[null,"fake","/repo/src/search.py"]',
+        "fake:/repo/src/search.py",
+    ),
+)
+async def test_exact_canonical_identifier_variants_outrank_nearby_match(
+    query: str,
+) -> None:
+    exact = Record(
+        source_kind="fake",
+        source_id="/repo/src/search.py",
+        title="search.py",
+        body="search implementation",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    nearby = _record("search.py")
+    records = {exact.source_id: exact, nearby.source_id: nearby}
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore(
+            [(nearby.source_id, 10.0), (exact.source_id, 1.0)]
+        ),
+        hydrator=_hydrator(records),
+    )
+
+    outcome = await pipeline.async_search(query, limit=2)
+
+    assert [result.record_id for result in outcome.results] == [
+        exact.source_id,
+        nearby.source_id,
+    ]
+
+
 @pytest.mark.parametrize("retrieval_mode", ["semantic", "semantic_only"])
 async def test_semantic_retrieval_mode_routes_only_vector(
     retrieval_mode: str,

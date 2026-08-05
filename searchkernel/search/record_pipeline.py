@@ -1371,7 +1371,7 @@ class RecordSearchPipeline:
         exact = [
             candidate
             for candidate in candidates
-            if candidate.record_id.casefold() == normalized_query
+            if normalized_query in _candidate_identifiers(candidate)
         ]
         if not exact:
             return list(candidates)
@@ -1874,6 +1874,25 @@ def _identifier_provenance(
     enriched = provenance.clone()
     enriched.add_strategy("exact_identifier", 1, score)
     return enriched
+
+
+def _candidate_identifiers(candidate: RecordSearchCandidate) -> frozenset[str]:
+    qualified = f"{candidate.source_kind}:{candidate.record_id}"
+    if candidate.workspace_id is None:
+        return frozenset(
+            value.casefold()
+            for value in (candidate.record_id, candidate.storage_key, qualified)
+        )
+    scoped = f"{candidate.workspace_id}:{qualified}"
+    return frozenset(
+        value.casefold()
+        for value in (
+            candidate.record_id,
+            candidate.storage_key,
+            qualified,
+            scoped,
+        )
+    )
 
 
 def _parent_identity_from_record(record: Record) -> RecordIdentity | None:
