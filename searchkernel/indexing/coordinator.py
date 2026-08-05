@@ -67,6 +67,7 @@ class CoordinatorProgress:
     batch_index: int
     stage: str
     checkpoint: Cursor = None
+    checkpoint_persisted: bool = False
     stage_result: StageResult | None = None
     semantic: SemanticProgress | None = None
     ingestion: IngestionReceipt | None = None
@@ -82,6 +83,7 @@ class CoordinatorReceipt:
     stage_results: tuple[StageResult, ...] = ()
     semantic_progress: tuple[SemanticProgress, ...] = ()
     availability: SearchAvailability | None = None
+    checkpoint_persisted: bool = False
 
     @property
     def source_kind(self) -> str:
@@ -273,6 +275,7 @@ class ResumableSemanticCoordinator:
                             batch_index=batch_index,
                             stage="checkpoint",
                             checkpoint=current_checkpoint,
+                            checkpoint_persisted=store is not None,
                             availability=availability,
                         ),
                         all_progress,
@@ -346,6 +349,7 @@ class ResumableSemanticCoordinator:
                         batch_index=batch_index,
                         stage="checkpoint",
                         checkpoint=current_checkpoint,
+                        checkpoint_persisted=store is not None,
                         availability=availability,
                     ),
                     all_progress,
@@ -363,6 +367,7 @@ class ResumableSemanticCoordinator:
             stage_results=tuple(all_stage_results),
             semantic_progress=tuple(all_semantic_progress),
             availability=availability,
+            checkpoint_persisted=store is not None,
         )
 
     async def run_batches(
@@ -477,6 +482,7 @@ class ResumableSemanticCoordinator:
                             batch_index=batch_index,
                             stage="checkpoint",
                             checkpoint=current_checkpoint,
+                            checkpoint_persisted=store is not None,
                             availability=availability,
                         ),
                         all_progress,
@@ -494,6 +500,7 @@ class ResumableSemanticCoordinator:
             stage_results=tuple(all_stage_results),
             semantic_progress=tuple(all_semantic_progress),
             availability=availability,
+            checkpoint_persisted=store is not None,
         )
 
     async def run_prepared_records(

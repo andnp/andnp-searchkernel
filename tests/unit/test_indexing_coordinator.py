@@ -311,6 +311,7 @@ async def test_prepared_records_are_bounded_and_stage_progress_is_ordered(
     ]
     assert len(materializer.calls) == 10
     assert receipt.checkpoint == "5"
+    assert receipt.checkpoint_persisted
     assert receipt.availability == availability
     assert events == [
         (0, "keyword"),
@@ -326,6 +327,11 @@ async def test_prepared_records_are_bounded_and_stage_progress_is_ordered(
         (2, "semantic"),
         (2, "checkpoint"),
     ]
+    assert all(
+        event.checkpoint_persisted
+        for event in receipt.progress
+        if event.stage == "checkpoint"
+    )
     assert cache.metrics.writes == 5
 
 
