@@ -54,6 +54,7 @@ from searchkernel.search.bounded_graph import (
     expand_bounded_typed_graph,
 )
 from searchkernel.search.fusion import fuse_reciprocal_rank
+from searchkernel.search.normalization import normalize_scores
 from searchkernel.search.pipeline_candidate_acquisition import (
     CandidateAcquirer,
     _is_async_callable,
@@ -825,6 +826,11 @@ class RecordSearchPipeline:
         if self._policy.post_process is not None:
             hydrated = list(self._policy.post_process(hydrated))
         hydrated = hydrated[:limit]
+        normalized_scores = normalize_scores([result.score for result in hydrated])
+        hydrated = [
+            dataclass_replace(result, normalized_score=normalized_score)
+            for result, normalized_score in zip(hydrated, normalized_scores)
+        ]
 
         if trace is not None:
             trace.provenance = {

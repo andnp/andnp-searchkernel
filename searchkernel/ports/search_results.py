@@ -30,11 +30,17 @@ class SearchTrace(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RecordSearchResult:
-    """A ranked, hydrated record with reusable kernel provenance."""
+    """A ranked, hydrated record with reusable kernel provenance.
+
+    ``score`` is the raw query score. ``normalized_score`` is query-relative:
+    it compares this result with the other returned results for the same
+    query and must not be interpreted as a cross-query probability.
+    """
 
     record: Record
     score: float
     provenance: SearchResultProvenance
+    normalized_score: float = 0.0
     chunk_matches: tuple[ChunkResult, ...] = ()
 
     @property
