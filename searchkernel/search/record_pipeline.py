@@ -718,6 +718,7 @@ class RecordSearchPipeline:
                         )
 
             candidates = self._apply_score_adjustments(candidates, query_context)
+            candidates = self._apply_exact_identifier_boost(candidates, query)
             candidates = self._sort_candidates(candidates)
             if plan.signals.relationship and plan.graph_enabled:
                 candidates = self._apply_graph_priority(
@@ -1359,6 +1360,34 @@ class RecordSearchPipeline:
             adjusted.append(dataclass_replace(candidate, score=score))
         return adjusted
 
+    @staticmethod
+    def _apply_exact_identifier_boost(
+        candidates: Sequence[RecordSearchCandidate],
+        query: str,
+    ) -> list[RecordSearchCandidate]:
+        normalized_query = query.strip().casefold()
+        if not normalized_query:
+            return list(candidates)
+        exact = [
+            candidate
+            for candidate in candidates
+            if candidate.record_id.casefold() == normalized_query
+        ]
+        if not exact:
+            return list(candidates)
+        boosted_score = max(candidate.score for candidate in candidates) + 1.0
+        exact_keys = {candidate.storage_key for candidate in exact}
+        return [
+            dataclass_replace(
+                candidate,
+                score=boosted_score if candidate.storage_key in exact_keys else candidate.score,
+                provenance=_identifier_provenance(candidate.provenance, candidate.score),
+            )
+            if candidate.storage_key in exact_keys
+            else candidate
+            for candidate in candidates
+        ]
+
     async def _expand_parents(
         self,
         candidates: Sequence[RecordSearchCandidate],
@@ -1836,6 +1865,15 @@ def _is_chunk_candidate(candidate: RecordSearchCandidate) -> bool:
 
 def _looks_like_chunk_identity(source_id: str) -> bool:
     return "#chunk:" in source_id or "_chunk_" in source_id
+
+
+def _identifier_provenance(
+    provenance: SearchResultProvenance,
+    score: float,
+) -> SearchResultProvenance:
+    enriched = provenance.clone()
+    enriched.add_strategy("exact_identifier", 1, score)
+    return enriched
 
 
 def _parent_identity_from_record(record: Record) -> RecordIdentity | None:

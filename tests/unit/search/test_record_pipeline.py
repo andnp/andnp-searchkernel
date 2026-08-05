@@ -232,6 +232,25 @@ async def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
     assert outcome.results[0].provenance.strategies == ("keyword", "vector")
 
 
+async def test_exact_identifier_outranks_nearby_keyword_match() -> None:
+    records = {
+        "ENG-939": _record("ENG-939"),
+        "ENG-940": _record("ENG-940"),
+    }
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("ENG-940", 10.0), ("ENG-939", 1.0)]),
+        hydrator=_hydrator(records),
+    )
+
+    outcome = await pipeline.async_search("eng-939", limit=2)
+
+    assert [result.record_id for result in outcome.results] == ["ENG-939", "ENG-940"]
+    assert outcome.results[0].provenance.strategies == (
+        "keyword",
+        "exact_identifier",
+    )
+
+
 @pytest.mark.parametrize("retrieval_mode", ["semantic", "semantic_only"])
 async def test_semantic_retrieval_mode_routes_only_vector(
     retrieval_mode: str,
