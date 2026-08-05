@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -80,6 +81,27 @@ def test_response_json_round_trip_preserves_record_identity_and_provenance() -> 
     assert restored.hits[0].identity.storage_key == (
         'record:["andy","memory","memory-1"]'
     )
+
+
+def test_diagnostics_adapts_local_outcome_contract() -> None:
+    diagnostics = SearchDiagnostics.from_outcome(
+        SimpleNamespace(
+            candidate_count=3,
+            candidate_counts={"keyword": 2, "graph": 1},
+            failures=(
+                SimpleNamespace(stage="graph", message="unavailable"),
+                SimpleNamespace(stage="graph", message="unavailable"),
+            ),
+            stage_timings_ms={"search": 4.5},
+        )
+    )
+
+    assert diagnostics.to_dict() == {
+        "candidate_count": 3,
+        "candidate_counts": {"keyword": 2, "graph": 1},
+        "failures": ["graph: unavailable"],
+        "stage_timings_ms": {"search": 4.5},
+    }
 
 
 def test_contract_validation_rejects_unknown_fields_and_unbounded_text() -> None:

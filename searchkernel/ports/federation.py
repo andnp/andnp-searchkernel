@@ -462,6 +462,21 @@ class SearchDiagnostics(_JsonContract):
         }
 
     @classmethod
+    def from_outcome(cls, outcome: object) -> SearchDiagnostics:
+        """Adapt a local search outcome without importing its implementation."""
+        failures: list[str] = []
+        for failure in getattr(outcome, "failures", ()):
+            stage = getattr(failure, "stage", "search")
+            message = getattr(failure, "message", str(failure))
+            failures.append(f"{stage}: {message}")
+        return cls(
+            candidate_count=getattr(outcome, "candidate_count", None),
+            candidate_counts=getattr(outcome, "candidate_counts", {}),
+            failures=tuple(dict.fromkeys(failures)),
+            stage_timings_ms=getattr(outcome, "stage_timings_ms", {}),
+        )
+
+    @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> SearchDiagnostics:
         value = _require_mapping(value, "diagnostics")
         _require_exact_keys(

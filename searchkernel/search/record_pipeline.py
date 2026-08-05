@@ -646,6 +646,7 @@ class RecordSearchPipeline:
                         filters,
                     )
                     if graph_ranking:
+                        candidate_counts["graph"] = len(graph_ranking)
                         rankings["graph"] = graph_ranking
                         if self._config.graph_fusion == "max":
                             fused_scores = dict(fused_scores)
@@ -710,6 +711,7 @@ class RecordSearchPipeline:
                         failures,
                     )
                     if expansion_ranking:
+                        candidate_counts["expansion"] = len(expansion_ranking)
                         rankings["expansion"] = expansion_ranking
                         fused_scores = fuse_reciprocal_rank(
                             {
