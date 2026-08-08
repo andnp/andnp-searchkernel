@@ -534,6 +534,44 @@ async def test_failed_batch_can_be_retried_without_crossing_checkpoint_gap(
 
 
 @pytest.mark.asyncio
+async def test_semantic_failure_retries_after_restart_without_advancing_checkpoint(
+    tmp_path: Path,
+) -> None:
+    checkpoint_store = JsonCheckpointStore(tmp_path / "checkpoint.json")
+    first, first_cache, _, _ = _coordinator(
+        tmp_path,
+        encoder=_Encoder(fail=True),
+        stages=(_NoopStage(),),
+        checkpoint_store=checkpoint_store,
+    )
+
+    with pytest.raises(IngestionError):
+        await first.run_prepared_records(
+            [_prepared(_record("one", cursor="1"))],
+            source_kind="notes",
+            checkpoint_for_batch=_checkpoint_for_batch,
+        )
+    assert await checkpoint_store.load("notes") is None
+    first_cache.close()
+
+    second, second_cache, second_encoder, _ = _coordinator(
+        tmp_path,
+        stages=(_NoopStage(),),
+        checkpoint_store=checkpoint_store,
+    )
+    receipt = await second.run_prepared_records(
+        [_prepared(_record("one", cursor="1"))],
+        source_kind="notes",
+        checkpoint_for_batch=_checkpoint_for_batch,
+    )
+
+    assert receipt.committed == 1
+    assert receipt.checkpoint == "1"
+    assert second_encoder.calls == [("body for one",)]
+    second_cache.close()
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_file_preserves_last_value_when_persistence_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
