@@ -364,6 +364,31 @@ def test_faiss_exact_search_matches_local_filter_parity(
     )
 
 
+def test_vector_document_exclusion_does_not_apply_path_variants() -> None:
+    backend = LocalRecordBackend()
+    kept = _record(
+        "kept",
+        [1.0, 0.0],
+        metadata={"doc_id": "guide"},
+    )
+    excluded = _record(
+        "excluded",
+        [0.9, 0.1],
+        metadata={"doc_id": "guide.md"},
+    )
+    backend.upsert([kept, excluded], "model", 2)
+
+    hits = backend.search_vector(
+        [1.0, 0.0],
+        10,
+        model_name="model",
+        dim=2,
+        filters={"excluded_documents": ["guide.md"]},
+    )
+
+    assert [hit.source_id for hit in hits] == ["kept"]
+
+
 @pytest.mark.asyncio
 async def test_async_vector_search_offloads_blocking_work() -> None:
     store = LocalVectorStore(LocalRecordBackend())

@@ -930,7 +930,12 @@ class LocalRecordBackend:
         if filters and filters.get("status") is not None:
             value = filters["status"]
             return {value.value if isinstance(value, RecordStatus) else str(value)}
+        if filters and filters.get("lifecycle_status") is not None:
+            value = filters["lifecycle_status"]
+            return {value.value if isinstance(value, RecordStatus) else str(value)}
         values = filters.get("statuses") if filters else None
+        if values is None and filters:
+            values = filters.get("lifecycle_statuses")
         if values is None:
             return {"active"}
         return {
@@ -1175,8 +1180,11 @@ class LocalRecordBackend:
             comparisons.append(f"{expression} = ?")
             parameters.append(value)
             if "/" not in value:
-                comparisons.append(f"{expression} LIKE ?")
-                parameters.append(f"%/{value}")
+                escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace(
+                    "_", "\\_"
+                )
+                comparisons.append(f"{expression} LIKE ? ESCAPE '\\'")
+                parameters.append(f"%/{escaped}")
         predicate = " OR ".join(comparisons)
         clauses.append(f"NOT ({predicate})" if exclude else f"({predicate})")
 

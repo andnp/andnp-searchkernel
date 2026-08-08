@@ -241,7 +241,9 @@ def compile_vector_filters(
         included_paths=path_set(included_paths),
         excluded_paths=path_set(excluded_paths),
         document_values=document_values,
-        excluded_documents=path_set(excluded_documents),
+        excluded_documents=(
+            frozenset(excluded_documents) if excluded_documents is not None else None
+        ),
         metadata_equals=compiled_metadata,
     )
 

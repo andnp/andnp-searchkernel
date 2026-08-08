@@ -584,6 +584,9 @@ def test_keyword_search_applies_all_sql_filters(tmp_path) -> None:
         "common", 10, {"source_kinds": ["commit"], "include_inactive": True}
     )] == ["two"]
     assert [hit.source_id for hit in backend.search_keyword(
+        "common", 10, {"lifecycle_status": RecordStatus.ARCHIVED}
+    )] == ["four"]
+    assert [hit.source_id for hit in backend.search_keyword(
         "common",
         10,
         {"candidate_storage_keys": [records[2].storage_key], "include_inactive": True},
@@ -703,6 +706,27 @@ def test_keyword_search_applies_document_path_and_metadata_filters(tmp_path) -> 
     assert [hit.source_id for hit in backend.search_keyword("common", 10, filters)] == [
         "kept"
     ]
+
+
+def test_keyword_path_filters_escape_like_wildcards(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    exact = _record(
+        "exact",
+        "common",
+        "common",
+        metadata={"file_path": "src/my_file.md"},
+    )
+    near = _record(
+        "near",
+        "common-near",
+        "common",
+        metadata={"file_path": "src/myXfile.md"},
+    )
+    backend.index([exact, near])
+
+    assert [hit.source_id for hit in backend.search_keyword(
+        "common", 10, {"paths": ["my_file.md"]}
+    )] == ["common"]
 
 
 def test_keyword_search_rejects_invalid_metadata_filter_fields(tmp_path) -> None:
