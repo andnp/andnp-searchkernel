@@ -13,6 +13,7 @@ from searchkernel.indices import (
     LocalVectorStore,
 )
 from searchkernel.search.orchestrator import SearchOrchestrator
+from searchkernel.storage.db import DatabaseManager
 
 
 class _Embedder:
@@ -110,6 +111,16 @@ def test_direct_backend_close_releases_owned_database(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="database manager is closed"):
         backend.db_manager.get_connection()
+
+
+def test_injected_database_remains_owned_by_caller(tmp_path) -> None:
+    database = DatabaseManager(tmp_path / "records.db")
+    backend = LocalRecordBackend(db_manager=database)
+
+    backend.close()
+
+    assert database.get_connection().execute("SELECT 1").fetchone()[0] == 1
+    database.close()
 
 
 def test_local_keyword_searches_indexed_text_hydrates_raw_body(tmp_path) -> None:
@@ -1001,15 +1012,18 @@ def test_scalar_and_batched_keyword_ingestion_are_equivalent() -> None:
 @pytest.mark.slow
 def test_marked_keyword_scale_smoke() -> None:
     backend = LocalRecordBackend()
-    records = [
-        _record("note", f"record-{index}", f"common token {index}")
-        for index in range(1_000)
-    ]
-    backend.index(records)
+    try:
+        records = [
+            _record("note", f"record-{index}", f"common token {index}")
+            for index in range(1_000)
+        ]
+        backend.index(records)
 
-    hits = backend.search_keyword("common token", 10)
-    assert len(hits) == 10
-    assert backend.check_keyword_index()
+        hits = backend.search_keyword("common token", 10)
+        assert len(hits) == 10
+        assert backend.check_keyword_index()
+    finally:
+        backend.close()
 
 
 @pytest.mark.asyncio
