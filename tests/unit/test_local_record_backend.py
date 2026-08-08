@@ -103,6 +103,15 @@ def test_local_store_uses_collision_safe_identity_and_filters(tmp_path) -> None:
     ) == [GraphNeighbor(RecordIdentity("one", "commit", "same"), "related", 0.5)]
 
 
+def test_direct_backend_close_releases_owned_database(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+
+    backend.close()
+
+    with pytest.raises(RuntimeError, match="database manager is closed"):
+        backend.db_manager.get_connection()
+
+
 def test_local_keyword_searches_indexed_text_hydrates_raw_body(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     record = _record(
