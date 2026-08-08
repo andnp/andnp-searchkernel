@@ -80,6 +80,11 @@ class ReRanker:
         )
 
     @property
+    def model_name(self) -> str:
+        """Return the stable identifier for the configured reranker model."""
+        return self._model_name
+
+    @property
     def circuit_state(self) -> CircuitState:
         """Get current circuit breaker state."""
         return self._circuit_breaker.state
