@@ -266,3 +266,29 @@ backend, embedding model/dimension, filter set, configuration fingerprint,
 Python version, and whether the run was cold or warm. A single synthetic
 benchmark or a successful integration test is useful evidence for a narrow
 contract; neither is evidence of production readiness by itself.
+
+## 7. Readiness gate
+
+The repository uses an evidence ladder rather than one machine-sensitive
+threshold:
+
+1. The safe CI suite is green with strict markers, static checks, and the
+   coverage floor.
+2. Local/Postgres parity covers the eligible identity set for the exercised
+   workspace and candidate filters. A skipped Docker-backed test is visible
+   evidence that this level was not exercised.
+3. The versioned labeled fixture reports recall@k, nDCG@k, MRR, empty-result
+   rate, source coverage, and per-slice values. The fixture is intentionally
+   small and is a regression signal, not a representative production corpus.
+4. Serial/concurrent runs record p50/p95/p99 latency and quality equivalence.
+   The observed latency delta is retained as evidence; it is not a blocking
+   pass/fail threshold because shared CI hardware is variable.
+5. CI uploads the labeled and concurrent JSON reports as
+   `searchkernel-benchmark-evidence-${{ github.sha }}` for review.
+
+The reproducible entry points are
+`benchmarks/evaluate_labeled_retrieval.py` and
+`benchmarks/concurrent_latency_evidence.py`. Passing these checks supports the
+narrow contracts they exercise. It does not establish production readiness,
+real-embedding quality, capacity, or parity for untested FAISS and Postgres
+configurations; those claims require separately collected evidence.
