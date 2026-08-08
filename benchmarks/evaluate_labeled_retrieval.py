@@ -31,33 +31,37 @@ def load_labeled_fixture(path: Path) -> tuple[list[Record], GoldenSet]:
 def evaluate_fixture(path: Path = DEFAULT_FIXTURE, *, k: int = 3):
     """Run labeled quality metrics against the local record backend."""
     records, golden_set = load_labeled_fixture(path)
-    backend = LocalRecordBackend()
-    backend.index(records)
-    entries = {entry.query: entry for entry in golden_set}
+    with LocalRecordBackend() as backend:
+        backend.index(records)
+        entries = {entry.query: entry for entry in golden_set}
 
-    def search(query: str) -> SearchExecution:
-        entry = entries[query]
-        filters = {"workspace_id": entry.workspace_id} if entry.workspace_id else None
-        hits = backend.search_keyword(query, k, filters)
-        return SearchExecution(
-            ids=tuple(hit.source_id for hit in hits),
-            source_kinds={hit.source_id: hit.source_kind for hit in hits},
+        def search(query: str) -> SearchExecution:
+            entry = entries[query]
+            filters = (
+                {"workspace_id": entry.workspace_id}
+                if entry.workspace_id
+                else None
+            )
+            hits = backend.search_keyword(query, k, filters)
+            return SearchExecution(
+                ids=tuple(hit.source_id for hit in hits),
+                source_kinds={hit.source_id: hit.source_kind for hit in hits},
+            )
+
+        corpus_versions = {
+            entry.corpus_version for entry in golden_set if entry.corpus_version
+        }
+        corpus_version = next(iter(corpus_versions)) if len(corpus_versions) == 1 else None
+        return run_eval(
+            golden_set,
+            search,
+            k=k,
+            config=BenchmarkConfig(
+                corpus_version=corpus_version,
+                backend="sqlite-fts5",
+                metadata={"fixture": str(path)},
+            ),
         )
-
-    corpus_versions = {
-        entry.corpus_version for entry in golden_set if entry.corpus_version
-    }
-    corpus_version = next(iter(corpus_versions)) if len(corpus_versions) == 1 else None
-    return run_eval(
-        golden_set,
-        search,
-        k=k,
-        config=BenchmarkConfig(
-            corpus_version=corpus_version,
-            backend="sqlite-fts5",
-            metadata={"fixture": str(path)},
-        ),
-    )
 
 
 def main() -> None:

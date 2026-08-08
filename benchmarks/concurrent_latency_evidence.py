@@ -30,7 +30,7 @@ def _make_search(records: list[Record], golden_set: GoldenSet, db_path: Path, k:
             source_kinds={hit.source_id: hit.source_kind for hit in hits},
         )
 
-    return search
+    return search, backend
 
 
 def _run(
@@ -81,21 +81,26 @@ def measure_concurrent_latency(
     """Return comparable serial/concurrent reports and observed deltas."""
     records, golden_set = load_labeled_fixture(fixture)
     with tempfile.TemporaryDirectory(prefix="searchkernel-latency-") as directory:
-        search = _make_search(records, golden_set, Path(directory) / "records.db", k)
-        serial = _run(
-            golden_set,
-            search,
-            k=k,
-            concurrency=1,
-            repetitions=repetitions,
+        search, backend = _make_search(
+            records, golden_set, Path(directory) / "records.db", k
         )
-        concurrent = _run(
-            golden_set,
-            search,
-            k=k,
-            concurrency=concurrent_workers,
-            repetitions=repetitions,
-        )
+        try:
+            serial = _run(
+                golden_set,
+                search,
+                k=k,
+                concurrency=1,
+                repetitions=repetitions,
+            )
+            concurrent = _run(
+                golden_set,
+                search,
+                k=k,
+                concurrency=concurrent_workers,
+                repetitions=repetitions,
+            )
+        finally:
+            backend.close()
 
     return {
         "schema_version": 1,
