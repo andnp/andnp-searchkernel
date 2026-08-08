@@ -63,6 +63,7 @@ _FALLBACK_SCAN_MAX_ROWS = 10_000
 _FUZZY_QUERY_MAX_TERMS = 4
 _FUZZY_ROW_TOKEN_LIMIT = 256
 _FUZZY_TERM_RATIO = 0.82
+_METADATA_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _VECTOR_EMBEDDING_BYTES = np.dtype("<f4").itemsize
 _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 logger = logging.getLogger(__name__)
@@ -1048,6 +1049,90 @@ class LocalRecordBackend:
             LocalRecordBackend._append_keyword_in_filter(
                 clauses, parameters, "r.storage_key", candidate_keys
             )
+
+        path_expression = (
+            "COALESCE(NULLIF(json_extract(r.metadata, '$.file_path'), ''), "
+            "NULLIF(json_extract(r.metadata, '$.path'), ''), "
+            "NULLIF(json_extract(r.metadata, '$.source_file'), ''), "
+            "NULLIF(r.uri, ''))"
+        )
+        included_paths = filters.get("paths")
+        if included_paths is None:
+            included_paths = filters.get("file_paths")
+        if included_paths is None:
+            included_paths = filters.get("source_files")
+        if included_paths is None:
+            included_paths = filters.get("path")
+        if included_paths is None:
+            included_paths = filters.get("file_path")
+        if included_paths is None:
+            included_paths = filters.get("source_file")
+        LocalRecordBackend._append_keyword_path_filter(
+            clauses,
+            parameters,
+            path_expression,
+            included_paths,
+            exclude=False,
+        )
+
+        excluded_paths = filters.get("excluded_files")
+        if excluded_paths is None:
+            excluded_paths = filters.get("excluded_paths")
+        if excluded_paths is None:
+            excluded_paths = filters.get("excluded_file_paths")
+        if excluded_paths is None:
+            excluded_paths = filters.get("excluded_source_files")
+        LocalRecordBackend._append_keyword_path_filter(
+            clauses,
+            parameters,
+            path_expression,
+            excluded_paths,
+            exclude=True,
+        )
+
+        document_expression = (
+            "COALESCE(NULLIF(json_extract(r.metadata, '$.doc_id'), ''), "
+            "r.source_id)"
+        )
+        document_values = filters.get("document_ids")
+        if document_values is None:
+            document_values = filters.get("document_id")
+        if document_values is None:
+            document_values = filters.get("doc_ids")
+        if document_values is None:
+            document_values = filters.get("doc_id")
+        if document_values is not None:
+            values = LocalRecordBackend._filter_values(document_values)
+            if not values:
+                return ["0"], []
+            LocalRecordBackend._append_keyword_in_filter(
+                clauses, parameters, document_expression, [str(value) for value in values]
+            )
+
+        excluded_documents = filters.get("excluded_documents")
+        if excluded_documents is None:
+            excluded_documents = filters.get("excluded_document_ids")
+        if excluded_documents is None:
+            excluded_documents = filters.get("excluded_doc_ids")
+        if excluded_documents:
+            values = LocalRecordBackend._filter_values(excluded_documents)
+            placeholders = ", ".join("?" for _ in values)
+            clauses.append(
+                f"({document_expression} NOT IN ({placeholders}) "
+                f"AND r.source_id NOT IN ({placeholders}))"
+            )
+            parameters.extend(str(value) for value in values)
+            parameters.extend(str(value) for value in values)
+
+        metadata_equals = filters.get("metadata_equals")
+        if metadata_equals is not None:
+            for field, value in metadata_equals.items():
+                if value is None:
+                    continue
+                if not _METADATA_FIELD_RE.fullmatch(field):
+                    raise ValueError(f"metadata_equals field {field!r} is invalid")
+                clauses.append("json_extract(r.metadata, ?) = ?")
+                parameters.extend((f"$.{field}", str(value)))
         return clauses, parameters
 
     @staticmethod
@@ -1059,6 +1144,51 @@ class LocalRecordBackend:
     ) -> None:
         clauses.append(f"{column} IN ({', '.join('?' for _ in values)})")
         parameters.extend(values)
+
+    @staticmethod
+    def _append_keyword_path_filter(
+        clauses: list[str],
+        parameters: list[Any],
+        expression: str,
+        values: Any,
+        *,
+        exclude: bool,
+    ) -> None:
+        if values is None:
+            return
+        normalized = {
+            str(value).replace("\\", "/") for value in LocalRecordBackend._filter_values(values)
+        }
+        variants = sorted(
+            {
+                variant
+                for value in normalized
+                for variant in LocalRecordBackend._keyword_path_variants(value)
+            }
+        )
+        if not variants:
+            if not exclude:
+                clauses.append("0")
+            return
+        comparisons: list[str] = []
+        for value in variants:
+            comparisons.append(f"{expression} = ?")
+            parameters.append(value)
+            if "/" not in value:
+                comparisons.append(f"{expression} LIKE ?")
+                parameters.append(f"%/{value}")
+        predicate = " OR ".join(comparisons)
+        clauses.append(f"NOT ({predicate})" if exclude else f"({predicate})")
+
+    @staticmethod
+    def _keyword_path_variants(value: str) -> set[str]:
+        variants = {value}
+        leaf = value.rsplit("/", 1)[-1]
+        variants.add(leaf)
+        if "." in leaf:
+            variants.add(value.rsplit(".", 1)[0])
+            variants.add(leaf.rsplit(".", 1)[0])
+        return variants
 
     def _search_keyword_fts(
         self,
