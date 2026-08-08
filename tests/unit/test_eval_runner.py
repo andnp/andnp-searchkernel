@@ -103,6 +103,17 @@ def test_run_eval_partial_search():
     assert abs(mean_recall - 1.0 / 3.0) < 0.001
 
 
+def test_run_eval_reports_duplicate_result_ids():
+    golden_set = GoldenSet(
+        entries=[GoldenEntry(query="q", relevant_ids=["a"])]
+    )
+
+    report = run_eval(golden_set, lambda query: ["a", "a", "b"], k=3)
+
+    assert report.metrics[0].duplicate_result_ids == ["a"]
+    assert report.to_dict()["per_query_metrics"][0]["duplicate_result_ids"] == ["a"]
+
+
 def test_run_eval_latency_percentiles():
     """Test that latency percentiles are computed."""
     golden_set = GoldenSet(
