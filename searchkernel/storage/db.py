@@ -176,6 +176,7 @@ class DatabaseManager:
         self._local = threading.local()
         self._connections: dict[int, sqlite3.Connection] = {}
         self._connections_lock = threading.Lock()
+        self._generation = 0
         db_path.parent.mkdir(parents=True, exist_ok=True)
         # Initialize schema via a temporary connection
         conn = self._open_connection()
@@ -197,20 +198,17 @@ class DatabaseManager:
     def get_connection(self) -> sqlite3.Connection:
         """Return a per-thread SQLite connection."""
         conn = getattr(self._local, "connection", None)
-        if conn is not None:
-            try:
-                conn.execute("SELECT 1")
-            except sqlite3.ProgrammingError:
-                self._local.connection = None
-                conn = None
-        if conn is None:
-            thread_id = threading.get_ident()
-            with self._connections_lock:
-                conn = self._connections.get(thread_id)
-                if conn is None:
-                    conn = self._open_connection()
-                    self._connections[thread_id] = conn
-                self._local.connection = conn
+        if conn is not None and getattr(self._local, "generation", -1) == self._generation:
+            return conn
+        self._local.connection = None
+        thread_id = threading.get_ident()
+        with self._connections_lock:
+            conn = self._connections.get(thread_id)
+            if conn is None:
+                conn = self._open_connection()
+                self._connections[thread_id] = conn
+            self._local.connection = conn
+            self._local.generation = self._generation
         return conn
 
     def _initialize_schema_on(self, conn: sqlite3.Connection) -> None:
@@ -289,7 +287,9 @@ class DatabaseManager:
         with self._connections_lock:
             connections = tuple(self._connections.values())
             self._connections.clear()
+            self._generation += 1
             self._local.connection = None
+            self._local.generation = self._generation
         for conn in connections:
             conn.close()
 
