@@ -222,7 +222,7 @@ class TestConcurrentWAL:
 
         assert db._connections == {}
 
-    def test_worker_refreshes_connection_after_manager_close(
+    def test_worker_rejects_connection_after_manager_close(
         self, db: DatabaseManager
     ) -> None:
         ready = threading.Event()
@@ -234,7 +234,8 @@ class TestConcurrentWAL:
                 db.get_connection()
                 ready.set()
                 proceed.wait(timeout=5)
-                db.get_connection().execute("SELECT 1")
+                with pytest.raises(RuntimeError, match="database manager is closed"):
+                    db.get_connection()
             except Exception as exc:  # noqa: BLE001 -- capture worker failures
                 errors.append(exc)
 
