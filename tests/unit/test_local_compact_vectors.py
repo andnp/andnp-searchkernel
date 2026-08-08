@@ -244,6 +244,26 @@ def test_optional_faiss_recall_reload_and_corruption_fallback(tmp_path: Path) ->
     assert "persistence_reason" in fallback.last_search_diagnostics
 
 
+def test_faiss_execution_fallback_reports_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = LocalRecordBackend()
+    record = _record("one", [1.0, 0.0])
+    backend.upsert([record], "model", 2)
+    store = FAISSLocalVectorStore(backend)
+
+    def fail_to_load(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("index unavailable")
+
+    monkeypatch.setattr(store, "_get_state", fail_to_load)
+
+    hits = store.search([1.0, 0.0], 1, model_name="model", dim=2)
+
+    assert [hit.source_id for hit in hits] == ["one"]
+    assert store.last_search_diagnostics["fallback"] is True
+    assert store.last_search_diagnostics["fallback_reason"] == (
+        "RuntimeError: index unavailable"
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "error"),
     [
