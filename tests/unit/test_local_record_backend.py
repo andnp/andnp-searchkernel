@@ -659,6 +659,60 @@ def test_keyword_project_filters_match_numeric_metadata_ids(tmp_path) -> None:
     ] == ["kept"]
 
 
+def test_keyword_search_applies_document_path_and_metadata_filters(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    kept = _record(
+        "note",
+        "kept",
+        "common",
+        metadata={
+            "file_path": "src/guide.md",
+            "doc_id": "guide",
+            "kind": "reference",
+        },
+    )
+    wrong_document = _record(
+        "note",
+        "wrong-document",
+        "common",
+        metadata={
+            "file_path": "src/guide.md",
+            "doc_id": "other",
+            "kind": "reference",
+        },
+    )
+    excluded_path = _record(
+        "note",
+        "excluded-path",
+        "common",
+        metadata={
+            "file_path": "src/ignored.md",
+            "doc_id": "guide",
+            "kind": "reference",
+        },
+    )
+    backend.index([kept, wrong_document, excluded_path])
+
+    filters = {
+        "paths": ["guide.md"],
+        "document_ids": ["guide"],
+        "metadata_equals": {"kind": "reference"},
+        "excluded_files": ["ignored.md"],
+    }
+
+    assert [hit.source_id for hit in backend.search_keyword("common", 10, filters)] == [
+        "kept"
+    ]
+
+
+def test_keyword_search_rejects_invalid_metadata_filter_fields(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.index([_record("note", "record", "common")])
+
+    with pytest.raises(ValueError, match="metadata_equals field"):
+        backend.search_keyword("common", 10, {"metadata_equals": {"kind-name": "x"}})
+
+
 def test_keyword_empty_project_scopes_match_nothing(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     backend.index(
