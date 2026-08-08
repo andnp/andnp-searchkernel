@@ -41,10 +41,12 @@ from searchkernel.ports.search_results import (
     RecordSearchOutcome,
     RecordSearchResult,
 )
-from searchkernel.runtime import (
+from searchkernel.runtime.canonical_cache import (
     CandidateResultCache,
     HydrationCache,
     HydrationCacheKey,
+)
+from searchkernel.runtime.query_embedding_cache import (
     QueryEmbeddingCache,
 )
 from searchkernel.runtime.trace import QueryTrace

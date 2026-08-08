@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, TypeVar
 
-from searchkernel.runtime import (
+from searchkernel.runtime.canonical_cache import (
     CandidateCacheKey,
     CandidateResultCache,
     SearchEpochs,
