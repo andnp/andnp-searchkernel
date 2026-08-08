@@ -277,7 +277,11 @@ class FAISSLocalVectorStore:
         total = len(state.storage_keys)
         if total == 0:
             return []
-        scan = min(total, max(k, int(np.ceil(k * self._overfetch_multiplier))))
+        scan = (
+            total
+            if self._search_strategy == "exact"
+            else min(total, max(k, int(np.ceil(k * self._overfetch_multiplier))))
+        )
         predicate = compile_vector_filters(filters)
         hits: dict[str, RecordHit] = {}
         for _ in range(self._max_scan_rounds):
