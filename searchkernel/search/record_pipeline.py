@@ -1662,7 +1662,7 @@ class RecordSearchPipeline:
             outgoing = await self._load_graph_neighbors(
                 graph_store, graph_seeds, outgoing_plan, filters
             )
-            incoming: dict[str, Sequence[GraphNeighbor]] = {}
+            incoming_neighbors: dict[str, Sequence[GraphNeighbor]] = {}
             if getattr(graph_store, "direction", None) != "both" and getattr(
                 graph_store, "_direction", None
             ) != "both" and any(
@@ -1675,11 +1675,11 @@ class RecordSearchPipeline:
                         plan.signals, graph_direction="incoming"
                     ),
                 )
-                incoming = await self._load_graph_neighbors(
+                incoming_neighbors = await self._load_graph_neighbors(
                     graph_store, graph_seeds, incoming_plan, filters
                 )
             merged: dict[str, dict[tuple[str, str], GraphNeighbor]] = {}
-            for values in (outgoing, incoming):
+            for values in (outgoing, incoming_neighbors):
                 for seed_key, neighbors in values.items():
                     by_identity = merged.setdefault(seed_key, {})
                     for neighbor in neighbors:
@@ -1759,10 +1759,13 @@ class RecordSearchPipeline:
                     kwargs["max_neighbors"] = self._config.max_neighbors_per_seed
                 if _supports_keyword(neighbor_loader, "filters"):
                     kwargs["filters"] = filters
-                loaded_neighbors = await _call_async(
-                    neighbor_loader,
-                    seed.identity,
-                    **kwargs,
+                loaded_neighbors = cast(
+                    Sequence[GraphNeighbor],
+                    await _call_async(
+                        neighbor_loader,
+                        seed.identity,
+                        **kwargs,
+                    ),
                 )
                 return seed.storage_key, cast(
                     Sequence[GraphNeighbor],

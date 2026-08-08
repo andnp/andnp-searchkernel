@@ -44,7 +44,9 @@ _OUTBOUND_RELATIONSHIP_PATTERN = re.compile(
     r"embed(?:s|ded|ding)?|transclud(?:e|es|ed|ing)?)\b",
     re.IGNORECASE,
 )
-_RELATIONSHIP_TARGET_PATTERNS = (
+_RELATIONSHIP_TARGET_PATTERNS: tuple[
+    tuple[re.Pattern[str], RelationshipDirection], ...
+] = (
     (re.compile(
         r"^(?:which|what)\s+(?:pages|documents|notes|files)\s+"
         r"are\s+neighbors\s+of\s+(?P<target>.+?)\s*[?.!]?$",

@@ -76,8 +76,8 @@ from searchkernel.runtime.validated_read_cache import (
     ValidatedReadThroughCache,
     ValidatedReadThroughCacheMetrics,
 )
-from searchkernel.search.orchestrator import SearchOrchestrator
 from searchkernel.search.classifier import RelationshipIntent, parse_relationship_intent
+from searchkernel.search.orchestrator import SearchOrchestrator
 from searchkernel.search.query_plan import (
     QueryPlan,
     QueryRouter,
@@ -146,9 +146,9 @@ __all__ = [
     "RecordSearchPipeline",
     "RecordSearchPolicy",
     "RecordSearchQueryContext",
-    "RelationshipIntent",
     "RecordSearchResult",
     "RegisteredSearchSource",
+    "RelationshipIntent",
     "ResumableSemanticCoordinator",
     "RollbackMetadata",
     "SearchAPI",
