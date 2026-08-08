@@ -19,7 +19,7 @@ import threading
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -47,7 +47,12 @@ from searchkernel.indices.local_vectors import (
     PackedVectorCodec,
     VectorSnapshot,
 )
-from searchkernel.storage.db import DatabaseManager, SQLiteTuning
+from searchkernel.storage.db import (
+    DatabaseManager,
+    InMemorySQLiteDatabase,
+    SQLiteDatabase,
+    SQLiteTuning,
+)
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 _LOCAL_KEYWORD_SCHEMA = "local_records_fts"
@@ -101,21 +106,6 @@ class _VectorSnapshotCache(dict[tuple[str, int], VectorSnapshot]):
     def clear(self) -> None:
         super().clear()
         self._storage_stats.clear()
-
-
-class _EphemeralDatabase:
-    def __init__(self, tuning: SQLiteTuning | None = None) -> None:
-        self._connection = sqlite3.connect(":memory:", check_same_thread=False)
-        self._connection.row_factory = sqlite3.Row
-        (tuning or SQLiteTuning()).apply(self._connection)
-        self._connection.execute("PRAGMA foreign_keys=ON")
-
-    def get_connection(self) -> sqlite3.Connection:
-        return self._connection
-
-
-class _Database(Protocol):
-    def get_connection(self) -> sqlite3.Connection: ...
 
 
 class _LocalEpochLane:
@@ -176,7 +166,7 @@ class LocalRecordBackend:
         self,
         db_path: Path | None = None,
         *,
-        db_manager: DatabaseManager | None = None,
+        db_manager: SQLiteDatabase | None = None,
         sqlite_tuning: SQLiteTuning | None = None,
         keyword_overfetch_multiplier: float = 4.0,
         vector_engine: str = "exact",
@@ -201,7 +191,7 @@ class LocalRecordBackend:
         self._db = db_manager or (
             DatabaseManager(db_path, tuning=sqlite_tuning)
             if db_path is not None
-            else _EphemeralDatabase(sqlite_tuning)
+            else InMemorySQLiteDatabase(sqlite_tuning)
         )
         self._lock = threading.RLock()
         self._snapshot_lock = threading.RLock()
@@ -222,7 +212,7 @@ class LocalRecordBackend:
         self._initialize_schema()
 
     @property
-    def db_manager(self) -> _Database:
+    def db_manager(self) -> SQLiteDatabase:
         return self._db
 
     def _initialize_schema(self) -> None:

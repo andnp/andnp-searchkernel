@@ -5,9 +5,17 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Self
+from typing import Protocol, Self
 
 logger = logging.getLogger(__name__)
+
+
+class SQLiteDatabase(Protocol):
+    """Connection provider used by SQLite-backed storage components."""
+
+    def get_connection(self) -> sqlite3.Connection: ...
+
+    def close(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +141,22 @@ class _ManagedConnection(sqlite3.Connection):
             self.close()
         except (AttributeError, sqlite3.Error):
             return
+
+
+class InMemorySQLiteDatabase:
+    """Single-connection SQLite provider for ephemeral local stores."""
+
+    def __init__(self, tuning: SQLiteTuning | None = None) -> None:
+        self._connection = sqlite3.connect(":memory:", check_same_thread=False)
+        self._connection.row_factory = sqlite3.Row
+        (tuning or SQLiteTuning()).apply(self._connection)
+        self._connection.execute("PRAGMA foreign_keys=ON")
+
+    def get_connection(self) -> sqlite3.Connection:
+        return self._connection
+
+    def close(self) -> None:
+        self._connection.close()
 
 
 class DatabaseManager:
