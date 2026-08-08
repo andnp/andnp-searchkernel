@@ -569,6 +569,7 @@ class Psycopg3Connection:
             dsn,
             min_size=min_connections,
             max_size=max_connections,
+            open=True,
             kwargs={"prepare_threshold": None},
         )
 

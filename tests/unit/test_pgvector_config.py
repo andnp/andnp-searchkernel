@@ -1,7 +1,9 @@
 from datetime import UTC, datetime
+from typing import ClassVar
 
 import pytest
 
+from searchkernel.adapters.stores import pgvector
 from searchkernel.adapters.stores.pgvector import (
     PGVectorFeatureSupport,
     PGVectorStore,
@@ -96,6 +98,26 @@ class _Pool:
 
     def put_connection(self, conn: object) -> None:
         pass
+
+
+class _ConnectionPoolFactory:
+    last_kwargs: ClassVar[dict[str, object]] = {}
+
+    def __init__(self, dsn: str, **kwargs: object) -> None:
+        self.last_kwargs = kwargs
+        type(self).last_kwargs = kwargs
+
+
+class _Psycopg3PoolModule:
+    ConnectionPool = _ConnectionPoolFactory
+
+
+def test_psycopg3_pool_opens_before_first_checkout(monkeypatch) -> None:
+    monkeypatch.setattr(pgvector, "psycopg_pool", _Psycopg3PoolModule)
+
+    Psycopg3Connection("postgresql://example", min_connections=1, max_connections=3)
+
+    assert _ConnectionPoolFactory.last_kwargs["open"] is True
 
 
 def test_iterative_scan_support_comes_from_server_extension_version() -> None:
