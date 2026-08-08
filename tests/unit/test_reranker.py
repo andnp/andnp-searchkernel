@@ -125,6 +125,29 @@ class TestReRankEmptyCandidates:
 
 
 class TestReRankScoring:
+    def test_public_rerank_uses_factory_and_returns_scores(
+        self, fake_cross_encoder: FakeCrossEncoder, content_provider, candidates
+    ):
+        factory_calls: list[str] = []
+
+        def model_factory(model_name: str) -> FakeCrossEncoder:
+            factory_calls.append(model_name)
+            return fake_cross_encoder
+
+        reranker = ReRanker(model_name="test-model", model_factory=model_factory)
+        result = reranker.rerank(
+            query="test query",
+            candidates=candidates,
+            content_provider=content_provider,
+            top_n=10,
+        )
+
+        assert factory_calls == ["test-model"]
+        assert {chunk_id for chunk_id, _ in result} == {
+            chunk_id for chunk_id, _ in candidates
+        }
+        assert all(isinstance(score, float) for _, score in result)
+
     def test_rerank_scores_relevant_higher(
         self, fake_cross_encoder: FakeCrossEncoder, content_provider, candidates
     ):
