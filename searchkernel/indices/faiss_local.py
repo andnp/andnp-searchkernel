@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,59 @@ if TYPE_CHECKING:
 
 
 FAISSSearchStrategy = Literal["exact", "approximate"]
+
+
+@dataclass(frozen=True, slots=True)
+class FAISSConfiguration:
+    """Validated construction-time settings for one FAISS vector store."""
+
+    search_strategy: FAISSSearchStrategy = "exact"
+    hnsw_m: int = 32
+    hnsw_ef_construction: int = 40
+    hnsw_ef_search: int = 16
+    overfetch_multiplier: float = 4.0
+    max_scan_rounds: int = 4
+    max_scan_candidates: int = 100_000
+
+    def __post_init__(self) -> None:
+        if self.search_strategy not in {"exact", "approximate"}:
+            raise ValueError("search_strategy must be exact or approximate")
+        for name in (
+            "hnsw_m",
+            "hnsw_ef_construction",
+            "hnsw_ef_search",
+            "max_scan_rounds",
+            "max_scan_candidates",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"{name} must be an integer")
+            if value < 1:
+                raise ValueError(f"{name} must be positive")
+        if not isinstance(self.overfetch_multiplier, (int, float)) or isinstance(
+            self.overfetch_multiplier, bool
+        ):
+            raise TypeError("overfetch_multiplier must be numeric")
+        if not math.isfinite(self.overfetch_multiplier) or self.overfetch_multiplier < 1.0:
+            raise ValueError("overfetch_multiplier must be finite and at least 1")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "search_strategy": self.search_strategy,
+            "hnsw_m": self.hnsw_m,
+            "hnsw_ef_construction": self.hnsw_ef_construction,
+            "hnsw_ef_search": self.hnsw_ef_search,
+            "overfetch_multiplier": float(self.overfetch_multiplier),
+            "max_scan_rounds": self.max_scan_rounds,
+            "max_scan_candidates": self.max_scan_candidates,
+        }
+
+    @property
+    def fingerprint(self) -> str:
+        payload = json.dumps(
+            self.as_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,26 +121,41 @@ class FAISSLocalVectorStore:
         search_strategy: FAISSSearchStrategy = "exact",
         overfetch_multiplier: float = 4.0,
         max_scan_rounds: int = 4,
+        hnsw_m: int = 32,
+        hnsw_ef_construction: int = 40,
+        hnsw_ef_search: int = 16,
+        max_scan_candidates: int = 100_000,
     ) -> None:
-        if search_strategy not in {"exact", "approximate"}:
-            raise ValueError(
-                "search_strategy must be exact or approximate"
-            )
-        if overfetch_multiplier < 1.0:
-            raise ValueError("overfetch_multiplier must be at least 1")
-        if max_scan_rounds < 1:
-            raise ValueError("max_scan_rounds must be positive")
         self._backend = backend
         self._index_path = index_path
-        self._search_strategy = search_strategy
-        self._overfetch_multiplier = overfetch_multiplier
-        self._max_scan_rounds = max_scan_rounds
+        self._configuration = FAISSConfiguration(
+            search_strategy=search_strategy,
+            hnsw_m=hnsw_m,
+            hnsw_ef_construction=hnsw_ef_construction,
+            hnsw_ef_search=hnsw_ef_search,
+            overfetch_multiplier=overfetch_multiplier,
+            max_scan_rounds=max_scan_rounds,
+            max_scan_candidates=max_scan_candidates,
+        )
         self._state_lock = threading.RLock()
         self._states: dict[tuple[str, int], _FAISSState] = {}
+        self._last_search_diagnostics: dict[str, Any] = {
+            "strategy": self._configuration.search_strategy,
+            "configuration_fingerprint": self._configuration.fingerprint,
+            "fallback": False,
+        }
 
     @property
     def search_strategy(self) -> FAISSSearchStrategy:
-        return self._search_strategy
+        return self._configuration.search_strategy
+
+    @property
+    def configuration(self) -> FAISSConfiguration:
+        return self._configuration
+
+    @property
+    def last_search_diagnostics(self) -> dict[str, Any]:
+        return dict(self._last_search_diagnostics)
 
     def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
         self._backend.upsert(records, model_name, dim)
@@ -105,22 +174,40 @@ class FAISSLocalVectorStore:
         query = PackedVectorCodec.normalize(
             query_vector, dim, context="query vector"
         )
+        self._last_search_diagnostics = {
+            "strategy": self.search_strategy,
+            "configuration_fingerprint": self.configuration.fingerprint,
+            "requested_k": k,
+            "fallback": False,
+        }
         try:
             state = self._get_state(model_name, dim)
-            return self._search_state(
+            hits = self._search_state(
                 state,
                 query,
                 k,
                 filters=filters,
             )
-        except Exception:  # noqa: BLE001 - broken optional indexes use exact fallback
-            return self._backend.search_vector(
+            self._last_search_diagnostics["returned"] = len(hits)
+            self._last_search_diagnostics["under_returned"] = len(hits) < k
+            return hits
+        except Exception as exc:  # noqa: BLE001 - optional indexes use exact fallback
+            self._last_search_diagnostics.update(
+                {
+                    "fallback": True,
+                    "fallback_reason": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            hits = self._backend.search_vector(
                 query_vector,
                 k,
                 model_name=model_name,
                 dim=dim,
                 filters=filters,
             )
+            self._last_search_diagnostics["returned"] = len(hits)
+            self._last_search_diagnostics["under_returned"] = len(hits) < k
+            return hits
 
     def delete(self, record_ids: list[str]) -> None:
         self._backend.delete(record_ids)
@@ -184,6 +271,7 @@ class FAISSLocalVectorStore:
                 return cached
             loaded = self._load_state(model_name, dim, vector_epoch)
             if loaded is not None:
+                self._last_search_diagnostics["persistence"] = "loaded"
                 self._states[key] = loaded
                 return loaded
             state = self._build_state(model_name, dim, vector_epoch)
@@ -191,6 +279,7 @@ class FAISSLocalVectorStore:
                 raise RuntimeError("vector index changed while FAISS state was built")
             self._states[key] = state
             self._persist_state(state)
+            self._last_search_diagnostics["persistence"] = "rebuilt"
             return state
 
     @staticmethod
@@ -209,14 +298,18 @@ class FAISSLocalVectorStore:
     ) -> _FAISSState:
         import faiss
 
-        if self._search_strategy == "exact":
+        if self.search_strategy == "exact":
             base_index = faiss.IndexFlatIP(dim)
         else:
             base_index = faiss.IndexHNSWFlat(
                 dim,
-                32,
+                self.configuration.hnsw_m,
                 faiss.METRIC_INNER_PRODUCT,
             )
+            base_index.hnsw.efConstruction = (
+                self.configuration.hnsw_ef_construction
+            )
+            base_index.hnsw.efSearch = self.configuration.hnsw_ef_search
         index = faiss.IndexIDMap2(base_index)
         ids: list[int] = []
         storage_keys: list[str] = []
@@ -277,14 +370,30 @@ class FAISSLocalVectorStore:
         total = len(state.storage_keys)
         if total == 0:
             return []
+        exact = self.search_strategy == "exact"
+        candidate_budget = (
+            total if exact else min(total, self.configuration.max_scan_candidates)
+        )
         scan = (
             total
-            if self._search_strategy == "exact"
-            else min(total, max(k, int(np.ceil(k * self._overfetch_multiplier))))
+            if exact
+            else min(
+                candidate_budget,
+                max(k, int(np.ceil(k * self.configuration.overfetch_multiplier))),
+            )
+        )
+        self._last_search_diagnostics.update(
+            {
+                "candidate_budget": candidate_budget,
+                "scan_limit": scan,
+                "candidate_budget_hit": False,
+                "scan_rounds": 0,
+            }
         )
         predicate = compile_vector_filters(filters)
         hits: dict[str, RecordHit] = {}
-        for _ in range(self._max_scan_rounds):
+        for scan_round in range(self.configuration.max_scan_rounds):
+            self._last_search_diagnostics["scan_rounds"] = scan_round + 1
             with self._state_lock:
                 scores, ids = state.index.search(
                     np.asarray(query[None, :], dtype=np.float32),
@@ -307,9 +416,13 @@ class FAISSLocalVectorStore:
                 )
                 if len(hits) >= k:
                     break
-            if len(hits) >= k or scan >= total:
+            if len(hits) >= k or scan >= candidate_budget:
+                self._last_search_diagnostics["candidate_budget_hit"] = (
+                    not exact and scan >= candidate_budget and len(hits) < k
+                )
                 break
-            scan = min(total, max(scan + 1, scan * 2))
+            scan = min(candidate_budget, max(scan + 1, scan * 2))
+            self._last_search_diagnostics["scan_limit"] = scan
         return sorted(
             hits.values(),
             key=lambda hit: (-hit.score, hit.storage_key),
@@ -373,7 +486,9 @@ class FAISSLocalVectorStore:
                     "normalization_policy": NORMALIZATION_POLICY,
                     "encoder_namespace": state.encoder_namespace,
                     "dim": state.dim,
-                    "search_strategy": self._search_strategy,
+                    "search_strategy": self.search_strategy,
+                    "configuration": self.configuration.as_dict(),
+                    "configuration_fingerprint": self.configuration.fingerprint,
                     "epoch": state.epoch,
                     "ids": list(state.ids),
                     "storage_keys": list(state.storage_keys),
@@ -391,7 +506,10 @@ class FAISSLocalVectorStore:
                     "tombstones": [],
                 },
             )
-        except Exception:  # noqa: BLE001 - corrupted optional indexes use exact fallback
+        except Exception as exc:  # noqa: BLE001 - optional persistence is best effort
+            self._last_search_diagnostics["persistence_error"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
             return
 
     def _load_state(
@@ -410,8 +528,8 @@ class FAISSLocalVectorStore:
                 or metadata["normalization_policy"] != NORMALIZATION_POLICY
                 or metadata["encoder_namespace"] != model_name
                 or metadata["dim"] != dim
-                or metadata.get("search_strategy", "exact")
-                != self._search_strategy
+                or metadata.get("configuration_fingerprint")
+                != self.configuration.fingerprint
                 or metadata["epoch"] != epoch
             ):
                 return None
@@ -435,6 +553,7 @@ class FAISSLocalVectorStore:
             index = faiss.deserialize_index(np.frombuffer(index_path.read_bytes(), dtype=np.uint8))
             if index.d != dim or index.ntotal != len(ids):
                 return None
+            self._restore_hnsw_settings(index)
             return _FAISSState(
                 index=index,
                 encoder_namespace=model_name,
@@ -445,5 +564,17 @@ class FAISSLocalVectorStore:
                 id_to_storage_key=dict(zip(ids, storage_keys, strict=True)),
                 candidate_metadata=candidate_metadata,
             )
-        except Exception:  # noqa: BLE001 - stale or corrupt indexes use exact fallback
+        except Exception as exc:  # noqa: BLE001 - stale or corrupt indexes rebuild
+            self._last_search_diagnostics["persistence_reason"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
             return None
+
+    def _restore_hnsw_settings(self, index: Any) -> None:
+        if self.search_strategy != "approximate":
+            return
+        import faiss
+
+        base_index = faiss.downcast_index(index.index)
+        base_index.hnsw.efConstruction = self.configuration.hnsw_ef_construction
+        base_index.hnsw.efSearch = self.configuration.hnsw_ef_search

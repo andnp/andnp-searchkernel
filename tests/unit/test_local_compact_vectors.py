@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from searchkernel.indices import (
     LocalRecordBackend,
     LocalVectorStore,
 )
+from searchkernel.indices.faiss_local import FAISSConfiguration
 from searchkernel.indices.local_vectors import PackedVectorCodec
 
 
@@ -237,6 +239,109 @@ def test_optional_faiss_recall_reload_and_corruption_fallback(tmp_path: Path) ->
     assert fallback.search(
         [1.0, 0.0], 2, model_name="model", dim=2
     )[0].source_id == "one"
+    assert fallback.last_search_diagnostics["fallback"] is False
+    assert fallback.last_search_diagnostics["persistence"] == "rebuilt"
+    assert "persistence_reason" in fallback.last_search_diagnostics
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("hnsw_m", True, TypeError),
+        ("hnsw_ef_construction", 0, ValueError),
+        ("hnsw_ef_search", "16", TypeError),
+        ("overfetch_multiplier", float("inf"), ValueError),
+        ("max_scan_rounds", 0, ValueError),
+        ("max_scan_candidates", False, TypeError),
+    ],
+)
+def test_faiss_configuration_validation(
+    field: str, value: object, error: type[Exception]
+) -> None:
+    kwargs = {field: value}
+
+    with pytest.raises(error):
+        FAISSConfiguration(**kwargs)
+
+
+def test_faiss_configuration_fingerprint_persists_hnsw_settings(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("faiss")
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert(
+        [_record("one", [1.0, 0.0]), _record("two", [0.0, 1.0])],
+        "model",
+        2,
+    )
+    store = FAISSLocalVectorStore(
+        backend,
+        index_path=tmp_path / "faiss",
+        search_strategy="approximate",
+        hnsw_m=12,
+        hnsw_ef_construction=27,
+        hnsw_ef_search=73,
+    )
+    store.search([1.0, 0.0], 1, model_name="model", dim=2)
+
+    metadata_path = next((tmp_path / "faiss").glob("*.json"))
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["configuration"] == store.configuration.as_dict()
+    assert metadata["configuration_fingerprint"] == store.configuration.fingerprint
+
+    reloaded = FAISSLocalVectorStore(
+        backend,
+        index_path=tmp_path / "faiss",
+        search_strategy="approximate",
+        hnsw_m=12,
+        hnsw_ef_construction=27,
+        hnsw_ef_search=73,
+    )
+    state = reloaded._get_state("model", 2)
+    import faiss
+
+    hnsw = faiss.downcast_index(state.index.index).hnsw
+    assert hnsw.efConstruction == 27
+    assert hnsw.efSearch == 73
+    assert reloaded.last_search_diagnostics["persistence"] == "loaded"
+
+
+def test_faiss_approximate_search_enforces_filtered_candidate_budget(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("faiss")
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert(
+        [
+            _record("blocked-1", [1.0, 0.0], workspace_id="other"),
+            _record("blocked-2", [0.99, 0.1], workspace_id="other"),
+            _record("eligible-1", [0.8, 0.6]),
+            _record("eligible-2", [0.6, 0.8]),
+        ],
+        "model",
+        2,
+    )
+    store = FAISSLocalVectorStore(
+        backend,
+        index_path=tmp_path / "faiss",
+        search_strategy="approximate",
+        max_scan_candidates=2,
+    )
+
+    hits = store.search(
+        [1.0, 0.0],
+        2,
+        model_name="model",
+        dim=2,
+        filters={"workspace_id": "workspace"},
+    )
+
+    diagnostics = store.last_search_diagnostics
+    assert len(hits) < 2
+    assert diagnostics["candidate_budget"] == 2
+    assert diagnostics["scan_limit"] <= 2
+    assert diagnostics["candidate_budget_hit"] is True
+    assert diagnostics["under_returned"] is True
 
 
 def test_faiss_batches_candidate_validation_and_preserves_filters(
