@@ -214,7 +214,9 @@ from searchkernel.search import (
     QueryRouter,
     QueryRouterConfig,
     RecordSearchPipeline,
+    RelationshipIntent,
     SearchOrchestrator,
+    parse_relationship_intent,
     route_query,
 )
 from searchkernel.search.edge_types import infer_edge_type
@@ -392,6 +394,7 @@ __all__ = [
     "RecordSource",
     "RecordStatus",
     "RegisteredSearchSource",
+    "RelationshipIntent",
     "ReindexError",
     "ReindexProgress",
     "ReindexRoutine",
@@ -468,6 +471,7 @@ __all__ = [
     "mark_semantic_work_completed",
     "matches_any_excluded",
     "normalize_path",
+    "parse_relationship_intent",
     "prepare_bootstrap_checkpoint",
     "publish_bootstrap_availability",
     "reconcile_indices",

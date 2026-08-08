@@ -5,6 +5,7 @@ from searchkernel.search.classifier import (
     analyze_query,
     classify_query,
     get_adaptive_weights,
+    parse_relationship_intent,
 )
 
 
@@ -103,8 +104,17 @@ class TestGetAdaptiveWeights:
         ("Which documents transclude Hybrid Search Strategy?", "incoming"),
         ("What pages does Hybrid Search Strategy link to?", "outgoing"),
         ("What pages does Hybrid Search Strategy embed?", "outgoing"),
-        ("What documents are neighbors of Hybrid Search Strategy?", "outgoing"),
+        ("What documents are neighbors of Hybrid Search Strategy?", "both"),
     ],
 )
 def test_relationship_queries_select_graph_direction(query, direction):
     assert analyze_query(query).graph_direction == direction
+
+
+def test_relationship_intent_extracts_compound_target():
+    intent = parse_relationship_intent(
+        "Which documents link to or depend on Hybrid Search Strategy?"
+    )
+    assert intent is not None
+    assert intent.target == "Hybrid Search Strategy"
+    assert intent.direction == "incoming"

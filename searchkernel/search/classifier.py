@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Literal
 
-RelationshipDirection = Literal["incoming", "outgoing"]
+RelationshipDirection = Literal["incoming", "outgoing", "both"]
 
 
 class QueryType(Enum):
@@ -43,6 +43,39 @@ _OUTBOUND_RELATIONSHIP_PATTERN = re.compile(
     r"\b(?:does|do)\b.*\b(?:link(?:s|ed)?\s+to|"
     r"embed(?:s|ded|ding)?|transclud(?:e|es|ed|ing)?)\b",
     re.IGNORECASE,
+)
+_RELATIONSHIP_TARGET_PATTERNS = (
+    (re.compile(
+        r"^(?:which|what)\s+(?:pages|documents|notes)\s+"
+        r"are\s+neighbors\s+of\s+(?P<target>.+?)\s*[?.!]?$",
+        re.IGNORECASE,
+    ), "both"),
+    (re.compile(
+        r"^(?:which|what)\s+(?:pages|documents|notes)\s+"
+        r"(?:link(?:s)?\s+to(?:\s+or\s+depend(?:s)?\s+on)?|"
+        r"depend(?:s)?\s+on(?:\s+or\s+link(?:s)?\s+to)?|"
+        r"are\s+linked\s+from|point(?:s)?\s+to|"
+        r"embed(?:s|ded|ding)?|transclud(?:e|es|ed|ing)?)\s+"
+        r"(?P<target>.+?)\s*[?.!]?$",
+        re.IGNORECASE,
+    ), "incoming"),
+    (re.compile(
+        r"^show\s+me\s+(?:pages|documents|notes)\s+that\s+"
+        r"(?:link(?:s)?\s+to|depend(?:s)?\s+on|embed(?:s|ded|ding)?|"
+        r"transclud(?:e|es|ed|ing)?)\s+(?P<target>.+?)\s*[?.!]?$",
+        re.IGNORECASE,
+    ), "incoming"),
+    (re.compile(
+        r"^what\s+links\s+to\s+(?P<target>.+?)\s*[?.!]?$",
+        re.IGNORECASE,
+    ), "incoming"),
+    (re.compile(
+        r"^(?:which|what)\s+(?:pages|documents|notes)\s+does\s+"
+        r"(?P<target>.+?)\s+(?:link(?:s)?\s+to|depend(?:s)?\s+on|"
+        r"point(?:s)?\s+to|embed(?:s|ded|ding)?|"
+        r"transclud(?:e|es|ed|ing)?)\s*[?.!]?$",
+        re.IGNORECASE,
+    ), "outgoing"),
 )
 
 _NAVIGATIONAL_KEYWORDS = frozenset(
@@ -91,6 +124,7 @@ class QuerySignals:
     exploratory: bool
     relationship: bool
     graph_direction: RelationshipDirection = "outgoing"
+    relationship_intent: "RelationshipIntent | None" = None
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -106,6 +140,26 @@ class QuerySignals:
         if self.relationship:
             names.append("relationship")
         return tuple(names)
+
+
+@dataclass(frozen=True, slots=True)
+class RelationshipIntent:
+    target: str
+    direction: RelationshipDirection
+
+
+def parse_relationship_intent(query: str) -> RelationshipIntent | None:
+    normalized = " ".join(query.strip().split()).strip(" .?!")
+    for pattern, direction in _RELATIONSHIP_TARGET_PATTERNS:
+        match = pattern.match(normalized)
+        if match is not None:
+            target = re.sub(
+                r"^(?:the|a|an)\s+", "", match.group("target").strip(),
+                count=1, flags=re.IGNORECASE,
+            ).strip(" .?!")
+            if target:
+                return RelationshipIntent(target, direction)
+    return None
 
 
 def _has_factual_signals(query: str) -> bool:
@@ -145,13 +199,19 @@ def _has_exploratory_signals(query: str) -> bool:
 
 def analyze_query(query: str) -> QuerySignals:
     """Extract routing signals without calling a generative model."""
+    relationship_intent = parse_relationship_intent(query)
     return QuerySignals(
         artifact=_has_factual_signals(query),
         quoted=bool(_QUOTED_PHRASE_PATTERN.search(query)),
         navigational=_has_navigational_signals(query),
         exploratory=_has_exploratory_signals(query),
         relationship=bool(_RELATIONSHIP_PATTERN.search(query)),
-        graph_direction=_relationship_direction(query),
+        graph_direction=(
+            relationship_intent.direction
+            if relationship_intent is not None
+            else _relationship_direction(query)
+        ),
+        relationship_intent=relationship_intent,
     )
 
 
