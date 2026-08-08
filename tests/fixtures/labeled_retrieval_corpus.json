@@ -1,0 +1,100 @@
+{
+  "records": [
+    {
+      "workspace_id": "ops",
+      "source_kind": "issue",
+      "source_id": "ENG-939",
+      "title": "ENG-939 deployment incident",
+      "body": "Track the deployment incident and recovery actions.",
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "workspace_id": "ops",
+      "source_kind": "issue",
+      "source_id": "incident-42",
+      "title": "Deployment incident review",
+      "body": "Review the failed deployment incident and the service rollback.",
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "workspace_id": "ops",
+      "source_kind": "runbook",
+      "source_id": "deploy-17",
+      "title": "Deployment recovery runbook",
+      "body": "Runbook for deployment rollback, incident response, and verification.",
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "workspace_id": "notes",
+      "source_kind": "note",
+      "source_id": "note-7",
+      "title": "Earlier deployment notes",
+      "body": "Notes from the earlier incident response discussion.",
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "workspace_id": "docs",
+      "source_kind": "docs",
+      "source_id": "latency-budget",
+      "title": "Bounded latency retrieval",
+      "body": "Retrieval latency budgets define p50 and p95 evidence.",
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    }
+  ],
+  "entries": [
+    {
+      "query": "ENG-939",
+      "relevant_ids": ["ENG-939"],
+      "query_type": "exact",
+      "source_kinds": ["issue"],
+      "workspace_id": "ops",
+      "tags": ["exact", "stable_identifier"],
+      "corpus_version": "searchkernel-labeled-v1",
+      "split": "test"
+    },
+    {
+      "query": "deployment incident",
+      "relevance": {"incident-42": 3.0, "deploy-17": 2.0},
+      "query_type": "conceptual",
+      "source_kinds": ["issue", "runbook"],
+      "workspace_id": "ops",
+      "tags": ["conceptual", "synonym"],
+      "corpus_version": "searchkernel-labeled-v1",
+      "split": "test"
+    },
+    {
+      "query": "earlier incident response",
+      "relevant_ids": ["note-7"],
+      "query_type": "vague",
+      "source_kinds": ["note"],
+      "workspace_id": "notes",
+      "tags": ["vague"],
+      "corpus_version": "searchkernel-labeled-v1",
+      "split": "test"
+    },
+    {
+      "query": "bounded latency retrieval",
+      "relevant_ids": ["latency-budget"],
+      "query_type": "multi_term",
+      "source_kinds": ["docs"],
+      "workspace_id": "docs",
+      "tags": ["multi_term", "performance"],
+      "corpus_version": "searchkernel-labeled-v1",
+      "split": "test"
+    },
+    {
+      "query": "quantum banana filesystem",
+      "relevant_ids": [],
+      "query_type": "unrelated",
+      "workspace_id": "ops",
+      "tags": ["unrelated"],
+      "corpus_version": "searchkernel-labeled-v1",
+      "split": "test"
+    }
+  ]
+}
