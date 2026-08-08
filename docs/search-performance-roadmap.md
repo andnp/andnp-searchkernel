@@ -168,11 +168,11 @@ source services remain responsible for their own authorization and filtering.
 The CI quality gate runs Ruff, Pyrefly, import-linter, and the complete
 collected pytest suite with `--strict-markers -m "not slow and not
 real_embeddings"`. Pyrefly is the only type checker. The latest local
-validation run on 2026-08-02 selected 1,048 tests and deselected 16 slow or
+validation run on 2026-08-07 selected 1,148 tests and deselected 16 slow or
 real-embedding tests:
 
 - Python 3.13.14 with the locked environment;
-- 1,048 passing tests;
+- 1,148 passing tests;
 - 12 PostgreSQL pool deprecation warnings;
 - `uv lock --check` passing;
 - the locked environment and the CI static checks passing.
