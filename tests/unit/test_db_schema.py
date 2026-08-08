@@ -222,6 +222,31 @@ class TestConcurrentWAL:
 
         assert db._connections == {}
 
+    def test_worker_refreshes_connection_after_manager_close(
+        self, db: DatabaseManager
+    ) -> None:
+        ready = threading.Event()
+        proceed = threading.Event()
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                db.get_connection()
+                ready.set()
+                proceed.wait(timeout=5)
+                db.get_connection().execute("SELECT 1")
+            except Exception as exc:  # noqa: BLE001 -- capture worker failures
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        assert ready.wait(timeout=5)
+        db.close()
+        proceed.set()
+        thread.join(timeout=5)
+
+        assert not errors
+
     def test_readers_dont_block_writers(self, db: DatabaseManager) -> None:
         read_errors: list[Exception] = []
         write_errors: list[Exception] = []

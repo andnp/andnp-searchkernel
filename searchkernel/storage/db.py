@@ -197,6 +197,12 @@ class DatabaseManager:
     def get_connection(self) -> sqlite3.Connection:
         """Return a per-thread SQLite connection."""
         conn = getattr(self._local, "connection", None)
+        if conn is not None:
+            try:
+                conn.execute("SELECT 1")
+            except sqlite3.ProgrammingError:
+                self._local.connection = None
+                conn = None
         if conn is None:
             thread_id = threading.get_ident()
             with self._connections_lock:
