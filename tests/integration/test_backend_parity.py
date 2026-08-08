@@ -9,7 +9,7 @@ from searchkernel.adapters.stores.pgvector import (
     PGKeywordStore,
     PGVectorStore,
     PostgresConnection,
-    _create_schema,
+    create_schema,
 )
 from searchkernel.domain import Record, RecordIdentity, RecordStatus
 from searchkernel.indices import LocalRecordBackend
@@ -82,7 +82,7 @@ def parity_backends(tmp_path, request):
 
     scoped_dsn = pg_dsn_for_schema(dsn, schema)
     pg_pool = PostgresConnection(scoped_dsn)
-    _create_schema(pg_pool)
+    create_schema(pg_pool)
     connection = pg_pool.get_connection()
     cursor = connection.cursor()
     cursor.execute("SELECT table_name FROM vector_tables;")

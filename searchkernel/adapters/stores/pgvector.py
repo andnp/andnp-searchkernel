@@ -608,7 +608,7 @@ class Psycopg3Connection:
         self.pool.close()
 
 
-def _create_schema(conn_pool: PostgresConnection) -> None:
+def create_schema(conn_pool: _PostgresConnectionLike) -> None:
     """Create idempotent schema for vector, keyword, graph, and cache stores."""
     conn = conn_pool.get_connection()
     cursor = None
@@ -747,6 +747,9 @@ def _create_schema(conn_pool: PostgresConnection) -> None:
         if cursor is not None:
             cursor.close()
         conn_pool.put_connection(conn)
+
+
+_create_schema = create_schema
 
 
 def _sql_module_for(conn_pool: _PostgresConnectionLike):

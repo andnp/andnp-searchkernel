@@ -16,7 +16,7 @@ from searchkernel.adapters.stores.pgvector import (
     PGKeywordStore,
     PGVectorStore,
     Psycopg3Connection,
-    _create_schema,
+    create_schema,
 )
 from searchkernel.domain import (
     GraphEdge,
@@ -59,7 +59,7 @@ def pg_conn(pg_dsn, request):
     bootstrap_pool.close()
 
     conn_pool = Psycopg3Connection(scoped_dsn)
-    _create_schema(conn_pool)
+    create_schema(conn_pool)
 
     # Clean slate for this worker's schema before every test.
     conn = conn_pool.get_connection()

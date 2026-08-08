@@ -17,7 +17,7 @@ from searchkernel.adapters.embedding import HuggingFaceEmbeddingProvider
 from searchkernel.adapters.stores.pgvector import (
     PGVectorStore,
     PostgresConnection,
-    _create_schema,
+    create_schema,
 )
 from searchkernel.domain import Record, RecordStatus
 
@@ -36,7 +36,7 @@ def pg_conn():
         pytest.skip("SEARCHKERNEL_PG_DSN not set")
 
     conn_pool = PostgresConnection(dsn)
-    _create_schema(conn_pool)
+    create_schema(conn_pool)
 
     conn = conn_pool.get_connection()
     cursor = conn.cursor()

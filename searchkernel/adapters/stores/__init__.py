@@ -7,6 +7,7 @@ from searchkernel.adapters.stores.pgvector import (
     PGVectorStore,
     PostgresConnection,
     _create_schema,
+    create_schema,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "PGVectorStore",
     "PostgresConnection",
     "_create_schema",
+    "create_schema",
 ]

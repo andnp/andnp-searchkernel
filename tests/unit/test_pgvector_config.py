@@ -3,6 +3,7 @@ from typing import ClassVar
 
 import pytest
 
+from searchkernel.adapters.stores import create_schema as exported_create_schema
 from searchkernel.adapters.stores import pgvector
 from searchkernel.adapters.stores.pgvector import (
     PGVectorFeatureSupport,
@@ -11,6 +12,12 @@ from searchkernel.adapters.stores.pgvector import (
     bounded_scan_limits,
 )
 from searchkernel.domain import Record
+
+
+def test_schema_bootstrap_has_public_compatibility_entry_points() -> None:
+    """The schema bootstrap is public while the old private name remains valid."""
+    assert exported_create_schema is pgvector.create_schema
+    assert pgvector._create_schema is pgvector.create_schema
 
 
 class _BulkCursor:
