@@ -124,6 +124,14 @@ class TestNdcgAtK:
         ndcg = ndcg_at_k(ranked, relevant, k=5)
         assert abs(ndcg - 1.0 / math.log2(6)) < 0.001
 
+    def test_ndcg_ignores_gains_for_unlabeled_ids(self):
+        assert ndcg_at_k(
+            ["a", "b"],
+            {"a", "b"},
+            k=2,
+            gains={"a": 2.0, "b": 1.0, "unlabeled": 100.0},
+        ) == 1.0
+
 
 class TestMrr:
     """Tests for Mean Reciprocal Rank (MRR)."""
