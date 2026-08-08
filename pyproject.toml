@@ -142,3 +142,10 @@ forbidden_modules = [
     "searchkernel.compression",
 ]
 ignore_imports = []
+
+[[tool.importlinter.contracts]]
+name = "runtime does not depend on search"
+type = "forbidden"
+source_modules = ["searchkernel.runtime"]
+forbidden_modules = ["searchkernel.search"]
+ignore_imports = []

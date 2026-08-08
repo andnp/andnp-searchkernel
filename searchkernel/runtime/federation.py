@@ -25,7 +25,6 @@ from searchkernel.ports.federation import (
     SourceIdentity,
 )
 from searchkernel.ports.rerank import Reranker
-from searchkernel.search.fusion import fuse_reciprocal_rank
 
 DEFAULT_MAX_CONCURRENCY = 8
 DEFAULT_PER_SOURCE_TIMEOUT_S = 5.0
@@ -725,7 +724,12 @@ def _fuse_hits(
                 (source_index, rank, _identity_key(entry.hit)),
             )
 
-    scores = fuse_reciprocal_rank(rankings, k=rrf_k)
+    if rrf_k <= 0:
+        raise ValueError("k must be positive")
+    scores: dict[str, float] = {}
+    for ranking in rankings:
+        for rank, item_id in enumerate(ranking, start=1):
+            scores[item_id] = scores.get(item_id, 0.0) + 1 / (rrf_k + rank)
     ranked_roots = sorted(
         (int(key) for key in scores),
         key=lambda root: (
