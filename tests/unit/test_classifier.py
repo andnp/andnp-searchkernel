@@ -118,3 +118,18 @@ def test_relationship_intent_extracts_compound_target():
     assert intent is not None
     assert intent.target == "Hybrid Search Strategy"
     assert intent.direction == "incoming"
+
+
+def test_relationship_intent_strips_neighbor_explanation_suffix():
+    intent = parse_relationship_intent(
+        "Which documents link to Hybrid Search Strategy and what do their "
+        "neighbors explain?"
+    )
+    assert intent is not None
+    assert intent.target == "Hybrid Search Strategy"
+
+
+def test_relationship_intent_supports_file_targets():
+    intent = parse_relationship_intent("Which files link to architecture.md?")
+    assert intent is not None
+    assert intent.target == "architecture.md"

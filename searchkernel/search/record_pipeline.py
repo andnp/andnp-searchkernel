@@ -1663,7 +1663,9 @@ class RecordSearchPipeline:
                 graph_store, graph_seeds, outgoing_plan, filters
             )
             incoming: dict[str, Sequence[GraphNeighbor]] = {}
-            if any(
+            if getattr(graph_store, "direction", None) != "both" and getattr(
+                graph_store, "_direction", None
+            ) != "both" and any(
                 callable(getattr(graph_store, name, None))
                 for name in ("incoming_neighbors", "incoming_neighbors_many")
             ):

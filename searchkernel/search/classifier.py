@@ -46,12 +46,12 @@ _OUTBOUND_RELATIONSHIP_PATTERN = re.compile(
 )
 _RELATIONSHIP_TARGET_PATTERNS = (
     (re.compile(
-        r"^(?:which|what)\s+(?:pages|documents|notes)\s+"
+        r"^(?:which|what)\s+(?:pages|documents|notes|files)\s+"
         r"are\s+neighbors\s+of\s+(?P<target>.+?)\s*[?.!]?$",
         re.IGNORECASE,
     ), "both"),
     (re.compile(
-        r"^(?:which|what)\s+(?:pages|documents|notes)\s+"
+        r"^(?:which|what)\s+(?:pages|documents|notes|files)\s+"
         r"(?:link(?:s)?\s+to(?:\s+or\s+depend(?:s)?\s+on)?|"
         r"depend(?:s)?\s+on(?:\s+or\s+link(?:s)?\s+to)?|"
         r"are\s+linked\s+from|point(?:s)?\s+to|"
@@ -60,7 +60,7 @@ _RELATIONSHIP_TARGET_PATTERNS = (
         re.IGNORECASE,
     ), "incoming"),
     (re.compile(
-        r"^show\s+me\s+(?:pages|documents|notes)\s+that\s+"
+        r"^show\s+me\s+(?:pages|documents|notes|files)\s+that\s+"
         r"(?:link(?:s)?\s+to|depend(?:s)?\s+on|embed(?:s|ded|ding)?|"
         r"transclud(?:e|es|ed|ing)?)\s+(?P<target>.+?)\s*[?.!]?$",
         re.IGNORECASE,
@@ -70,7 +70,7 @@ _RELATIONSHIP_TARGET_PATTERNS = (
         re.IGNORECASE,
     ), "incoming"),
     (re.compile(
-        r"^(?:which|what)\s+(?:pages|documents|notes)\s+does\s+"
+        r"^(?:which|what)\s+(?:pages|documents|notes|files)\s+does\s+"
         r"(?P<target>.+?)\s+(?:link(?:s)?\s+to|depend(?:s)?\s+on|"
         r"point(?:s)?\s+to|embed(?:s|ded|ding)?|"
         r"transclud(?:e|es|ed|ing)?)\s*[?.!]?$",
@@ -150,6 +150,13 @@ class RelationshipIntent:
 
 def parse_relationship_intent(query: str) -> RelationshipIntent | None:
     normalized = " ".join(query.strip().split()).strip(" .?!")
+    normalized = re.sub(
+        r"\s+and\s+what\s+do\s+their\s+neighbors?\s+explain$",
+        "",
+        normalized,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip(" .?!")
     for pattern, direction in _RELATIONSHIP_TARGET_PATTERNS:
         match = pattern.match(normalized)
         if match is not None:
