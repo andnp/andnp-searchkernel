@@ -248,6 +248,28 @@ class TestConcurrentWAL:
 
         assert not errors
 
+    def test_concurrent_close_is_idempotent_and_terminal(
+        self, db: DatabaseManager
+    ) -> None:
+        errors: list[Exception] = []
+
+        def shutdown() -> None:
+            try:
+                db.close()
+            except Exception as exc:  # noqa: BLE001 -- capture race failures
+                errors.append(exc)
+
+        threads = [threading.Thread(target=shutdown) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        assert not errors
+        with pytest.raises(RuntimeError, match="database manager is closed"):
+            db.get_connection()
+        db.close()
+
     def test_readers_dont_block_writers(self, db: DatabaseManager) -> None:
         read_errors: list[Exception] = []
         write_errors: list[Exception] = []
