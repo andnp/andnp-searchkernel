@@ -114,18 +114,21 @@ def test_keyword_retrieval_preserves_workspace_and_source_kind_parity(
     local.upsert(parity_records, "parity", 2)
     pg_vector.upsert(parity_records, "parity", 2)
 
-    filters = {"workspace_id": "workspace-a"}
+    filters = {"workspace_id": "workspace-a", "source_kinds": ["note"]}
     local_hits = local.search_keyword("deployment incident", 10, filters)
     pg_hits = pg_keyword.search("deployment incident", 10, filters)
     expected = {
         parity_records[0].storage_key,
-        parity_records[1].storage_key,
     }
 
     assert _keys(local_hits) == expected
     assert _keys(pg_hits) == expected
     assert _keys(local.search_keyword("deployment incident", 10)) == (
-        expected | {parity_records[2].storage_key}
+        {
+            parity_records[0].storage_key,
+            parity_records[1].storage_key,
+            parity_records[2].storage_key,
+        }
     )
 
 
