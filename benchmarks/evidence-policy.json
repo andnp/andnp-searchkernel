@@ -1,0 +1,8 @@
+{
+  "min_repetitions": 3,
+  "min_mean_recall_at_k": 0.8,
+  "min_mean_ndcg_at_k": 0.7357524458920353,
+  "min_mean_mrr": 0.7,
+  "min_mean_ap": 0.7166666666666666,
+  "max_latency_regression_ratio": null
+}

@@ -28,7 +28,13 @@ def load_labeled_fixture(path: Path) -> tuple[list[Record], GoldenSet]:
     return records, GoldenSet.from_dict(data)
 
 
-def evaluate_fixture(path: Path = DEFAULT_FIXTURE, *, k: int = 3):
+def evaluate_fixture(
+    path: Path = DEFAULT_FIXTURE,
+    *,
+    k: int = 3,
+    warmup_count: int = 2,
+    measured_repetitions: int = 5,
+):
     """Run labeled quality metrics against the local record backend."""
     records, golden_set = load_labeled_fixture(path)
     with LocalRecordBackend() as backend:
@@ -57,6 +63,8 @@ def evaluate_fixture(path: Path = DEFAULT_FIXTURE, *, k: int = 3):
             search,
             k=k,
             config=BenchmarkConfig(
+                warmup_count=warmup_count,
+                measured_repetitions=measured_repetitions,
                 corpus_version=corpus_version,
                 backend="sqlite-fts5",
                 metadata={"fixture": str(path)},
@@ -68,8 +76,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--k", type=int, default=3)
+    parser.add_argument("--warmup-count", type=int, default=2)
+    parser.add_argument("--repetitions", type=int, default=5)
     args = parser.parse_args()
-    report = evaluate_fixture(args.fixture, k=args.k)
+    report = evaluate_fixture(
+        args.fixture,
+        k=args.k,
+        warmup_count=args.warmup_count,
+        measured_repetitions=args.repetitions,
+    )
     json.dump(report.to_dict(), sys.stdout, indent=2)
     sys.stdout.write("\n")
 

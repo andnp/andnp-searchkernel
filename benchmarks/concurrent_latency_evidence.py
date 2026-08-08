@@ -40,13 +40,14 @@ def _run(
     k: int,
     concurrency: int,
     repetitions: int,
+    warmup_count: int,
 ) -> EvalReport:
     return run_eval(
         golden_set,
         search,
         k=k,
         config=BenchmarkConfig(
-            warmup_count=1,
+            warmup_count=warmup_count,
             measured_repetitions=repetitions,
             concurrency=concurrency,
             corpus_version="searchkernel-labeled-v1",
@@ -77,6 +78,7 @@ def measure_concurrent_latency(
     k: int = 3,
     repetitions: int = 3,
     concurrent_workers: int = 4,
+    warmup_count: int = 2,
 ) -> dict[str, Any]:
     """Return comparable serial/concurrent reports and observed deltas."""
     records, golden_set = load_labeled_fixture(fixture)
@@ -91,6 +93,7 @@ def measure_concurrent_latency(
                 k=k,
                 concurrency=1,
                 repetitions=repetitions,
+                warmup_count=warmup_count,
             )
             concurrent = _run(
                 golden_set,
@@ -98,6 +101,7 @@ def measure_concurrent_latency(
                 k=k,
                 concurrency=concurrent_workers,
                 repetitions=repetitions,
+                warmup_count=warmup_count,
             )
         finally:
             backend.close()
@@ -121,6 +125,7 @@ def main() -> None:
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--k", type=int, default=3)
     parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--warmup-count", type=int, default=2)
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
     json.dump(
@@ -129,6 +134,7 @@ def main() -> None:
             k=args.k,
             repetitions=args.repetitions,
             concurrent_workers=args.workers,
+            warmup_count=args.warmup_count,
         ),
         sys.stdout,
         indent=2,

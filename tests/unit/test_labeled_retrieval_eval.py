@@ -26,6 +26,9 @@ def test_labeled_fixture_evaluates_expected_local_retrieval() -> None:
     report = evaluate_fixture(FIXTURE)
 
     assert report.golden_set_size == 5
+    assert report.warmup_count == 2
+    assert report.measured_repetitions == 5
+    assert len(report.metrics) == 25
     assert report.mean_recall_at_k == 0.8
     assert report.slices["query_type:exact"].mean_recall_at_k == 1.0
     assert report.slices["tag:unrelated"].empty_result_rate == 1.0

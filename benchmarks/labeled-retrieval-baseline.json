@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "kind": "labeled-retrieval",
+  "corpus_version": "searchkernel-labeled-v1",
+  "k": 3,
+  "mean_recall_at_k": 0.8,
+  "mean_ndcg_at_k": 0.7357524458920353,
+  "mean_mrr": 0.7,
+  "mean_ap": 0.7166666666666666,
+  "latency_p95_ms": 0.4
+}
