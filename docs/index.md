@@ -9,6 +9,8 @@ short.
   composition, index records, and run a query.
 - [Core concepts](concepts.md) — understand record identity, source adapters,
   ingestion, search outcomes, and optional integrations.
+- [Lifecycle and ownership](lifecycle.md) — close local compositions and
+  distinguish owned from injected resources.
 - [Federated search](guides/federated-search.md) — combine compatible local or
   HTTP search sources and handle bounded partial results.
 
