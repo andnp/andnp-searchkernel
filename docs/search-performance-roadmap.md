@@ -286,6 +286,14 @@ threshold:
 5. CI uploads the labeled and concurrent JSON reports as
    `searchkernel-benchmark-evidence-${{ github.sha }}` for review.
 
+The readiness job repeats the labeled fixture with two warmups and five
+measured repetitions, validates the report schema, and compares stable quality
+metrics with `benchmarks/labeled-retrieval-baseline.json` using the thresholds
+in `benchmarks/evidence-policy.json`. The benchmark job separately publishes
+serial/concurrent observations and synthetic scale/resource evidence. Latency
+remains non-blocking by default because shared CI hardware is variable; a
+relative latency gate must be explicitly configured and justified.
+
 The reproducible entry points are
 `benchmarks/evaluate_labeled_retrieval.py` and
 `benchmarks/concurrent_latency_evidence.py`. Passing these checks supports the
