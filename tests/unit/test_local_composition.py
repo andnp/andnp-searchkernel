@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
@@ -54,3 +55,16 @@ async def test_public_local_composition_indexes_and_searches_records(
     assert hydrated is not None
     assert hydrated.storage_key == record.storage_key
     assert hydrated.body == record.body
+
+
+def test_local_composition_closes_owned_database(tmp_path) -> None:
+    composition = build_local_record_kernel(
+        tmp_path / "records.db",
+        embedding_provider=_FakeEmbeddingProvider(),
+    )
+    connection = composition.backend.db_manager.get_connection()
+
+    composition.close()
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        connection.execute("SELECT 1")

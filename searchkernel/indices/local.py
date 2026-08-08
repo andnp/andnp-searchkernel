@@ -19,7 +19,7 @@ import threading
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 
 import numpy as np
 
@@ -188,6 +188,7 @@ class LocalRecordBackend:
             raise ValueError("vector_snapshot_max_rows must be positive")
         if vector_snapshot_max_bytes < 1:
             raise ValueError("vector_snapshot_max_bytes must be positive")
+        self._owns_db = db_manager is None
         self._db = db_manager or (
             DatabaseManager(db_path, tuning=sqlite_tuning)
             if db_path is not None
@@ -214,6 +215,17 @@ class LocalRecordBackend:
     @property
     def db_manager(self) -> SQLiteDatabase:
         return self._db
+
+    def close(self) -> None:
+        """Close the database created by this backend, if it owns one."""
+        if self._owns_db:
+            self._db.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()
 
     def _initialize_schema(self) -> None:
         conn = self._db.get_connection()

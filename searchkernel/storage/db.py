@@ -156,7 +156,10 @@ class InMemorySQLiteDatabase:
         return self._connection
 
     def close(self) -> None:
-        self._connection.close()
+        try:
+            self._connection.close()
+        except sqlite3.ProgrammingError:
+            return
 
 
 class DatabaseManager:

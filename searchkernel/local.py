@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 from searchkernel.domain import Vector
 from searchkernel.indices import (
@@ -37,6 +38,16 @@ class LocalRecordKernel:
     graph_store: LocalGraphStore
     pipeline: RecordSearchPipeline
     kernel: SearchKernel
+
+    def close(self) -> None:
+        """Release resources owned by the local composition."""
+        self.backend.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()
 
 
 def build_local_record_kernel(
