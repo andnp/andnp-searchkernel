@@ -11,6 +11,8 @@ short.
   ingestion, search outcomes, and optional integrations.
 - [Lifecycle and ownership](lifecycle.md) — close local compositions and
   distinguish owned from injected resources.
+- [Retrieval evaluation](evaluation.md) — metric semantics, duplicate result
+  reporting, and labeled corpus contracts.
 - [Federated search](guides/federated-search.md) — combine compatible local or
   HTTP search sources and handle bounded partial results.
 
