@@ -1,6 +1,6 @@
 # Search Performance and Retrieval Quality Roadmap
 
-Status: 0.18.0 canonical record architecture with batch-first performance
+Status: 0.20.0 canonical record architecture with batch-first performance
 boundaries and v1 federation contracts
 
 Last reviewed: 2026-08-02
