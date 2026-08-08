@@ -148,6 +148,27 @@ class TestReRankScoring:
         }
         assert all(isinstance(score, float) for _, score in result)
 
+    def test_public_rerank_rejects_incomplete_scores(self, content_provider):
+        class IncompleteCrossEncoder:
+            def predict(self, sentences: list[tuple[str, str]]) -> list[float]:
+                del sentences
+                return [0.5]
+
+        reranker = ReRanker(
+            model_factory=lambda _: IncompleteCrossEncoder(),
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="Cross-encoder returned 1 scores for 2 candidates",
+        ):
+            reranker.rerank(
+                query="test query",
+                candidates=[("chunk_1", 0.9), ("chunk_2", 0.7)],
+                content_provider=content_provider,
+                top_n=10,
+            )
+
     def test_rerank_scores_relevant_higher(
         self, fake_cross_encoder: FakeCrossEncoder, content_provider, candidates
     ):

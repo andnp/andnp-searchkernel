@@ -156,6 +156,11 @@ class ReRanker:
         except CircuitBreakerOpen:
             logger.warning("ReRanker circuit open, returning original rankings")
             return candidates[:top_n]
+        if len(scores) != len(pairs):
+            raise ValueError(
+                f"Cross-encoder returned {len(scores)} scores for "
+                f"{len(pairs)} candidates"
+            )
 
         chunk_scores = [
             (chunk_id, _sigmoid(float(score)))
