@@ -6,16 +6,25 @@ with PGVectorStore, PGKeywordStore, and the connection pool protocol.
 
 import os
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
+from psycopg.errors import NotNullViolation
 
 from searchkernel.adapters.stores.pgvector import (
+    PGGraphStore,
     PGKeywordStore,
     PGVectorStore,
     Psycopg3Connection,
     _create_schema,
 )
-from searchkernel.domain import Record, RecordStatus
+from searchkernel.domain import (
+    GraphEdge,
+    GraphNeighbor,
+    Record,
+    RecordIdentity,
+    RecordStatus,
+)
 from tests.integration.conftest import pg_dsn_for_schema, pg_worker_schema
 
 
@@ -163,6 +172,75 @@ class TestPsycopg3KeywordStore:
         top_id = results[0][0]
         top_record = next(r for r in fixture_records if r.source_id == top_id)
         assert "machine" in top_record.body.lower()
+
+
+class TestPsycopg3GraphStore:
+    """Behavioral tests for graph writes through Psycopg3Connection."""
+
+    def test_upsert_retrieves_edges_and_repeated_updates_replace_weight(self, pg_conn):
+        """Repeated upserts keep one exact edge with its latest weight."""
+        store = PGGraphStore(pg_conn)
+        source = RecordIdentity("workspace-a", "note", "source")
+        target = RecordIdentity("workspace-a", "note", "target")
+
+        store.upsert_edges([GraphEdge(source, target, "related", 0.9)])
+        store.upsert_edges([GraphEdge(source, target, "related", 0.2)])
+
+        assert store.neighbors(source) == [
+            GraphNeighbor(target, "related", pytest.approx(0.2))
+        ]
+
+    def test_empty_graph_batches_are_noops(self, pg_conn):
+        """Empty graph batches leave rows and the graph epoch unchanged."""
+        store = PGGraphStore(pg_conn)
+        epoch = store.graph_epoch()
+
+        store.upsert_edges([])
+        store.delete_edges([])
+
+        assert store.graph_epoch() == epoch
+        assert pg_conn.execute_one("SELECT COUNT(*) FROM graph_edges;") == (0,)
+
+    def test_delete_removes_only_the_exact_edge_in_its_workspace(self, pg_conn):
+        """Exact deletion preserves other edge types and workspaces."""
+        store = PGGraphStore(pg_conn)
+        source_a = RecordIdentity("workspace-a", "note", "source")
+        target_a = RecordIdentity("workspace-a", "note", "target")
+        source_b = RecordIdentity("workspace-b", "note", "source")
+        target_b = RecordIdentity("workspace-b", "note", "target")
+        edges = [
+            GraphEdge(source_a, target_a, "related", 0.9),
+            GraphEdge(source_a, target_a, "links", 0.8),
+            GraphEdge(source_b, target_b, "related", 0.7),
+        ]
+        store.upsert_edges(edges)
+
+        store.delete_edges([edges[0]])
+
+        assert store.neighbors(source_a) == [
+            GraphNeighbor(target_a, "links", pytest.approx(0.8))
+        ]
+        assert store.neighbors(source_b) == [
+            GraphNeighbor(target_b, "related", pytest.approx(0.7))
+        ]
+
+    def test_failed_batch_rolls_back_all_graph_changes(self, pg_conn):
+        """A rejected batch leaves no partial edge or epoch mutation."""
+        store = PGGraphStore(pg_conn)
+        source = RecordIdentity("workspace-a", "note", "source")
+        target = RecordIdentity("workspace-a", "note", "target")
+        epoch = store.graph_epoch()
+
+        with pytest.raises(NotNullViolation):
+            store.upsert_edges(
+                [
+                    GraphEdge(source, target, "valid", 0.9),
+                    GraphEdge(source, target, cast(str, None), 0.8),
+                ]
+            )
+
+        assert store.graph_epoch() == epoch
+        assert store.neighbors(source) == []
 
 
 class TestPsycopg3ConnectionPool:

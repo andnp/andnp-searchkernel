@@ -1509,9 +1509,7 @@ class PGGraphStore:
                 )
                 for edge in edges
             ]
-            psycopg2.extras.execute_values(
-                cursor,
-                """
+            statement = """
                 INSERT INTO graph_edges (
                     source_workspace_id, source_kind, source_id,
                     target_workspace_id, target_kind, target_id,
@@ -1521,9 +1519,14 @@ class PGGraphStore:
                 ON CONFLICT ON CONSTRAINT graph_edges_identity_unique DO UPDATE SET
                     weight = EXCLUDED.weight,
                     updated_at = CURRENT_TIMESTAMP;
-                """,
-                rows,
-            )
+            """
+            if isinstance(self.conn_pool, Psycopg3Connection):
+                cursor.executemany(
+                    statement.replace("VALUES %s", "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"),
+                    rows,
+                )
+            else:
+                psycopg2.extras.execute_values(cursor, statement, rows)
 
             _POSTGRES_EPOCH_LANE.bump(cursor, graph=True)
             conn.commit()
