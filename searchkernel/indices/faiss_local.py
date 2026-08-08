@@ -8,7 +8,7 @@ import json
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
@@ -27,6 +27,9 @@ from searchkernel.utils.atomic_io import atomic_write_binary, atomic_write_json
 
 if TYPE_CHECKING:
     from searchkernel.indices.local import LocalRecordBackend
+
+
+FAISSSearchStrategy = Literal["exact", "approximate"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,19 +64,29 @@ class FAISSLocalVectorStore:
         backend: LocalRecordBackend,
         *,
         index_path: Path | None = None,
+        search_strategy: FAISSSearchStrategy = "exact",
         overfetch_multiplier: float = 4.0,
         max_scan_rounds: int = 4,
     ) -> None:
+        if search_strategy not in {"exact", "approximate"}:
+            raise ValueError(
+                "search_strategy must be exact or approximate"
+            )
         if overfetch_multiplier < 1.0:
             raise ValueError("overfetch_multiplier must be at least 1")
         if max_scan_rounds < 1:
             raise ValueError("max_scan_rounds must be positive")
         self._backend = backend
         self._index_path = index_path
+        self._search_strategy = search_strategy
         self._overfetch_multiplier = overfetch_multiplier
         self._max_scan_rounds = max_scan_rounds
         self._state_lock = threading.RLock()
         self._states: dict[tuple[str, int], _FAISSState] = {}
+
+    @property
+    def search_strategy(self) -> FAISSSearchStrategy:
+        return self._search_strategy
 
     def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
         self._backend.upsert(records, model_name, dim)
@@ -196,7 +209,15 @@ class FAISSLocalVectorStore:
     ) -> _FAISSState:
         import faiss
 
-        index = faiss.IndexIDMap2(faiss.IndexFlatIP(dim))
+        if self._search_strategy == "exact":
+            base_index = faiss.IndexFlatIP(dim)
+        else:
+            base_index = faiss.IndexHNSWFlat(
+                dim,
+                32,
+                faiss.METRIC_INNER_PRODUCT,
+            )
+        index = faiss.IndexIDMap2(base_index)
         ids: list[int] = []
         storage_keys: list[str] = []
         id_to_storage_key: dict[int, str] = {}
@@ -348,6 +369,7 @@ class FAISSLocalVectorStore:
                     "normalization_policy": NORMALIZATION_POLICY,
                     "encoder_namespace": state.encoder_namespace,
                     "dim": state.dim,
+                    "search_strategy": self._search_strategy,
                     "epoch": state.epoch,
                     "ids": list(state.ids),
                     "storage_keys": list(state.storage_keys),
@@ -384,6 +406,8 @@ class FAISSLocalVectorStore:
                 or metadata["normalization_policy"] != NORMALIZATION_POLICY
                 or metadata["encoder_namespace"] != model_name
                 or metadata["dim"] != dim
+                or metadata.get("search_strategy", "exact")
+                != self._search_strategy
                 or metadata["epoch"] != epoch
             ):
                 return None
