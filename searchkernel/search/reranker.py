@@ -13,7 +13,7 @@ Circuit breaker behavior:
 import logging
 import math
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Protocol, TypeGuard
 
 from searchkernel.utils.circuit_breaker import (
@@ -36,6 +36,9 @@ class ContentProvider(Protocol):
 
 class CrossEncoderModelProtocol(Protocol):
     def predict(self, inputs: list[tuple[str, str]]) -> object: ...
+
+
+ModelFactory = Callable[[str], CrossEncoderModelProtocol]
 
 
 class CrossEncoderProtocol(Protocol):
@@ -66,8 +69,13 @@ class _CrossEncoderAdapter:
 
 
 class ReRanker:
-    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+    def __init__(
+        self,
+        model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        model_factory: ModelFactory | None = None,
+    ):
         self._model_name = model_name
+        self._model_factory = model_factory
         self._model: CrossEncoderProtocol | None = None
         self._model_lock = threading.Lock()
 
@@ -98,6 +106,8 @@ class ReRanker:
                 return
 
             def load_model():
+                if self._model_factory is not None:
+                    return _CrossEncoderAdapter(self._model_factory(self._model_name))
                 from sentence_transformers import CrossEncoder
 
                 return _CrossEncoderAdapter(CrossEncoder(self._model_name))
