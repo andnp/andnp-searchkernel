@@ -62,20 +62,16 @@ def ndcg_at_k(
             gain = gains.get(result_id, 1.0) if gains else 1.0
             dcg += gain / math.log2(rank + 1)
 
-    # Compute ideal DCG (IDCG): order relevant items at top
-    idcg = 0.0
-    for i in range(min(k, len(relevant_ids))):
-        rank = i + 1
-        if gains:
-            # Use highest gains for ideal ranking
-            sorted_gains = sorted(gains.values(), reverse=True)
-            if i < len(sorted_gains):
-                gain = sorted_gains[i]
-            else:
-                gain = 1.0
-        else:
-            gain = 1.0
-        idcg += gain / math.log2(rank + 1)
+    # Compute ideal DCG (IDCG) from the labeled relevant universe only.
+    ideal_gains = (
+        [gains.get(result_id, 1.0) for result_id in relevant_set]
+        if gains
+        else [1.0] * len(relevant_set)
+    )
+    idcg = sum(
+        gain / math.log2(rank + 1)
+        for rank, gain in enumerate(sorted(ideal_gains, reverse=True)[:k], start=1)
+    )
 
     if idcg == 0.0:
         return 0.0
