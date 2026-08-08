@@ -20,7 +20,7 @@ short.
 
 ## Version scope
 
-These pages describe the `0.6.0` API. The supported query model is
+These pages describe the `0.18.0` API. The supported query model is
 record-oriented: source adapters produce `Record` values, stores return
 complete `RecordIdentity` values, and query results are
 `RecordSearchOutcome` values. The package is still pre-1.0, so public APIs can

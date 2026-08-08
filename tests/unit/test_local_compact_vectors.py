@@ -274,6 +274,38 @@ def test_faiss_batches_candidate_validation_and_preserves_filters(
     assert not any("WHERE r.storage_key = ?" in query for query in queries)
 
 
+def test_faiss_exact_filtered_search_does_not_under_return_candidates(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("faiss")
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record("blocked-1", [1.0, 0.0], workspace_id="other"),
+        _record("blocked-2", [0.99, 0.1], workspace_id="other"),
+        _record("blocked-3", [0.97, 0.24], workspace_id="other"),
+        _record("eligible-1", [0.9, 0.4358899]),
+        _record("eligible-2", [0.8, 0.6]),
+    ]
+    backend.upsert(records, "model", 2)
+    store = FAISSLocalVectorStore(
+        backend,
+        index_path=tmp_path / "faiss",
+        overfetch_multiplier=1.0,
+        max_scan_rounds=1,
+    )
+
+    hits = store.search(
+        [1.0, 0.0],
+        2,
+        model_name="model",
+        dim=2,
+        filters={"workspace_id": "workspace"},
+    )
+
+    assert len(hits) == 2
+    assert [hit.source_id for hit in hits] == ["eligible-1", "eligible-2"]
+
+
 @pytest.mark.asyncio
 async def test_async_vector_search_offloads_blocking_work() -> None:
     store = LocalVectorStore(LocalRecordBackend())

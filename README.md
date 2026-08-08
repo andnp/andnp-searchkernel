@@ -5,7 +5,7 @@ keyword, vector, and graph search systems. Applications map their native data
 to canonical `Record` values, choose the storage and provider adapters they
 need, and keep source-specific lifecycle logic outside the kernel.
 
-The current release is `0.6.0`. It supports canonical record search,
+The current release is `0.18.0`. It supports canonical record search,
 checkpointed record ingestion, optional local/Postgres/FAISS/provider
 integrations, and bounded federation across compatible search sources. The
 API is still evolving before the first stable major release.
