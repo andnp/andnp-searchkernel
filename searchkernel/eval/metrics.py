@@ -8,6 +8,16 @@ import math
 from collections.abc import Sequence
 
 
+def _normalize_inputs(
+    ranked_ids: Sequence[str],
+    relevant_ids: set[str] | Sequence[str],
+    k: int | None = None,
+) -> tuple[tuple[str, ...], frozenset[str]]:
+    if k is not None and k < 0:
+        raise ValueError("k must be non-negative")
+    return tuple(ranked_ids), frozenset(relevant_ids)
+
+
 def recall_at_k(ranked_ids: Sequence[str], relevant_ids: set[str] | Sequence[str], k: int) -> float:
     """Compute recall@k: fraction of relevant items in top-k results.
 
@@ -19,13 +29,13 @@ def recall_at_k(ranked_ids: Sequence[str], relevant_ids: set[str] | Sequence[str
     Returns:
         Recall@k in [0, 1]. Returns 0 if no relevant items exist.
     """
-    if not relevant_ids:
+    ranked, relevant = _normalize_inputs(ranked_ids, relevant_ids, k)
+    if not relevant:
         return 0.0
 
-    relevant_set = set(relevant_ids)
-    top_k = set(ranked_ids[:k])
-    hits = len(top_k & relevant_set)
-    return hits / len(relevant_set)
+    top_k = set(ranked[:k])
+    hits = len(top_k & relevant)
+    return hits / len(relevant)
 
 
 def ndcg_at_k(
@@ -49,24 +59,23 @@ def ndcg_at_k(
     Returns:
         nDCG@k in [0, 1].
     """
-    if not relevant_ids:
+    ranked, relevant = _normalize_inputs(ranked_ids, relevant_ids, k)
+    if not relevant:
         return 0.0
-
-    relevant_set = set(relevant_ids)
 
     # Compute DCG@k
     dcg = 0.0
-    for i, result_id in enumerate(ranked_ids[:k]):
+    for i, result_id in enumerate(ranked[:k]):
         rank = i + 1  # 1-based ranking
-        if result_id in relevant_set:
+        if result_id in relevant:
             gain = gains.get(result_id, 1.0) if gains else 1.0
             dcg += gain / math.log2(rank + 1)
 
     # Compute ideal DCG (IDCG) from the labeled relevant universe only.
     ideal_gains = (
-        [gains.get(result_id, 1.0) for result_id in relevant_set]
+        [gains.get(result_id, 1.0) for result_id in relevant]
         if gains
-        else [1.0] * len(relevant_set)
+        else [1.0] * len(relevant)
     )
     idcg = sum(
         gain / math.log2(rank + 1)
@@ -89,12 +98,12 @@ def mrr(ranked_ids: Sequence[str], relevant_ids: set[str] | Sequence[str]) -> fl
     Returns:
         MRR in [0, 1]. Returns 0 if no relevant item is found.
     """
-    if not relevant_ids:
+    ranked, relevant = _normalize_inputs(ranked_ids, relevant_ids)
+    if not relevant:
         return 0.0
 
-    relevant_set = set(relevant_ids)
-    for i, result_id in enumerate(ranked_ids):
-        if result_id in relevant_set:
+    for i, result_id in enumerate(ranked):
+        if result_id in relevant:
             return 1.0 / (i + 1)  # 1-based ranking
 
     return 0.0
@@ -110,16 +119,16 @@ def average_precision(ranked_ids: Sequence[str], relevant_ids: set[str] | Sequen
     Returns:
         AP in [0, 1].
     """
-    if not relevant_ids:
+    ranked, relevant = _normalize_inputs(ranked_ids, relevant_ids)
+    if not relevant:
         return 0.0
 
-    relevant_set = set(relevant_ids)
-    num_relevant = len(relevant_set)
+    num_relevant = len(relevant)
 
     ap = 0.0
     num_hits = 0
-    for i, result_id in enumerate(ranked_ids):
-        if result_id in relevant_set:
+    for i, result_id in enumerate(ranked):
+        if result_id in relevant:
             num_hits += 1
             precision_at_i = num_hits / (i + 1)
             ap += precision_at_i
