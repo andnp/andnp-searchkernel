@@ -71,16 +71,58 @@ jobs:
       - name: Generate retrieval evidence
         run: |
           mkdir -p artifacts
-          uv run python benchmarks/evaluate_labeled_retrieval.py \
-            --k 3 > artifacts/labeled-retrieval.json
           uv run python benchmarks/concurrent_latency_evidence.py \
-            --k 3 --repetitions 3 --workers 4 > artifacts/concurrent-latency.json
+            --k 3 --warmup-count 2 --repetitions 5 --workers 4 \
+            > artifacts/concurrent-latency.json
+          uv run python benchmarks/local_scale_gate.py \
+            --config benchmarks/local_scale_gate.json \
+            --work-dir artifacts/local-scale-work \
+            --output artifacts/local-scale.json
 
       - name: Upload retrieval evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: searchkernel-benchmark-evidence-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+
+  readiness-evidence:
+    name: Retrieval readiness gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Generate labeled readiness evidence
+        run: |
+          mkdir -p artifacts
+          uv run python benchmarks/evaluate_labeled_retrieval.py \
+            --k 3 --warmup-count 2 --repetitions 5 \
+            > artifacts/labeled-retrieval.json
+
+      - name: Validate readiness artifact and compare baseline
+        run: >-
+          uv run python benchmarks/validate_evidence.py
+          artifacts/labeled-retrieval.json
+          --baseline benchmarks/labeled-retrieval-baseline.json
+          --policy benchmarks/evidence-policy.json
+
+      - name: Upload readiness evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: searchkernel-readiness-evidence-${{ github.sha }}
           path: artifacts/
           if-no-files-found: error
 
