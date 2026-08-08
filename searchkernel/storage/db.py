@@ -177,6 +177,7 @@ class DatabaseManager:
         self._connections: dict[int, sqlite3.Connection] = {}
         self._connections_lock = threading.Lock()
         self._generation = 0
+        self._closed = False
         db_path.parent.mkdir(parents=True, exist_ok=True)
         # Initialize schema via a temporary connection
         conn = self._open_connection()
@@ -197,12 +198,12 @@ class DatabaseManager:
 
     def get_connection(self) -> sqlite3.Connection:
         """Return a per-thread SQLite connection."""
-        conn = getattr(self._local, "connection", None)
-        if conn is not None and getattr(self._local, "generation", -1) == self._generation:
-            return conn
-        self._local.connection = None
-        thread_id = threading.get_ident()
         with self._connections_lock:
+            conn = getattr(self._local, "connection", None)
+            if conn is not None and getattr(self._local, "generation", -1) == self._generation:
+                return conn
+            self._local.connection = None
+            thread_id = threading.get_ident()
             conn = self._connections.get(thread_id)
             if conn is None:
                 conn = self._open_connection()
@@ -285,6 +286,9 @@ class DatabaseManager:
 
     def close(self) -> None:
         with self._connections_lock:
+            if self._closed:
+                return
+            self._closed = True
             connections = tuple(self._connections.values())
             self._connections.clear()
             self._generation += 1
