@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from searchkernel.indexing import discovery
-from searchkernel.indexing.discovery import discover_files
+from searchkernel.indexing.discovery import discover_files, discover_files_multi_root
 
 
 @pytest.fixture
@@ -186,3 +186,17 @@ class TestDiscoverFiles:
 
         assert str(docs / "linked.md") in files
         assert str(docs / "linked-dir" / "nested.md") not in files
+
+    def test_multi_root_discovery_deduplicates_and_skips_missing_roots(self, tmp_path):
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        (first / "one.md").write_text("one")
+        (second / "two.md").write_text("two")
+
+        files = discover_files_multi_root(
+            [first, second, first, tmp_path / "missing"],
+        )
+
+        assert files == sorted([str(first / "one.md"), str(second / "two.md")])
