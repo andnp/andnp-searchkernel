@@ -1654,6 +1654,50 @@ class RecordSearchPipeline:
         plan: QueryPlan,
         filters: Mapping[str, object],
     ) -> dict[str, Sequence[GraphNeighbor]]:
+        if plan.signals.graph_direction == "both":
+            outgoing_plan = dataclass_replace(
+                plan,
+                signals=dataclass_replace(plan.signals, graph_direction="outgoing"),
+            )
+            outgoing = await self._load_graph_neighbors(
+                graph_store, graph_seeds, outgoing_plan, filters
+            )
+            incoming: dict[str, Sequence[GraphNeighbor]] = {}
+            if any(
+                callable(getattr(graph_store, name, None))
+                for name in ("incoming_neighbors", "incoming_neighbors_many")
+            ):
+                incoming_plan = dataclass_replace(
+                    plan,
+                    signals=dataclass_replace(
+                        plan.signals, graph_direction="incoming"
+                    ),
+                )
+                incoming = await self._load_graph_neighbors(
+                    graph_store, graph_seeds, incoming_plan, filters
+                )
+            merged: dict[str, dict[tuple[str, str], GraphNeighbor]] = {}
+            for values in (outgoing, incoming):
+                for seed_key, neighbors in values.items():
+                    by_identity = merged.setdefault(seed_key, {})
+                    for neighbor in neighbors:
+                        key = (neighbor.identity.storage_key, neighbor.edge_type)
+                        previous = by_identity.get(key)
+                        if previous is None or neighbor.weight > previous.weight:
+                            by_identity[key] = neighbor
+            return {
+                seed_key: tuple(
+                    sorted(
+                        neighbors.values(),
+                        key=lambda neighbor: (
+                            -neighbor.weight,
+                            neighbor.identity.storage_key,
+                            neighbor.edge_type,
+                        ),
+                    )
+                )
+                for seed_key, neighbors in merged.items()
+            }
         identities = [candidate.identity for candidate in graph_seeds]
         incoming = plan.signals.graph_direction == "incoming"
         neighbors_many = getattr(
