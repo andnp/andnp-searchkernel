@@ -983,10 +983,11 @@ class LocalRecordBackend:
     ) -> tuple[list[str], list[Any]]:
         filters = filters or {}
         statuses = sorted(LocalRecordBackend._status_values(filters))
-        clauses = ["r.status IN ({})".format(
-            ", ".join("?" for _ in statuses)
-        )]
-        parameters: list[Any] = statuses
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        LocalRecordBackend._append_keyword_in_filter(
+            clauses, parameters, "r.status", statuses
+        )
 
         workspace_id = filters.get("workspace_id")
         if workspace_id is not None:
@@ -1002,10 +1003,9 @@ class LocalRecordBackend:
             source_kinds = LocalRecordBackend._filter_values(source_kinds)
             if not source_kinds:
                 return ["0"], []
-            clauses.append("r.source_kind IN ({})".format(
-                ", ".join("?" for _ in source_kinds)
-            ))
-            parameters.extend(source_kinds)
+            LocalRecordBackend._append_keyword_in_filter(
+                clauses, parameters, "r.source_kind", source_kinds
+            )
 
         project_values = filters.get("project_ids")
         if project_values is None:
@@ -1019,11 +1019,12 @@ class LocalRecordBackend:
             ):
                 return ["0"], []
             if project_values:
-                clauses.append(
-                    "CAST(json_extract(r.metadata, '$.project_id') AS TEXT) "
-                    "IN ({})".format(", ".join("?" for _ in project_values))
+                LocalRecordBackend._append_keyword_in_filter(
+                    clauses,
+                    parameters,
+                    "CAST(json_extract(r.metadata, '$.project_id') AS TEXT)",
+                    [str(value) for value in project_values],
                 )
-                parameters.extend(str(value) for value in project_values)
 
         excluded_projects = filters.get("excluded_projects")
         if excluded_projects is None:
@@ -1044,11 +1045,20 @@ class LocalRecordBackend:
             candidate_keys = sorted(candidate_storage_keys(candidate_keys))
             if not candidate_keys:
                 return ["0"], []
-            clauses.append("r.storage_key IN ({})".format(
-                ", ".join("?" for _ in candidate_keys)
-            ))
-            parameters.extend(candidate_keys)
+            LocalRecordBackend._append_keyword_in_filter(
+                clauses, parameters, "r.storage_key", candidate_keys
+            )
         return clauses, parameters
+
+    @staticmethod
+    def _append_keyword_in_filter(
+        clauses: list[str],
+        parameters: list[Any],
+        column: str,
+        values: Sequence[Any],
+    ) -> None:
+        clauses.append(f"{column} IN ({', '.join('?' for _ in values)})")
+        parameters.extend(values)
 
     def _search_keyword_fts(
         self,
