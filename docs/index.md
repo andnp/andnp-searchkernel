@@ -7,6 +7,8 @@ short.
 
 - [Getting started](getting-started.md) — install the package, create a local
   composition, index records, and run a query.
+- [End-to-end checks](e2e.md) — run the deterministic local restart journey and
+  understand optional environment gates.
 - [Core concepts](concepts.md) — understand record identity, source adapters,
   ingestion, search outcomes, and optional integrations.
 - [Lifecycle and ownership](lifecycle.md) — close local compositions and
