@@ -189,7 +189,9 @@ class LocalRecordBackend:
             raise ValueError("vector_snapshot_max_rows must be positive")
         if vector_snapshot_max_bytes < 1:
             raise ValueError("vector_snapshot_max_bytes must be positive")
-        self._owns_db = db_manager is None
+        # An injected manager belongs to the caller; only managers created by
+        # this backend may be closed by the backend.
+        self._owns_database = db_manager is None
         self._db = db_manager or (
             DatabaseManager(db_path, tuning=sqlite_tuning)
             if db_path is not None
@@ -219,7 +221,7 @@ class LocalRecordBackend:
 
     def close(self) -> None:
         """Close the database created by this backend, if it owns one."""
-        if self._owns_db:
+        if self._owns_database:
             self._db.close()
 
     def __enter__(self) -> Self:
