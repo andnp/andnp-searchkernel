@@ -1,5 +1,6 @@
 """Unit tests for semantic checkpoint tracking."""
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -280,6 +281,30 @@ class TestGetSemanticCompletionStatus:
 
 class TestBootstrapCheckpointLoadWithSemantic:
     """Test loading checkpoints with semantic fields."""
+
+    def test_load_checkpoint_migrates_legacy_payload_without_new_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_path = Path(tmpdir)
+            (index_path / "bootstrap.checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": CURRENT_BOOTSTRAP_CHECKPOINT_SCHEMA_VERSION,
+                        "generation": "legacy-generation",
+                        "complete": False,
+                        "targets": [
+                            {"relative_path": "file.md", "mtime_ns": 1, "size": 2}
+                        ],
+                        "completed": [],
+                    }
+                )
+            )
+
+            loaded = load_bootstrap_checkpoint(index_path)
+
+        assert loaded is not None
+        assert loaded.semantic_encoder_namespace is None
+        assert loaded.semantic_completed == {}
+        assert loaded.availability is None
 
     def test_load_checkpoint_with_semantic_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
