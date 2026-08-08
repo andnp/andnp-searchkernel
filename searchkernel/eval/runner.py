@@ -93,6 +93,7 @@ class MetricSnapshot:
     empty_result: bool = False
     source_coverage: float | None = None
     stage_timings_ms: dict[str, float] = field(default_factory=dict)
+    duplicate_result_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -202,6 +203,7 @@ class EvalReport:
                     "empty_result": metric.empty_result,
                     "source_coverage": metric.source_coverage,
                     "stage_timings_ms": metric.stage_timings_ms,
+                    "duplicate_result_ids": metric.duplicate_result_ids,
                 }
                 for metric in self.metrics
             ],
@@ -416,6 +418,12 @@ def _snapshot(
 ) -> MetricSnapshot:
     """Compute relevance and slice metadata for one measured query."""
     ranked_ids = list(execution.ids)
+    seen_ids: set[str] = set()
+    duplicate_result_ids: list[str] = []
+    for result_id in ranked_ids:
+        if result_id in seen_ids and result_id not in duplicate_result_ids:
+            duplicate_result_ids.append(result_id)
+        seen_ids.add(result_id)
     relevant_ids = entry.relevant_ids
     source_map = {
         result_id: source
@@ -452,6 +460,7 @@ def _snapshot(
             for name, span in trace.spans.items()
             if span.duration_ms is not None and name != "search"
         },
+        duplicate_result_ids=duplicate_result_ids,
     )
 
 
