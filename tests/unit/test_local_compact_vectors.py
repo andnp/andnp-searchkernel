@@ -306,6 +306,64 @@ def test_faiss_exact_filtered_search_does_not_under_return_candidates(
     assert [hit.source_id for hit in hits] == ["eligible-1", "eligible-2"]
 
 
+@pytest.mark.parametrize(
+    "filters",
+    [
+        {},
+        {"workspace_id": "workspace"},
+        {"project_id": "project-a"},
+        {"statuses": [RecordStatus.ARCHIVED]},
+        {"paths": ["docs/a.md"]},
+    ],
+)
+def test_faiss_exact_search_matches_local_filter_parity(
+    tmp_path: Path,
+    filters: dict[str, object],
+) -> None:
+    pytest.importorskip("faiss")
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record(
+            "a",
+            [1.0, 0.0],
+            metadata={"project_id": "project-a", "file_path": "docs/a.md"},
+        ),
+        _record(
+            "b",
+            [0.9, 0.4358899],
+            metadata={"project_id": "project-b", "file_path": "docs/b.md"},
+        ),
+        _record(
+            "c",
+            [0.8, 0.6],
+            workspace_id="other",
+            metadata={"project_id": "project-a", "file_path": "docs/c.md"},
+        ),
+        _record(
+            "archived",
+            [0.7, 0.7141428],
+            status=RecordStatus.ARCHIVED,
+            metadata={"project_id": "project-a", "file_path": "docs/a.md"},
+        ),
+    ]
+    backend.upsert(records, "model", 2)
+    store = FAISSLocalVectorStore(backend, index_path=tmp_path / "faiss")
+
+    expected = backend.search_vector(
+        [1.0, 0.0], 10, model_name="model", dim=2, filters=filters
+    )
+    actual = store.search(
+        [1.0, 0.0], 10, model_name="model", dim=2, filters=filters
+    )
+
+    assert [hit.source_id for hit in actual] == [
+        hit.source_id for hit in expected
+    ]
+    assert [hit.score for hit in actual] == pytest.approx(
+        [hit.score for hit in expected]
+    )
+
+
 @pytest.mark.asyncio
 async def test_async_vector_search_offloads_blocking_work() -> None:
     store = LocalVectorStore(LocalRecordBackend())

@@ -14,9 +14,18 @@ class _FakeEmbeddingProvider:
         return [[1.0, 0.0] for _ in texts]
 
 
+@pytest.fixture
+def local_composition(tmp_path):
+    with build_local_record_kernel(
+        tmp_path / "records.db",
+        embedding_provider=_FakeEmbeddingProvider(),
+    ) as composition:
+        yield composition
+
+
 @pytest.mark.asyncio
 async def test_public_local_composition_indexes_and_searches_records(
-    tmp_path, monkeypatch
+    local_composition, monkeypatch
 ) -> None:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
     record = Record(
@@ -28,10 +37,7 @@ async def test_public_local_composition_indexes_and_searches_records(
         created_at=timestamp,
         updated_at=timestamp,
     )
-    composition = build_local_record_kernel(
-        tmp_path / "records.db",
-        embedding_provider=_FakeEmbeddingProvider(),
-    )
+    composition = local_composition
 
     composition.keyword_store.index([record])
     batch_calls = []
