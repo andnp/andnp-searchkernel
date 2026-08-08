@@ -1,3 +1,5 @@
+import pytest
+
 from searchkernel.indexing.runtime_readiness import (
     SearchAvailability,
     can_refresh_loaded_indices,
@@ -136,3 +138,39 @@ def test_backfilling_lexical_stage_is_serving_but_not_fully_ready():
 
     assert availability.can_serve_queries() is True
     assert availability.is_fully_ready() is False
+
+
+@pytest.mark.parametrize(
+    ("availability", "queryable", "fully_ready"),
+    [
+        (
+            SearchAvailability(
+                lexical="complete",
+                graph="complete",
+                semantic_coarse="backfilling",
+                semantic_fine="unavailable",
+            ),
+            True,
+            False,
+        ),
+        (
+            SearchAvailability(
+                lexical="complete",
+                graph="complete",
+                semantic_coarse="complete",
+                semantic_fine="complete",
+            ),
+            True,
+            True,
+        ),
+    ],
+)
+def test_restart_snapshot_preserves_queryable_and_full_readiness(
+    availability: SearchAvailability,
+    queryable: bool,
+    fully_ready: bool,
+):
+    restored = SearchAvailability.from_dict(availability.to_dict())
+
+    assert restored.can_serve_queries() is queryable
+    assert restored.is_fully_ready() is fully_ready
