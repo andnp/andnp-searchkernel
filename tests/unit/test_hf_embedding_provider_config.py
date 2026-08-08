@@ -28,6 +28,11 @@ class _InvalidDimensionModel(_FakeModel):
         return None
 
 
+class _NonFiniteModel(_FakeModel):
+    def encode(self, texts, **kwargs):
+        return np.full((len(texts), 1), np.nan)
+
+
 def test_embedding_batch_size_is_used_for_documents_and_queries() -> None:
     with patch("sentence_transformers.SentenceTransformer", _FakeModel):
         provider = HuggingFaceEmbeddingProvider(batch_size=4)
@@ -71,3 +76,11 @@ def test_embedding_model_dimension_is_required() -> None:
         pytest.raises(RuntimeError, match="positive dimension"),
     ):
         HuggingFaceEmbeddingProvider()
+
+
+def test_embedding_vectors_must_be_finite() -> None:
+    with patch("sentence_transformers.SentenceTransformer", _NonFiniteModel):
+        provider = HuggingFaceEmbeddingProvider()
+
+    with pytest.raises(RuntimeError, match="non-finite"):
+        provider.embed(["document"])

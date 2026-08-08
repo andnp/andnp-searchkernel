@@ -169,6 +169,16 @@ def test_embed_rejects_wrong_dimension():
             provider.embed(["x"])
 
 
+def test_embed_rejects_non_finite_values():
+    provider = OllamaEmbeddingProvider("qwen3-embedding:0.6b", dim=2)
+    with mock.patch("httpx.Client.post") as mock_post:
+        mock_post.return_value = _mock_response(
+            {"embeddings": [[0.1, float("nan")]]}
+        )
+        with pytest.raises(RuntimeError, match="invalid embedding 0"):
+            provider.embed(["x"])
+
+
 def test_context_manager_closes_http_client():
     with mock.patch("httpx.Client") as client_type:
         provider = OllamaEmbeddingProvider("qwen3-embedding:0.6b", dim=2)
