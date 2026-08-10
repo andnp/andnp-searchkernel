@@ -1792,6 +1792,71 @@ async def test_artifact_keyword_confidence_skips_embedding() -> None:
     assert "vector:artifact_keyword_confident" in outcome.diagnostics
 
 
+async def test_artifact_eligibility_policy_approves_with_query_context() -> None:
+    contexts: list[RecordSearchQueryContext] = []
+
+    def eligible(
+        ranking: Sequence[RecordHit], context: RecordSearchQueryContext
+    ) -> bool:
+        assert [hit.identity.source_id for hit in ranking] == ["a"]
+        contexts.append(context)
+        return context.query == "src/search_kernel.py" and context.limit == 1
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        vector_store=FakeVectorStore([("a", 0.9)]),
+        embedding_provider=FakeEmbedder(),
+        hydrator=_hydrator({"a": _record("a")}),
+        policy=RecordSearchPolicy(query_candidate_set_eligible=eligible),
+    )
+
+    await pipeline.async_search("src/search_kernel.py", limit=1)
+    await pipeline.async_search("query", limit=1)
+
+    assert len(contexts) == 1
+    assert contexts[0]["statuses"] == ["active"]
+
+
+async def test_artifact_eligibility_policy_veto_keeps_vector_lane() -> None:
+    class CountingEmbedder:
+        model_name = "fake-model"
+        dim = 2
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def embed_query(self, query: str) -> list[float]:
+            self.calls += 1
+            return [1.0, 0.0]
+
+    embedder = CountingEmbedder()
+    vector_store = FakeVectorStore([("vector", 0.9)])
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("keyword", 1.0)]),
+        vector_store=vector_store,
+        embedding_provider=embedder,
+        hydrator=_hydrator(
+            {"keyword": _record("keyword"), "vector": _record("vector")}
+        ),
+        policy=RecordSearchPolicy(
+            query_candidate_set_eligible=lambda ranking, context: False
+        ),
+    )
+
+    outcome = await pipeline.async_search("src/search_kernel.py", limit=1)
+
+    assert embedder.calls == 1
+    assert vector_store.filters == [
+        {
+            "statuses": ["active"],
+            "candidate_storage_keys": [
+                RecordIdentity(None, "fake", "keyword").storage_key
+            ],
+        }
+    ]
+    assert "vector:artifact_keyword_ineligible" in outcome.diagnostics
+
+
 async def test_artifact_keyword_results_bound_vector_acquisition() -> None:
     class AnyEmbedder(FakeEmbedder):
         def embed_query(self, query: str) -> list[float]:
