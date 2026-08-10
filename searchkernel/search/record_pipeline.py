@@ -141,6 +141,9 @@ class RecordSearchPolicy:
     query_candidate_filter: (
         Callable[[RecordSearchCandidate, RecordSearchQueryContext], bool] | None
     ) = None
+    query_candidate_set_eligible: (
+        Callable[[Sequence[RecordHit], RecordSearchQueryContext], bool] | None
+    ) = None
     vector_candidate_ids: (
         Callable[
             [Sequence[RecordHit], RecordSearchQueryContext],
@@ -478,10 +481,22 @@ class RecordSearchPipeline:
                 )
                 if keyword_result is not None:
                     rankings["keyword"] = keyword_result
-                if _artifact_results_are_confident(
+                artifact_confident = _artifact_results_are_confident(
                     rankings.get("keyword", ()),
                     requested_limit=limit,
                     threshold=self._config.artifact_confidence_threshold,
+                )
+                candidate_set_eligible = (
+                    self._policy.query_candidate_set_eligible
+                    if artifact_confident
+                    else None
+                )
+                if artifact_confident and (
+                    candidate_set_eligible is None
+                    or candidate_set_eligible(
+                        rankings.get("keyword", ()),
+                        query_context,
+                    )
                 ):
                     plan = dataclass_replace(
                         plan,
@@ -492,6 +507,8 @@ class RecordSearchPipeline:
                         ),
                     )
                     diagnostics.append("vector:artifact_keyword_confident")
+                elif artifact_confident:
+                    diagnostics.append("vector:artifact_keyword_ineligible")
 
             if plan.vector_enabled and plan.signals.artifact is False and (
                 self._policy.vector_candidate_ids is not None
