@@ -78,6 +78,33 @@ cross-query probability. The pipeline defaults to reciprocal-rank fusion;
 `RecordSearchConfig(fusion_mode="calibrated")` opts into per-lane score
 calibration before hybrid fusion.
 
+### Eligibility-aware artifact retrieval
+
+Artifact-shaped queries can use a confident keyword ranking to suppress vector
+retrieval. Applications with additional downstream eligibility rules can
+provide `RecordSearchPolicy.query_candidate_set_eligible` to allow that
+shortcut only when the keyword candidate set can satisfy those rules:
+
+```python
+from searchkernel import RecordHit, RecordSearchPolicy, RecordSearchQueryContext
+
+def eligible(
+    candidates: list[RecordHit], context: RecordSearchQueryContext
+) -> bool:
+    return all(candidate.identity.workspace_id == context["workspace_id"]
+               for candidate in candidates)
+
+policy = RecordSearchPolicy(query_candidate_set_eligible=eligible)
+```
+
+The callback receives raw keyword hits and the read-only query context only
+after the keyword ranking meets the artifact confidence threshold. Returning
+`True` permits vector suppression; returning `False` keeps vector retrieval
+enabled while retaining the normal keyword-bounded candidate set. If no
+callback is supplied, the existing artifact shortcut remains unchanged. The
+callback should be deterministic and account for all application-owned
+eligibility rules that affect whether the requested result limit can be met.
+
 ## Stores and providers are injected
 
 The record pipeline can combine the following contracts:
