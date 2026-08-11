@@ -23,6 +23,9 @@ short.
 - [Search performance and retrieval roadmap](search-performance-roadmap.md) —
   current validation evidence, invariants, performance limits, and future
   engineering work.
+- [SearchKernel improvement design](searchkernel-improvement-design.md) —
+  dependency-ordered design for indexing correctness, retrieval quality,
+  backend parity, evaluation, and scale.
 
 ## Version scope
 
