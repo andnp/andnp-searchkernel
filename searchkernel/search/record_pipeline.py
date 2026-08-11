@@ -744,6 +744,7 @@ class RecordSearchPipeline:
                     candidates,
                     cache_diagnostics,
                 )
+            raw_pre_fusion_overlap = _raw_pre_fusion_overlap(rankings, failures)
 
         assert candidates is not None
         result_limit = resolve_adaptive_result_limit(
@@ -843,7 +844,6 @@ class RecordSearchPipeline:
                 }
             )
 
-        raw_pre_fusion_overlap = _raw_pre_fusion_overlap(rankings, failures)
         return RecordSearchOutcome(
             results=tuple(hydrated),
             failures=tuple(failures),
