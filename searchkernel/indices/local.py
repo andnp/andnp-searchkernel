@@ -55,7 +55,7 @@ from searchkernel.storage.db import (
     SQLiteTuning,
 )
 
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 _LOCAL_KEYWORD_SCHEMA = "local_records_fts"
 _LOCAL_KEYWORD_SCHEMA_VERSION = 4
 _LOCAL_FTS_TABLE = "local_records_fts"
@@ -63,7 +63,6 @@ _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
 _FALLBACK_SCAN_BATCH_SIZE = 1_000
 _FUZZY_QUERY_MAX_TERMS = 4
-_FUZZY_ROW_TOKEN_LIMIT = 256
 _FUZZY_TERM_RATIO = 0.82
 _METADATA_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _VECTOR_EMBEDDING_BYTES = np.dtype("<f4").itemsize
@@ -1349,7 +1348,7 @@ class LocalRecordBackend:
             or _keyword_scoring.looks_like_artifact_query(query)
         ):
             return []
-        terms = [term.lower() for term in _TOKEN_RE.findall(query)]
+        terms = [term.casefold() for term in _TOKEN_RE.findall(query)]
         if (
             not 2 <= len(terms) <= _FUZZY_QUERY_MAX_TERMS
             or not all(len(term) >= 4 for term in terms)
@@ -1390,8 +1389,8 @@ class LocalRecordBackend:
                 )
             )
             tokens = list(dict.fromkeys(
-                _TOKEN_RE.findall(text.lower())
-            ))[:_FUZZY_ROW_TOKEN_LIMIT]
+                _TOKEN_RE.findall(text.casefold())
+            ))
             scores = [_fuzzy_term_score(term, tokens) for term in terms]
             if all(score >= _FUZZY_TERM_RATIO for score in scores):
                 hits.append(
@@ -1413,7 +1412,7 @@ class LocalRecordBackend:
         k: int,
         filters: SearchFilters | None,
     ) -> list[RecordHit]:
-        terms = [term.lower() for term in _TOKEN_RE.findall(query)]
+        terms = [term.casefold() for term in _TOKEN_RE.findall(query)]
         if not terms:
             return []
         clauses, parameters = self._keyword_filter_sql(filters)

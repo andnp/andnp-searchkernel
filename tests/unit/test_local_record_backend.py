@@ -391,6 +391,45 @@ def test_keyword_fuzzy_search_narrows_similarity_candidates(
     assert calls <= 3 * 256
 
 
+def test_keyword_fuzzy_search_supports_unicode_tokens(tmp_path) -> None:
+    """Unicode query tokens should participate in fuzzy fallback matching."""
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.index(
+        [
+            _record(
+                "note",
+                "multilingual",
+                "поиск метаданных",
+            )
+        ]
+    )
+
+    assert [hit.source_id for hit in backend.search_keyword(
+        "поиск метаданны", 10
+    )] == ["multilingual"]
+
+
+def test_keyword_fuzzy_search_matches_tokens_after_long_document_prefix(
+    tmp_path,
+) -> None:
+    """Fuzzy matching should find tokens beyond the old document cutoff."""
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    long_body = " ".join(f"filler{index}" for index in range(300))
+    backend.index(
+        [
+            _record(
+                "note",
+                "long-document",
+                f"{long_body} reciprocal rank fusion",
+            )
+        ]
+    )
+
+    assert [hit.source_id for hit in backend.search_keyword(
+        "reciprical rank fuson", 10
+    )] == ["long-document"]
+
+
 def test_keyword_fuzzy_search_preserves_filtered_recall_beyond_batch(
     tmp_path,
 ) -> None:
