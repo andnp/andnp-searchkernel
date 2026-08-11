@@ -196,6 +196,30 @@ class TestVectorStore:
         with pytest.raises(ValueError, match="Dimension mismatch"):
             store.upsert([bad_record], model_name="model-v1", dim=5)
 
+    def test_missing_embedding_rejection_precedes_mutation(
+        self, pg_conn, fixture_records
+    ):
+        """Reject a mixed batch before writing records or vectors."""
+        store = PGVectorStore(pg_conn)
+        missing_embedding = Record(
+            source_kind="test",
+            source_id="test:missing-embedding",
+            title="Missing embedding",
+            body="This record has no vector",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+
+        with pytest.raises(ValueError, match="must have an embedding"):
+            store.upsert(
+                [fixture_records[0], missing_embedding],
+                model_name="missing-embedding-model",
+                dim=4,
+            )
+
+        assert pg_conn.execute_one("SELECT COUNT(*) FROM records;") == (0,)
+        assert pg_conn.execute_one("SELECT COUNT(*) FROM vector_tables;") == (0,)
+
     def test_delete_records(self, pg_conn, fixture_records):
         """Test delete operation."""
         store = PGVectorStore(pg_conn)
@@ -836,6 +860,7 @@ class TestKeywordStore:
                 body="A guide to database systems.",
                 created_at=now,
                 updated_at=now,
+                embedding=[1.0, 0.0, 0.0, 0.0],
             ),
             Record(
                 source_kind="test",
@@ -844,6 +869,7 @@ class TestKeywordStore:
                 body="PostgreSQL",
                 created_at=now,
                 updated_at=now,
+                embedding=[0.0, 1.0, 0.0, 0.0],
             ),
         ]
         vector_store = PGVectorStore(pg_conn)

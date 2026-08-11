@@ -957,7 +957,7 @@ class PGVectorStore:
             dim: Vector dimensionality
 
         Raises:
-            ValueError: If embedding dimension doesn't match stored dimension
+            ValueError: If a record has no embedding or its dimension is invalid
         """
         if not records:
             return
@@ -965,7 +965,11 @@ class PGVectorStore:
         if dim < 1:
             raise ValueError("dim must be positive")
         for record in records:
-            if record.embedding is not None and len(record.embedding) != dim:
+            if record.embedding is None:
+                raise ValueError(
+                    f"Record {record.storage_key} must have an embedding"
+                )
+            if len(record.embedding) != dim:
                 raise ValueError(
                     f"Embedding dimension mismatch for record {record.storage_key}: "
                     f"expected {dim}, got {len(record.embedding)}"
@@ -1055,7 +1059,6 @@ class PGVectorStore:
             vector_rows = [
                 (record.storage_key, _vector_literal(record.embedding))
                 for record in records
-                if record.embedding is not None
             ]
             if vector_rows:
                 if isinstance(self.conn_pool, Psycopg3Connection):
