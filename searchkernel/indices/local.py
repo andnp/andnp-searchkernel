@@ -55,6 +55,10 @@ from searchkernel.storage.db import (
     SQLiteDatabase,
     SQLiteTuning,
 )
+from searchkernel.utils.ordered_key_chunks import (
+    DEFAULT_KEY_CHUNK_LIMIT,
+    iter_ordered_key_chunks,
+)
 
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 _LOCAL_KEYWORD_SCHEMA = "local_records_fts"
@@ -713,9 +717,8 @@ class LocalRecordBackend:
 
     @staticmethod
     def _key_chunks(keys: Sequence[str]) -> Iterable[list[str]]:
-        # Keep IN statements below SQLite's default bound-parameter limit.
-        for start in range(0, len(keys), 900):
-            yield list(keys[start : start + 900])
+        for chunk in iter_ordered_key_chunks(keys, limit=DEFAULT_KEY_CHUNK_LIMIT):
+            yield list(chunk)
 
     @staticmethod
     def _delete_fts_row(
