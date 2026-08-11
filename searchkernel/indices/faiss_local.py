@@ -79,6 +79,34 @@ class FAISSConfiguration:
         }
 
     @property
+    def build_fingerprint(self) -> str:
+        return self._fingerprint(
+            {
+                "search_strategy": self.search_strategy,
+                "hnsw_m": self.hnsw_m,
+                "hnsw_ef_construction": self.hnsw_ef_construction,
+            }
+        )
+
+    @property
+    def query_policy_fingerprint(self) -> str:
+        return self._fingerprint(
+            {
+                "hnsw_ef_search": self.hnsw_ef_search,
+                "overfetch_multiplier": float(self.overfetch_multiplier),
+                "max_scan_rounds": self.max_scan_rounds,
+                "max_scan_candidates": self.max_scan_candidates,
+            }
+        )
+
+    @staticmethod
+    def _fingerprint(values: dict[str, Any]) -> str:
+        payload = json.dumps(
+            values, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @property
     def fingerprint(self) -> str:
         payload = json.dumps(
             self.as_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True
@@ -142,6 +170,10 @@ class FAISSLocalVectorStore:
         self._last_search_diagnostics: dict[str, Any] = {
             "strategy": self._configuration.search_strategy,
             "configuration_fingerprint": self._configuration.fingerprint,
+            "build_fingerprint": self._configuration.build_fingerprint,
+            "query_policy_fingerprint": (
+                self._configuration.query_policy_fingerprint
+            ),
             "fallback": False,
         }
 
@@ -177,6 +209,8 @@ class FAISSLocalVectorStore:
         self._last_search_diagnostics = {
             "strategy": self.search_strategy,
             "configuration_fingerprint": self.configuration.fingerprint,
+            "build_fingerprint": self.configuration.build_fingerprint,
+            "query_policy_fingerprint": self.configuration.query_policy_fingerprint,
             "requested_k": k,
             "fallback": False,
         }
@@ -489,6 +523,10 @@ class FAISSLocalVectorStore:
                     "search_strategy": self.search_strategy,
                     "configuration": self.configuration.as_dict(),
                     "configuration_fingerprint": self.configuration.fingerprint,
+                    "build_fingerprint": self.configuration.build_fingerprint,
+                    "query_policy_fingerprint": (
+                        self.configuration.query_policy_fingerprint
+                    ),
                     "epoch": state.epoch,
                     "ids": list(state.ids),
                     "storage_keys": list(state.storage_keys),
@@ -523,13 +561,19 @@ class FAISSLocalVectorStore:
 
             index_path, metadata_path = self._paths(model_name, dim)
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            build_fingerprint = metadata.get("build_fingerprint")
+            configuration_matches = (
+                build_fingerprint == self.configuration.build_fingerprint
+                if build_fingerprint is not None
+                else metadata.get("configuration_fingerprint")
+                == self.configuration.fingerprint
+            )
             if (
                 metadata["format_version"] != VECTOR_FORMAT_VERSION
                 or metadata["normalization_policy"] != NORMALIZATION_POLICY
                 or metadata["encoder_namespace"] != model_name
                 or metadata["dim"] != dim
-                or metadata.get("configuration_fingerprint")
-                != self.configuration.fingerprint
+                or not configuration_matches
                 or metadata["epoch"] != epoch
             ):
                 return None

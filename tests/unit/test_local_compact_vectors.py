@@ -387,6 +387,10 @@ def test_faiss_configuration_fingerprint_persists_hnsw_settings(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["configuration"] == store.configuration.as_dict()
     assert metadata["configuration_fingerprint"] == store.configuration.fingerprint
+    assert metadata["build_fingerprint"] == store.configuration.build_fingerprint
+    assert metadata["query_policy_fingerprint"] == (
+        store.configuration.query_policy_fingerprint
+    )
 
     reloaded = FAISSLocalVectorStore(
         backend,
@@ -403,6 +407,48 @@ def test_faiss_configuration_fingerprint_persists_hnsw_settings(
     assert hnsw.efConstruction == 27
     assert hnsw.efSearch == 73
     assert reloaded.last_search_diagnostics["persistence"] == "loaded"
+
+
+def test_faiss_query_policy_reload_reuses_index_and_updates_diagnostics(
+    tmp_path: Path,
+) -> None:
+    """Query-policy changes reload the persisted artifact without rebuilding it."""
+    pytest.importorskip("faiss")
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
+    index_path = tmp_path / "faiss"
+    original = FAISSLocalVectorStore(backend, index_path=index_path)
+    original.search([1.0, 0.0], 1, model_name="model", dim=2)
+
+    reloaded = FAISSLocalVectorStore(
+        backend,
+        index_path=index_path,
+        overfetch_multiplier=8.0,
+    )
+    assert reloaded.search([1.0, 0.0], 1, model_name="model", dim=2)
+
+    diagnostics = reloaded.last_search_diagnostics
+    assert diagnostics["persistence"] == "loaded"
+    assert diagnostics["build_fingerprint"] == original.configuration.build_fingerprint
+    assert diagnostics["query_policy_fingerprint"] == (
+        reloaded.configuration.query_policy_fingerprint
+    )
+    assert diagnostics["query_policy_fingerprint"] != (
+        original.configuration.query_policy_fingerprint
+    )
+
+
+def test_faiss_configuration_fingerprints_separate_build_and_query_policy() -> None:
+    """Build and query-policy fingerprints change only for their own inputs."""
+    base = FAISSConfiguration()
+    query_policy = FAISSConfiguration(overfetch_multiplier=8.0)
+    build = FAISSConfiguration(hnsw_m=12)
+
+    assert base.build_fingerprint == query_policy.build_fingerprint
+    assert base.query_policy_fingerprint != query_policy.query_policy_fingerprint
+    assert base.build_fingerprint != build.build_fingerprint
+    assert base.query_policy_fingerprint == build.query_policy_fingerprint
+    assert len({base.fingerprint, query_policy.fingerprint, build.fingerprint}) == 3
 
 
 def test_faiss_approximate_search_enforces_filtered_candidate_budget(
