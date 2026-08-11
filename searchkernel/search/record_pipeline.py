@@ -36,7 +36,9 @@ from searchkernel.ports import (
 )
 from searchkernel.ports.rerank import Reranker
 from searchkernel.ports.search_results import (
+    DiagnosticCapability,
     FailureStage,
+    RecordSearchDiagnostics,
     RecordSearchFailure,
     RecordSearchOutcome,
     RecordSearchResult,
@@ -846,6 +848,25 @@ class RecordSearchPipeline:
             candidate_counts=candidate_counts,
             stage_timings_ms=stage_timings_ms,
             trace=trace,
+            diagnostic_evidence=RecordSearchDiagnostics(
+                enabled_lanes=plan.enabled_lanes,
+                lane_budgets=plan.lane_budgets,
+                skipped_lanes=plan.diagnostic_skip_decisions,
+                failures=tuple(failures),
+                missing_record_ids=tuple(missing_record_ids),
+                stage_timings_ms=stage_timings_ms,
+                result_provenance={
+                    result.storage_key: result.provenance.strategies
+                    for result in hydrated
+                },
+                final_duplicate_count=_duplicate_count(hydrated),
+                raw_pre_fusion_overlap=DiagnosticCapability(
+                    state="unavailable",
+                    reason=(
+                        "raw pre-fusion overlap is not retained by the pipeline"
+                    ),
+                ),
+            ),
         )
 
     async def _rerank_results(
@@ -2241,6 +2262,11 @@ def _plan_diagnostics(plan: QueryPlan) -> list[str]:
         for reason in plan.diagnostic_skip_reasons
     )
     return diagnostics
+
+
+def _duplicate_count(results: Sequence[RecordSearchResult]) -> int:
+    storage_keys = [result.storage_key for result in results]
+    return len(storage_keys) - len(set(storage_keys))
 
 
 def _semantic_only_requested(filters: Mapping[str, object]) -> bool:

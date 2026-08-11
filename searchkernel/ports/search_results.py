@@ -16,6 +16,7 @@ FailureStage = Literal[
     "hydration",
     "rerank",
 ]
+DiagnosticAvailability = Literal["available", "unavailable"]
 
 
 class SearchTrace(Protocol):
@@ -67,6 +68,53 @@ class RecordSearchFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class SearchDiagnosticSkip:
+    """A lane or stage that was intentionally not executed."""
+
+    lane: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticCapability:
+    """Whether a diagnostic capability produced evidence for this search."""
+
+    state: DiagnosticAvailability
+    reason: str | None = None
+    count: int | None = None
+
+    @property
+    def available(self) -> bool:
+        return self.state == "available"
+
+
+@dataclass(frozen=True, slots=True)
+class RecordSearchDiagnostics:
+    """Stable, provider-neutral evidence about one record search."""
+
+    enabled_lanes: tuple[str, ...] = ()
+    lane_budgets: Mapping[str, int] = field(default_factory=dict)
+    skipped_lanes: tuple[SearchDiagnosticSkip, ...] = ()
+    failures: tuple[RecordSearchFailure, ...] = ()
+    missing_record_ids: tuple[str, ...] = ()
+    stage_timings_ms: Mapping[str, float] = field(default_factory=dict)
+    result_provenance: Mapping[str, tuple[str, ...]] = field(
+        default_factory=dict
+    )
+    final_duplicate_count: int = 0
+    raw_pre_fusion_overlap: DiagnosticCapability = field(
+        default_factory=lambda: DiagnosticCapability(
+            state="unavailable",
+            reason="raw pre-fusion overlap is not retained by the pipeline",
+        )
+    )
+
+    @property
+    def degraded(self) -> bool:
+        return bool(self.failures or self.missing_record_ids)
+
+
+@dataclass(frozen=True, slots=True)
 class RecordSearchOutcome:
     """Search results plus explicit degradation diagnostics."""
 
@@ -79,6 +127,7 @@ class RecordSearchOutcome:
     candidate_counts: Mapping[str, int] = field(default_factory=dict)
     stage_timings_ms: Mapping[str, float] = field(default_factory=dict)
     trace: SearchTrace | None = None
+    diagnostic_evidence: RecordSearchDiagnostics | None = None
 
     @property
     def degraded(self) -> bool:
@@ -86,9 +135,13 @@ class RecordSearchOutcome:
 
 
 __all__ = [
+    "DiagnosticAvailability",
+    "DiagnosticCapability",
     "FailureStage",
+    "RecordSearchDiagnostics",
     "RecordSearchFailure",
     "RecordSearchOutcome",
     "RecordSearchResult",
+    "SearchDiagnosticSkip",
     "SearchTrace",
 ]

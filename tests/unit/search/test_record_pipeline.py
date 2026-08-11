@@ -180,6 +180,13 @@ async def test_keyword_only_hydrates_records_with_deterministic_ties() -> None:
     assert [result.record_id for result in outcome.results] == ["a", "b"]
     assert all(result.record.source_kind == "fake" for result in outcome.results)
     assert outcome.results[0].provenance.strategies == ("keyword",)
+    assert outcome.diagnostic_evidence is not None
+    assert outcome.diagnostic_evidence.enabled_lanes == ("keyword",)
+    assert outcome.diagnostic_evidence.lane_budgets["keyword"] == 10
+    assert outcome.diagnostic_evidence.result_provenance == {
+        outcome.results[0].storage_key: ("keyword",),
+        outcome.results[1].storage_key: ("keyword",),
+    }
 
 
 async def test_minimum_candidate_limit_applies_to_store_acquisition() -> None:
@@ -230,6 +237,18 @@ async def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
 
     assert [result.record_id for result in outcome.results] == ["a", "b", "c"]
     assert outcome.results[0].provenance.strategies == ("keyword", "vector")
+    assert outcome.diagnostic_evidence is not None
+    assert outcome.diagnostic_evidence.enabled_lanes == ("keyword", "vector")
+    assert outcome.diagnostic_evidence.result_provenance[
+        outcome.results[0].storage_key
+    ] == (
+        "keyword",
+        "vector",
+    )
+    assert outcome.diagnostic_evidence.raw_pre_fusion_overlap.state == (
+        "unavailable"
+    )
+    assert not outcome.diagnostic_evidence.raw_pre_fusion_overlap.available
 
 
 async def test_exact_identifier_outranks_nearby_keyword_match() -> None:
@@ -345,6 +364,15 @@ async def test_semantic_retrieval_mode_routes_only_vector(
     assert outcome.trace.to_dict()["provenance"]["query_plan"]["lanes"] == (
         "vector",
     )
+    assert outcome.diagnostic_evidence is not None
+    assert outcome.diagnostic_evidence.enabled_lanes == ("vector",)
+    assert {
+        (skip.lane, skip.reason)
+        for skip in outcome.diagnostic_evidence.skipped_lanes
+    } == {
+        ("keyword", "unavailable"),
+        ("graph", "unavailable"),
+    }
 
 
 async def test_retrieval_mode_defaults_to_hybrid_and_rejects_unknown_values() -> None:
@@ -2229,6 +2257,8 @@ async def test_trace_is_redacted_and_contains_routing_diagnostics() -> None:
     assert outcome.candidate_count == 1
     assert outcome.candidate_counts == {"keyword": 1}
     assert outcome.stage_timings_ms["search"] >= 0
+    assert outcome.diagnostic_evidence is not None
+    assert outcome.diagnostic_evidence.stage_timings_ms == outcome.stage_timings_ms
 
 
 async def test_rerank_runs_once_with_a_bounded_candidate_set() -> None:
@@ -2279,6 +2309,9 @@ async def test_rerank_failure_falls_back_deterministically_in_lenient_mode() -> 
     assert [result.record_id for result in outcome.results] == ["a", "b"]
     assert outcome.failures[0].stage == "rerank"
     assert "rerank:fallback:RuntimeError" in outcome.diagnostics
+    assert outcome.diagnostic_evidence is not None
+    assert outcome.diagnostic_evidence.degraded
+    assert outcome.diagnostic_evidence.failures == outcome.failures
 
 
 async def test_batch_graph_and_hydration_use_canonical_keys_once() -> None:
@@ -2612,6 +2645,27 @@ async def test_missing_top_candidate_backfills_from_lower_ranked_candidates() ->
     assert [result.record_id for result in outcome.results] == ["b", "c"]
     assert outcome.missing_record_ids == ("a",)
     assert hydrator.identities == [["a", "b"], ["c"]]
+    assert outcome.diagnostic_evidence is not None
+    assert outcome.diagnostic_evidence.missing_record_ids == ("a",)
+    assert outcome.diagnostic_evidence.degraded
+
+
+async def test_diagnostics_count_duplicates_after_final_post_processing() -> None:
+    """Final duplicate evidence reflects the returned result sequence."""
+    record = _record("a")
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        hydrator=_hydrator({"a": record}),
+        policy=RecordSearchPolicy(
+            post_process=lambda results: [*results, results[0]],
+        ),
+    )
+
+    outcome = await pipeline.async_search("query", limit=2)
+
+    assert [result.record_id for result in outcome.results] == ["a", "a"]
+    assert outcome.diagnostic_evidence is not None
+    assert outcome.diagnostic_evidence.final_duplicate_count == 1
 
 
 async def test_scalar_graph_fallback_is_bounded() -> None:

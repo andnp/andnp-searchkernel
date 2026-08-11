@@ -1,5 +1,14 @@
 from searchkernel.domain import RecordIdentity
 from searchkernel.ports import BatchParentRecordExpander, ParentRecordExpander
+from searchkernel.ports.search_results import RecordSearchOutcome
+
+
+def test_record_search_outcome_keeps_legacy_default_construction() -> None:
+    """The additive diagnostic projection does not alter old construction."""
+    outcome = RecordSearchOutcome()
+
+    assert outcome.results == ()
+    assert outcome.diagnostic_evidence is None
 
 
 def test_parent_record_expander_requires_canonical_identity() -> None:

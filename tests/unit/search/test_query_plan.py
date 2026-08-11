@@ -20,6 +20,12 @@ def test_artifact_plan_prefers_keyword_and_bounds_vector_candidates() -> None:
     assert plan.vector_candidates_keyword_bounded
     assert plan.keyword_candidate_budget == 15
     assert plan.vector_candidate_budget == 15
+    assert {
+        (skip.lane, skip.reason) for skip in plan.diagnostic_skip_decisions
+    } == {
+        ("graph", "query_not_relationship"),
+        ("vector", "awaiting_keyword_confidence"),
+    }
 
 
 def test_artifact_plan_uses_unbounded_vector_without_keyword_store() -> None:
@@ -68,6 +74,8 @@ def test_disabled_graph_is_diagnostic_only() -> None:
 
     assert not plan.graph_enabled
     assert "graph:disabled" in plan.diagnostic_skip_reasons
+    assert plan.diagnostic_skip_decisions[-1].lane == "graph"
+    assert plan.diagnostic_skip_decisions[-1].reason == "disabled"
 
 
 def test_ordinary_query_skips_graph_with_an_explicitly_available_store() -> None:

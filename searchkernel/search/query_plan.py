@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from searchkernel.ports.search_results import SearchDiagnosticSkip
 from searchkernel.search.classifier import (
     QuerySignals,
     QueryType,
@@ -56,6 +57,15 @@ class QueryPlan:
     @property
     def fusion_weight_map(self) -> dict[str, float]:
         return dict(self.fusion_weights)
+
+    @property
+    def diagnostic_skip_decisions(self) -> tuple[SearchDiagnosticSkip, ...]:
+        return tuple(
+            SearchDiagnosticSkip(lane=lane, reason=reason)
+            for diagnostic in self.diagnostic_skip_reasons
+            for lane, separator, reason in (diagnostic.partition(":"),)
+            if separator
+        )
 
 
 @dataclass(frozen=True, slots=True)
