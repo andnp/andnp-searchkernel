@@ -1,6 +1,30 @@
 from searchkernel.domain import RecordIdentity
 from searchkernel.ports import BatchParentRecordExpander, ParentRecordExpander
-from searchkernel.ports.search_results import RecordSearchOutcome
+from searchkernel.ports.search_results import (
+    MAX_FAILURE_DETAIL_LENGTH,
+    RecordSearchFailure,
+    RecordSearchOutcome,
+)
+
+
+def test_record_search_failure_keeps_legacy_default_construction() -> None:
+    """
+    The additive detail field does not alter the old constructor shape.
+    """
+    failure = RecordSearchFailure("keyword", "backend unavailable", "RuntimeError")
+
+    assert failure.detail is None
+
+
+def test_record_search_failure_bounds_detail() -> None:
+    """
+    Failure detail stays bounded before it crosses the result boundary.
+    """
+    detail = "provider response: " + "x" * MAX_FAILURE_DETAIL_LENGTH
+
+    failure = RecordSearchFailure("vector", "unavailable", detail=detail)
+
+    assert failure.detail == detail[:MAX_FAILURE_DETAIL_LENGTH]
 
 
 def test_record_search_outcome_keeps_legacy_default_construction() -> None:

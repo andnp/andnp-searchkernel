@@ -14,7 +14,11 @@ from searchkernel.domain import (
     RecordHit,
     RecordIdentity,
 )
-from searchkernel.ports.search_results import RecordSearchOutcome
+from searchkernel.ports import KeywordStore, VectorStore
+from searchkernel.ports.search_results import (
+    MAX_FAILURE_DETAIL_LENGTH,
+    RecordSearchOutcome,
+)
 from searchkernel.runtime import (
     CandidateResultCache,
     HydrationCache,
@@ -921,6 +925,95 @@ async def test_store_errors_can_be_explicitly_returned_as_degraded() -> None:
     assert not outcome.results
     assert outcome.degraded
     assert outcome.failures[0].stage == "keyword"
+
+
+async def test_malformed_candidate_data_keeps_other_lane_results_in_lenient_mode() -> None:
+    """
+    Malformed generic candidates fail one lane without discarding valid hits.
+    """
+
+    class MalformedKeywordStore:
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[object]:
+            return [object()]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=cast(KeywordStore, MalformedKeywordStore()),
+        vector_store=cast(
+            VectorStore,
+            FakeVectorStore([("vector-result", 0.9)]),
+        ),
+        embedding_provider=FakeEmbedder(),
+        hydrator=_hydrator({"vector-result": _record("vector-result")}),
+        config=RecordSearchConfig(failure_mode="lenient"),
+    )
+
+    outcome = await pipeline.async_search("query", limit=1)
+
+    assert [result.record_id for result in outcome.results] == ["vector-result"]
+    assert outcome.failures[0].stage == "keyword"
+    assert outcome.failures[0].detail is not None
+
+
+async def test_unavailable_provider_failure_detail_is_bounded() -> None:
+    """
+    Provider failures retain partial results and bounded neutral detail.
+    """
+
+    class UnavailableVectorStore(FakeVectorStore):
+        def search(
+            self,
+            query_vector: list[float],
+            k: int,
+            *,
+            model_name: str,
+            dim: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit]:
+            raise RuntimeError("provider unavailable: " + "x" * 1000)
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("keyword-result", 1.0)]),
+        vector_store=cast(VectorStore, UnavailableVectorStore([])),
+        embedding_provider=FakeEmbedder(),
+        hydrator=_hydrator({"keyword-result": _record("keyword-result")}),
+        config=RecordSearchConfig(failure_mode="lenient"),
+    )
+
+    outcome = await pipeline.async_search("query", limit=1)
+
+    assert [result.record_id for result in outcome.results] == ["keyword-result"]
+    assert outcome.failures[0].stage == "vector"
+    assert outcome.failures[0].detail is not None
+    assert len(outcome.failures[0].detail) == MAX_FAILURE_DETAIL_LENGTH
+    assert outcome.failures[0].detail.startswith("provider unavailable: ")
+
+
+async def test_malformed_candidate_data_preserves_strict_failure_behavior() -> None:
+    """
+    Strict mode still raises the stage-specific retrieval exception.
+    """
+
+    class MalformedKeywordStore:
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[object]:
+            return [object()]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=cast(KeywordStore, MalformedKeywordStore()),
+        hydrator=_hydrator({}),
+    )
+
+    with pytest.raises(RecordSearchError, match="keyword retrieval failed"):
+        await pipeline.async_search("query")
 
 
 async def test_search_keeps_sync_compatibility_outside_event_loop() -> None:

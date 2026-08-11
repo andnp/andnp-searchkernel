@@ -16,6 +16,7 @@ FailureStage = Literal[
     "hydration",
     "rerank",
 ]
+MAX_FAILURE_DETAIL_LENGTH = 256
 DiagnosticAvailability = Literal["available", "unavailable"]
 
 
@@ -65,6 +66,15 @@ class RecordSearchFailure:
     stage: FailureStage
     message: str
     exception_type: str = "Exception"
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.detail is not None:
+            object.__setattr__(
+                self,
+                "detail",
+                self.detail[:MAX_FAILURE_DETAIL_LENGTH],
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +145,7 @@ class RecordSearchOutcome:
 
 
 __all__ = [
+    "MAX_FAILURE_DETAIL_LENGTH",
     "DiagnosticAvailability",
     "DiagnosticCapability",
     "FailureStage",

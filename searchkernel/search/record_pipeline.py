@@ -1913,7 +1913,12 @@ class RecordSearchPipeline:
         if not self._continue_on_error:
             raise RecordSearchError(stage, error) from error
         failures.append(
-            RecordSearchFailure(stage, str(error), type(error).__name__)
+            RecordSearchFailure(
+                stage,
+                str(error),
+                type(error).__name__,
+                detail=str(error),
+            )
         )
 
     def _validate_config(self) -> None:
