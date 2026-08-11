@@ -507,6 +507,13 @@ def test_keyword_scan_fallback_scans_large_corpora(tmp_path, monkeypatch) -> Non
     assert [hit.source_id for hit in backend.search_keyword("needle", 1)] == [
         "target"
     ]
+    assert backend.last_keyword_search_diagnostics == {
+        "scanned": 10_002,
+        "requested_k": 1,
+        "returned": 1,
+        "scan_complete": True,
+        "fallback": True,
+    }
 
 
 def test_keyword_scan_fallback_returns_empty_for_large_no_match(tmp_path, monkeypatch) -> None:
@@ -514,6 +521,7 @@ def test_keyword_scan_fallback_returns_empty_for_large_no_match(tmp_path, monkey
     The no-FTS fallback returns no hits when a large corpus has no match.
     """
     backend = LocalRecordBackend(tmp_path / "records.db")
+    keyword = LocalKeywordStore(backend)
     backend.index(
         [
             _record("note", f"record-{index}", "unrelated")
@@ -522,7 +530,17 @@ def test_keyword_scan_fallback_returns_empty_for_large_no_match(tmp_path, monkey
     )
     monkeypatch.setattr(backend, "_fts5_available", False)
 
-    assert backend.search_keyword("missing", 10) == []
+    assert keyword.search("missing", 10) == []
+    diagnostics = keyword.last_keyword_search_diagnostics
+    assert diagnostics == {
+        "scanned": 10_001,
+        "requested_k": 10,
+        "returned": 0,
+        "scan_complete": True,
+        "fallback": True,
+    }
+    with pytest.raises(TypeError):
+        diagnostics["returned"] = 1
 
 
 def test_keyword_scan_fallback_matches_uri_and_metadata_keywords(tmp_path, monkeypatch) -> None:

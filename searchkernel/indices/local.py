@@ -19,6 +19,7 @@ import threading
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, ClassVar, Self
 
 import numpy as np
@@ -225,6 +226,17 @@ class LocalRecordBackend:
         self._fts5_available = False
         self._keyword_search_diagnostic = (
             "FTS5 indexed lexical search has not been initialized"
+        )
+        self._last_keyword_search_diagnostics: Mapping[str, int | bool] = (
+            MappingProxyType(
+                {
+                    "scanned": 0,
+                    "requested_k": 0,
+                    "returned": 0,
+                    "scan_complete": True,
+                    "fallback": False,
+                }
+            )
         )
         self._initialize_schema()
 
@@ -1015,9 +1027,28 @@ class LocalRecordBackend:
         filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
         if k < 1 or not query.strip():
+            self._last_keyword_search_diagnostics = MappingProxyType(
+                {
+                    "scanned": 0,
+                    "requested_k": k,
+                    "returned": 0,
+                    "scan_complete": True,
+                    "fallback": False,
+                }
+            )
             return []
         if self._fts5_available:
-            return self._search_keyword_fts(query, k, filters)
+            hits = self._search_keyword_fts(query, k, filters)
+            self._last_keyword_search_diagnostics = MappingProxyType(
+                {
+                    "scanned": 0,
+                    "requested_k": k,
+                    "returned": len(hits),
+                    "scan_complete": True,
+                    "fallback": False,
+                }
+            )
+            return hits
         return self._search_keyword_fallback(query, k, filters)
 
     @staticmethod
@@ -1412,10 +1443,21 @@ class LocalRecordBackend:
     ) -> list[RecordHit]:
         terms = [term.casefold() for term in _TOKEN_RE.findall(query)]
         if not terms:
+            self._last_keyword_search_diagnostics = MappingProxyType(
+                {
+                    "scanned": 0,
+                    "requested_k": k,
+                    "returned": 0,
+                    "scan_complete": True,
+                    "fallback": True,
+                }
+            )
             return []
         clauses, parameters = self._keyword_filter_sql(filters)
         heap: list[_FallbackHeapItem] = []
         last_rowid = 0
+        scanned_rows = 0
+        scan_complete = False
         while True:
             with self._lock:
                 conn = self._db.get_connection()
@@ -1433,7 +1475,9 @@ class LocalRecordBackend:
                     (last_rowid, *parameters, _FALLBACK_SCAN_BATCH_SIZE),
                 ).fetchall()
             if not rows:
+                scan_complete = True
                 break
+            scanned_rows += len(rows)
             last_rowid = int(rows[-1]["rowid"])
             for row in rows:
                 if filters and not self._matches(row, filters):
@@ -1464,11 +1508,22 @@ class LocalRecordBackend:
                 elif heap[0] < candidate:
                     heapq.heapreplace(heap, candidate)
             if len(rows) < _FALLBACK_SCAN_BATCH_SIZE:
+                scan_complete = True
                 break
-        return sorted(
+        hits = sorted(
             (candidate.hit for candidate in heap),
             key=lambda item: (-item.score, item.storage_key),
         )
+        self._last_keyword_search_diagnostics = MappingProxyType(
+            {
+                "scanned": scanned_rows,
+                "requested_k": k,
+                "returned": len(hits),
+                "scan_complete": scan_complete,
+                "fallback": True,
+            }
+        )
+        return hits
 
     def search_vector(
         self,
@@ -2017,6 +2072,10 @@ class LocalRecordBackend:
     @property
     def keyword_search_diagnostic(self) -> str:
         return self._keyword_search_diagnostic
+
+    @property
+    def last_keyword_search_diagnostics(self) -> Mapping[str, int | bool]:
+        return self._last_keyword_search_diagnostics
 
     def check_keyword_index(self) -> bool:
         """Return whether the external-content keyword index matches records."""
@@ -2682,6 +2741,10 @@ class LocalKeywordStore:
     @property
     def keyword_search_diagnostic(self) -> str:
         return self._backend.keyword_search_diagnostic
+
+    @property
+    def last_keyword_search_diagnostics(self) -> Mapping[str, int | bool]:
+        return self._backend.last_keyword_search_diagnostics
 
     def check_keyword_index(self) -> bool:
         return self._backend.check_keyword_index()
