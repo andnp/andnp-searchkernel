@@ -405,6 +405,21 @@ class TestSemanticWorkPlanner:
 class TestSQLiteEmbeddingCache:
     """Test SQLite embedding cache implementation."""
 
+    def test_get_many_batches_large_hash_lists(self) -> None:
+        """Large cache lookups stay below SQLite's bound-variable limit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = SQLiteEmbeddingCache(
+                Path(tmpdir) / "cache.db", "namespace-1", dimension=3
+            )
+            vectors = {
+                f"hash-{index}": [0.1, 0.2, 0.3]
+                for index in range(1_200)
+            }
+
+            cache.put_many(vectors)
+
+            assert set(cache.get_many(vectors)) == set(vectors)
+
     def test_cache_put_and_get(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "cache.db"

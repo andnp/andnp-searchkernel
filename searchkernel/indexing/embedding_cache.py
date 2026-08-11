@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
+_SQLITE_LOOKUP_BATCH_SIZE = 900
+
 
 @dataclass(frozen=True, slots=True)
 class EmbeddingCacheMetrics:
@@ -55,12 +57,17 @@ class SQLiteEmbeddingCache:
             return {}
         with self._lock:
             try:
-                placeholders = ",".join("?" for _ in hashes)
-                rows = self._connection.execute(
-                    f"SELECT content_hash, vector FROM embeddings "
-                    f"WHERE namespace = ? AND content_hash IN ({placeholders})",
-                    (self.encoder_namespace, *hashes),
-                ).fetchall()
+                rows = []
+                for start in range(0, len(hashes), _SQLITE_LOOKUP_BATCH_SIZE):
+                    batch = hashes[start : start + _SQLITE_LOOKUP_BATCH_SIZE]
+                    placeholders = ",".join("?" for _ in batch)
+                    rows.extend(
+                        self._connection.execute(
+                            f"SELECT content_hash, vector FROM embeddings "
+                            f"WHERE namespace = ? AND content_hash IN ({placeholders})",
+                            (self.encoder_namespace, *batch),
+                        ).fetchall()
+                    )
             except sqlite3.DatabaseError as error:
                 if not self._is_malformed(error):
                     raise
