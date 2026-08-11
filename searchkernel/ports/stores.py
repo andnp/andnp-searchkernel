@@ -33,6 +33,11 @@ class VectorStore(Protocol):
             model_name: Name of the embedding model used.
             dim: Dimensionality of the embeddings.
 
+        A vector upsert is an all-vector operation: every record must have a
+        non-null embedding. Use ``KeywordStore.index`` for keyword-only
+        updates so an omitted embedding cannot leave an older vector
+        searchable by accident.
+
         Per-model embedding isolation ensures safe migration between models.
         Implementations must reject a second dimension for an existing
         ``model_name`` rather than creating a mixed-dimension namespace.
