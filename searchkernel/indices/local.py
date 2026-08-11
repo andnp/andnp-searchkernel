@@ -908,9 +908,7 @@ class LocalRecordBackend:
                                 record_embedding_revision(record, model_name, dim),
                             )
                         )
-                vector_affected = bool(packed_vectors) or self._records_have_vectors(
-                    conn, rows
-                )
+                vector_affected = bool(packed_vectors)
                 self._write_records(conn, rows)
                 conn.executemany(
                     """
