@@ -12,6 +12,7 @@ import pytest
 
 from searchkernel.search.fusion import (
     apply_recency_boost,
+    fuse_calibrated_scores,
     fuse_reciprocal_rank,
     rrf_score,
     weighted_reciprocal_rank,
@@ -76,6 +77,15 @@ class TestReciprocalRankFusion:
             {"keyword": rankings[0], "vector": rankings[1]}
         )
 
+    def test_default_fusion_remains_rank_based(self):
+        """
+        Keeps the default fusion contract based on one-based rank positions.
+        """
+        assert fuse_reciprocal_rank({"keyword": ["doc-a", "doc-b"]}) == {
+            "doc-a": 1 / 61,
+            "doc-b": 1 / 62,
+        }
+
     def test_weighted_rrf_applies_strategy_weights(self):
         scores = weighted_reciprocal_rank(
             {"keyword": ["doc1"], "vector": ["doc2"]},
@@ -93,6 +103,21 @@ class TestReciprocalRankFusion:
         )
 
         assert scores["doc-a"] == scores["doc-b"]
+
+
+class TestCalibratedScoreFusion:
+    def test_normalizes_each_lane_relative_to_its_own_scores(self):
+        """
+        Confirms score scales are normalized independently before fusion.
+        """
+        scores = fuse_calibrated_scores(
+            {
+                "keyword": [("doc-a", 100.0), ("doc-b", 90.0)],
+                "vector": [("doc-a", 0.6), ("doc-b", 0.5)],
+            }
+        )
+
+        assert scores == {"doc-a": 2.0, "doc-b": 0.0}
 
 
 class TestRecencyBoost:

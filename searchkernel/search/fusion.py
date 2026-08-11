@@ -23,8 +23,10 @@ def fuse_reciprocal_rank(
 ) -> dict[str, float]:
     """Fuse rankings with optional per-strategy reliability weights.
 
-    The default remains ordinary reciprocal-rank fusion. Mapping inputs retain
-    strategy names so weighted calls never need source fields in domain models.
+    This is the default rank-based fusion path: it uses only one-based rank
+    positions and does not normalize raw retrieval scores. Mapping inputs
+    retain strategy names so weighted calls never need source fields in domain
+    models.
     """
     if k <= 0:
         raise ValueError("k must be positive")
@@ -65,7 +67,13 @@ def fuse_calibrated_scores(
     *,
     strategy_weights: Mapping[str, float] | None = None,
 ) -> dict[str, float]:
-    """Fuse per-lane query-relative scores after calibrating each lane."""
+    """Fuse scores after min-max normalizing each lane independently.
+
+    A lane's minimum and maximum are computed from that lane's result set, so
+    calibrated values express relative relevance within a query and lane.
+    This opt-in score-based path is separate from default reciprocal-rank
+    fusion, which preserves its existing ranking behavior.
+    """
     weights = strategy_weights or {}
     scores: dict[str, float] = {}
     for strategy, ranking in rankings.items():
