@@ -132,6 +132,24 @@ def test_keyword_retrieval_preserves_workspace_and_source_kind_parity(
     )
 
 
+def test_keyword_compound_filter_preserves_eligible_storage_key_parity(
+    parity_records, parity_backends
+) -> None:
+    local, pg_keyword, pg_vector = parity_backends
+    local.upsert(parity_records, "parity", 2)
+    pg_vector.upsert(parity_records, "parity", 2)
+    filters = {
+        "statuses": [RecordStatus.ACTIVE.value],
+        "workspace_id": "workspace-a",
+        "source_kinds": ["note"],
+        "candidate_ids": [record.identity for record in parity_records],
+    }
+    local_hits = local.search_keyword("deployment incident", 10, filters)
+    pg_hits = pg_keyword.search("deployment incident", 10, filters)
+
+    assert _keys(local_hits) == _keys(pg_hits) == {parity_records[0].storage_key}
+
+
 def test_vector_retrieval_preserves_candidate_identity_parity(
     parity_records, parity_backends
 ) -> None:
