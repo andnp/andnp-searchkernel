@@ -1150,6 +1150,31 @@ def test_failed_batch_rolls_back_records_and_epochs(tmp_path) -> None:
     assert graph.graph_epoch() == before["graph"]
 
 
+def test_vector_upsert_rejects_missing_embedding(tmp_path) -> None:
+    """A vector upsert reports which record lacks its required embedding."""
+    _backend_instance, _keyword, vector, _graph = _backend(tmp_path)
+    record = _record("note", "missing", "missing")
+
+    with pytest.raises(ValueError, match="missing embedding"):
+        vector.upsert([record], "test", 2)
+
+
+def test_vector_upsert_rejects_mixed_batch_before_mutation(tmp_path) -> None:
+    """A missing embedding prevents every record in the batch from being stored."""
+    backend, _keyword, vector, _graph = _backend(tmp_path)
+    good = _record("note", "good-vector", "good")
+    missing = _record("note", "missing-vector", "missing")
+    good.embedding = [1.0, 0.0]
+    before = backend.epochs()
+
+    with pytest.raises(ValueError, match="missing-vector"):
+        vector.upsert([good, missing], "test", 2)
+
+    assert backend.hydrate_record(good.storage_key) is None
+    assert backend.hydrate_record(missing.storage_key) is None
+    assert backend.epochs() == before
+
+
 def test_repeated_graph_upsert_does_not_advance_epoch(tmp_path) -> None:
     backend, _keyword, _vector, graph = _backend(tmp_path)
     source = _record("note", "source", "source")

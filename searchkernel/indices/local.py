@@ -841,6 +841,12 @@ class LocalRecordBackend:
         rows = list(records)
         if not rows:
             return
+        for record in rows:
+            if record.embedding is None:
+                raise ValueError(
+                    "vector upsert requires an embedding for every record; "
+                    f"missing embedding for {record.storage_key!r}"
+                )
         with self._lock:
             conn = self._db.get_connection()
             try:
