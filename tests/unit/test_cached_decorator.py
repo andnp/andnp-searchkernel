@@ -327,6 +327,17 @@ class TestEpochValidatedCacheStore:
 
 
 class TestSQLiteCacheStore:
+    def test_close_is_idempotent_and_allows_reopen(self, tmp_path: Path):
+        """Closing releases the connection without invalidating persisted data."""
+        store = SQLiteCacheStore(tmp_path / "cache.db")
+        store.set("key", "value", epoch=1)
+
+        store.close()
+        store.close()
+
+        assert store.get("key") == "value"
+        store.close()
+
     def test_reuses_connection_for_repeated_get_and_set(self, tmp_path: Path):
         store = SQLiteCacheStore(tmp_path / "cache.db")
         connection = store._local.connection
