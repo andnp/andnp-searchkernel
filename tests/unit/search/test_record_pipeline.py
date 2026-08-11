@@ -2862,6 +2862,8 @@ async def test_batch_graph_failures_keep_strict_and_lenient_modes() -> None:
     outcome = await lenient.async_search("what relates to record a?")
     assert [result.record_id for result in outcome.results] == ["a"]
     assert outcome.failures[0].stage == "graph"
+    assert outcome.diagnostic_evidence is not None
+    assert outcome.diagnostic_evidence.raw_pre_fusion_overlap.available is False
 
 
 async def test_cancelling_overlapped_lanes_cancels_both_tasks() -> None:

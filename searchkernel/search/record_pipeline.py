@@ -843,6 +843,7 @@ class RecordSearchPipeline:
                 }
             )
 
+        raw_pre_fusion_overlap = _raw_pre_fusion_overlap(rankings, failures)
         return RecordSearchOutcome(
             results=tuple(hydrated),
             failures=tuple(failures),
@@ -2306,7 +2307,7 @@ def _raw_pre_fusion_overlap(
             state="unavailable",
             reason="raw pre-fusion overlap is not retained by the pipeline",
         )
-    if any(failure.stage in {"keyword", "vector"} for failure in failures):
+    if any(failure.stage in {"keyword", "vector", "graph"} for failure in failures):
         return DiagnosticCapability(
             state="unavailable",
             reason="raw pre-fusion overlap is not retained by the pipeline",
