@@ -85,6 +85,21 @@ class SQLiteCacheStore:
         except sqlite3.Error:
             pass
 
+    def close(self) -> None:
+        """Close this thread's owned SQLite connection."""
+        conn = getattr(self._local, "connection", None)
+        if conn is None:
+            return
+        self._local.connection = None
+        self._local.pid = None
+        self._close_connection(conn)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except (AttributeError, sqlite3.Error):
+            return
+
     def _discard_connection(self, conn: sqlite3.Connection) -> None:
         if getattr(self._local, "connection", None) is conn:
             self._local.connection = None
