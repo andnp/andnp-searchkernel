@@ -16,6 +16,11 @@ class EvalGatePolicy:
     min_mrr_delta: float = 0.0
     min_ap_delta: float = 0.0
     max_latency_p95_delta_ms: float | None = None
+    require_diagnostics: bool = False
+    max_degradation_rate: float | None = None
+    max_duplicate_case_count: int | None = None
+    max_duplicate_result_rate: float | None = None
+    max_semantic_abstention_rate_delta: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +85,60 @@ def evaluate_ab_gate(
                 f"exceeds {max_latency_delta:.3f}"
             )
 
+    if effective_policy.require_diagnostics:
+        for name, candidate in (
+            ("baseline", report.report_a),
+            ("candidate", report.report_b),
+        ):
+            if candidate.diagnostics_complete is not True:
+                failures.append(f"{name} diagnostics are unavailable or incomplete")
+
+    max_degradation_rate = effective_policy.max_degradation_rate
+    if max_degradation_rate is not None:
+        candidate_rate = report.report_b.degradation_rate
+        if candidate_rate is None:
+            failures.append("degradation_rate is unavailable")
+        elif candidate_rate > max_degradation_rate:
+            failures.append(
+                f"degradation_rate={candidate_rate:.6f} exceeds "
+                f"{max_degradation_rate:.6f}"
+            )
+
+    max_duplicate_count = effective_policy.max_duplicate_case_count
+    if max_duplicate_count is not None:
+        duplicate_count = report.report_b.duplicate_result_count
+        if duplicate_count > max_duplicate_count:
+            failures.append(
+                f"duplicate_result_count={duplicate_count} exceeds "
+                f"{max_duplicate_count}"
+            )
+
+    max_duplicate_rate = effective_policy.max_duplicate_result_rate
+    if max_duplicate_rate is not None:
+        duplicate_rate = report.report_b.duplicate_result_rate
+        if duplicate_rate is None:
+            failures.append("duplicate_result_rate is unavailable")
+        elif duplicate_rate > max_duplicate_rate:
+            failures.append(
+                f"duplicate_result_rate={duplicate_rate:.6f} exceeds "
+                f"{max_duplicate_rate:.6f}"
+            )
+
+    abstention_delta_limit = effective_policy.max_semantic_abstention_rate_delta
+    if abstention_delta_limit is not None:
+        abstention_delta = _report_delta(
+            report.semantic_abstention_rate_delta,
+            report.report_a.semantic_abstention_rate,
+            report.report_b.semantic_abstention_rate,
+        )
+        if abstention_delta is None:
+            failures.append("semantic_abstention_rate_delta is unavailable")
+        elif abstention_delta > abstention_delta_limit:
+            failures.append(
+                f"semantic_abstention_rate_delta={abstention_delta:.6f} exceeds "
+                f"{abstention_delta_limit:.6f}"
+            )
+
     return EvalGateResult(passed=not failures, failures=tuple(failures))
 
 
@@ -103,3 +162,15 @@ def _check_delta(
         failures.append(f"{name}_delta is unavailable")
     elif actual < minimum:
         failures.append(f"{name}_delta={actual:.6f} is below {minimum:.6f}")
+
+
+def _report_delta(
+    explicit: float | None,
+    baseline: float | None,
+    candidate: float | None,
+) -> float | None:
+    if explicit is not None:
+        return explicit
+    if baseline is None or candidate is None:
+        return None
+    return candidate - baseline

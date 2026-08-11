@@ -10,7 +10,7 @@ import os
 import platform
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -74,6 +74,9 @@ class SearchExecution:
     ids: tuple[str, ...]
     source_kinds: dict[str, str] = field(default_factory=dict)
     trace: QueryTrace | None = None
+    diagnostics_complete: bool | None = None
+    degraded: bool | None = None
+    semantic_abstained: bool | None = None
 
 
 @dataclass
@@ -94,6 +97,13 @@ class MetricSnapshot:
     source_coverage: float | None = None
     stage_timings_ms: dict[str, float] = field(default_factory=dict)
     duplicate_result_ids: list[str] = field(default_factory=list)
+    query_class: str | None = None
+    diagnostics_complete: bool | None = None
+    degraded: bool | None = None
+    semantic_abstained: bool | None = None
+
+
+SearchObservation = MetricSnapshot
 
 
 @dataclass
@@ -110,6 +120,10 @@ class SliceReport:
     latency_p50_ms: float | None
     latency_p95_ms: float | None
     latency_p99_ms: float | None
+    degradation_rate: float | None = None
+    duplicate_result_rate: float | None = None
+    semantic_abstention_rate: float | None = None
+    diagnostics_complete: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the slice aggregate."""
@@ -124,6 +138,10 @@ class SliceReport:
             "latency_p50_ms": self.latency_p50_ms,
             "latency_p95_ms": self.latency_p95_ms,
             "latency_p99_ms": self.latency_p99_ms,
+            "degradation_rate": self.degradation_rate,
+            "duplicate_result_rate": self.duplicate_result_rate,
+            "semantic_abstention_rate": self.semantic_abstention_rate,
+            "diagnostics_complete": self.diagnostics_complete,
         }
 
 
@@ -158,6 +176,11 @@ class EvalReport:
     concurrency: int = 1
     wall_time_ms: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    diagnostics_complete: bool | None = None
+    degradation_rate: float | None = None
+    duplicate_result_count: int = 0
+    duplicate_result_rate: float | None = None
+    semantic_abstention_rate: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the report, including per-query distributions."""
@@ -188,6 +211,11 @@ class EvalReport:
             "per_source_recall": self.per_source_recall,
             "slices": {name: value.to_dict() for name, value in self.slices.items()},
             "metadata": self.metadata,
+            "diagnostics_complete": self.diagnostics_complete,
+            "degradation_rate": self.degradation_rate,
+            "duplicate_result_count": self.duplicate_result_count,
+            "duplicate_result_rate": self.duplicate_result_rate,
+            "semantic_abstention_rate": self.semantic_abstention_rate,
             "per_query_metrics": [
                 {
                     "query": metric.query,
@@ -204,6 +232,10 @@ class EvalReport:
                     "source_coverage": metric.source_coverage,
                     "stage_timings_ms": metric.stage_timings_ms,
                     "duplicate_result_ids": metric.duplicate_result_ids,
+                    "query_class": metric.query_class,
+                    "diagnostics_complete": metric.diagnostics_complete,
+                    "degraded": metric.degraded,
+                    "semantic_abstained": metric.semantic_abstained,
                 }
                 for metric in self.metrics
             ],
@@ -240,6 +272,10 @@ class AbReport:
     latency_p50_delta_ms: float | None = None
     latency_p95_delta_ms: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    degradation_rate_delta: float | None = None
+    duplicate_result_count_delta: int | None = None
+    duplicate_result_rate_delta: float | None = None
+    semantic_abstention_rate_delta: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the A/B reports and their deltas."""
@@ -253,6 +289,10 @@ class AbReport:
                 "ap": self.ap_delta,
                 "latency_p50_ms": self.latency_p50_delta_ms,
                 "latency_p95_ms": self.latency_p95_delta_ms,
+                "degradation_rate": self.degradation_rate_delta,
+                "duplicate_result_count": self.duplicate_result_count_delta,
+                "duplicate_result_rate": self.duplicate_result_rate_delta,
+                "semantic_abstention_rate": self.semantic_abstention_rate_delta,
             },
             "metadata": self.metadata,
         }
@@ -367,7 +407,18 @@ def _normalize_search_result(result: object) -> SearchExecution:
         ids.append(result_id)
         if isinstance(source_kind, str):
             source_kinds[result_id] = source_kind
-    return SearchExecution(tuple(ids), source_kinds, returned_trace)
+    return SearchExecution(
+        tuple(ids),
+        source_kinds,
+        returned_trace,
+        _optional_bool(getattr(result, "diagnostics_complete", None)),
+        _optional_bool(getattr(result, "degraded", None)),
+        _optional_bool(getattr(result, "semantic_abstained", None)),
+    )
+
+
+def _optional_bool(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
 
 
 def _run_search(
@@ -452,6 +503,7 @@ def _snapshot(
         repetition=repetition,
         query_type=entry.query_type,
         tags=list(entry.tags),
+        query_class=entry.query_class or entry.query_type,
         source_kinds=sorted(observed_sources),
         empty_result=not ranked_ids,
         source_coverage=source_coverage,
@@ -461,6 +513,9 @@ def _snapshot(
             if span.duration_ms is not None and name != "search"
         },
         duplicate_result_ids=duplicate_result_ids,
+        diagnostics_complete=execution.diagnostics_complete,
+        degraded=execution.degraded,
+        semantic_abstained=execution.semantic_abstained,
     )
 
 
@@ -542,6 +597,8 @@ def _slice_report(metrics: list[MetricSnapshot]) -> SliceReport:
         for metric in metrics
         if metric.source_coverage is not None
     ]
+    degradation = _known_rate(metric.degraded for metric in metrics)
+    abstention = _known_rate(metric.semantic_abstained for metric in metrics)
     return SliceReport(
         count=len(metrics),
         mean_recall_at_k=sum(metric.recall_at_k for metric in metrics) / len(metrics),
@@ -553,7 +610,27 @@ def _slice_report(metrics: list[MetricSnapshot]) -> SliceReport:
         latency_p50_ms=_percentile(latencies, 50) if latencies else None,
         latency_p95_ms=_percentile(latencies, 95) if latencies else None,
         latency_p99_ms=_percentile(latencies, 99) if latencies else None,
+        degradation_rate=degradation,
+        duplicate_result_rate=sum(
+            bool(metric.duplicate_result_ids) for metric in metrics
+        )
+        / len(metrics),
+        semantic_abstention_rate=abstention,
+        diagnostics_complete=_diagnostics_complete(metrics),
     )
+
+
+def _known_rate(values: Iterable[bool | None]) -> float | None:
+    known = [value for value in values if isinstance(value, bool)]
+    return sum(value is True for value in known) / len(known) if known else None
+
+
+def _diagnostics_complete(metrics: list[MetricSnapshot]) -> bool | None:
+    values = [metric.diagnostics_complete for metric in metrics]
+    known = [value for value in values if isinstance(value, bool)]
+    if not known:
+        return None
+    return len(known) == len(metrics) and all(known)
 
 
 def _stage_latency_percentiles(
@@ -618,6 +695,15 @@ def _build_report(
     report.mean_mrr = sum(metric.mrr for metric in metrics) / len(metrics)
     report.mean_ap = sum(metric.ap for metric in metrics) / len(metrics)
     report.empty_result_rate = sum(metric.empty_result for metric in metrics) / len(metrics)
+    report.diagnostics_complete = _diagnostics_complete(metrics)
+    report.degradation_rate = _known_rate(metric.degraded for metric in metrics)
+    report.duplicate_result_count = sum(
+        bool(metric.duplicate_result_ids) for metric in metrics
+    )
+    report.duplicate_result_rate = report.duplicate_result_count / len(metrics)
+    report.semantic_abstention_rate = _known_rate(
+        metric.semantic_abstained for metric in metrics
+    )
     coverage = [
         metric.source_coverage
         for metric in metrics
@@ -643,6 +729,8 @@ def _build_report(
     for metric in metrics:
         if metric.query_type is not None:
             slices[f"query_type:{metric.query_type}"].append(metric)
+        if metric.query_class is not None:
+            slices[f"query_class:{metric.query_class}"].append(metric)
         for tag in metric.tags:
             slices[f"tag:{tag}"].append(metric)
         for source_kind in metric.source_kinds:
@@ -787,4 +875,25 @@ def ab_eval(
         ab_report.latency_p50_delta_ms = report_b.latency_p50_ms - report_a.latency_p50_ms
     if report_a.latency_p95_ms is not None and report_b.latency_p95_ms is not None:
         ab_report.latency_p95_delta_ms = report_b.latency_p95_ms - report_a.latency_p95_ms
+    if report_a.degradation_rate is not None and report_b.degradation_rate is not None:
+        ab_report.degradation_rate_delta = (
+            report_b.degradation_rate - report_a.degradation_rate
+        )
+    ab_report.duplicate_result_count_delta = (
+        report_b.duplicate_result_count - report_a.duplicate_result_count
+    )
+    if (
+        report_a.duplicate_result_rate is not None
+        and report_b.duplicate_result_rate is not None
+    ):
+        ab_report.duplicate_result_rate_delta = (
+            report_b.duplicate_result_rate - report_a.duplicate_result_rate
+        )
+    if (
+        report_a.semantic_abstention_rate is not None
+        and report_b.semantic_abstention_rate is not None
+    ):
+        ab_report.semantic_abstention_rate_delta = (
+            report_b.semantic_abstention_rate - report_a.semantic_abstention_rate
+        )
     return ab_report

@@ -1,6 +1,15 @@
 """Tests for benchmark artifact contracts and stable regression gates."""
 
 from benchmarks.evidence import EvidencePolicy, compare_report, validate_report
+from searchkernel.eval.evidence import (
+    EvidencePolicy as ProviderEvidencePolicy,
+)
+from searchkernel.eval.evidence import (
+    compare_report as compare_provider_report,
+)
+from searchkernel.eval.evidence import (
+    validate_report as validate_provider_report,
+)
 
 
 def _report() -> dict[str, object]:
@@ -61,3 +70,70 @@ def test_compare_report_can_enable_relative_latency_gate() -> None:
 
     assert result["passed"] is False
     assert any("latency_p95 regression" in failure for failure in result["failures"])
+
+
+def test_provider_evidence_uses_none_for_unavailable_diagnostics() -> None:
+    """Provider-neutral validation distinguishes absent diagnostics from zero rates."""
+    report = {
+        "measured_repetitions": 2,
+        "per_query_metrics": [{}, {}],
+        "mean_recall_at_k": 1.0,
+        "mean_ndcg_at_k": 1.0,
+        "mean_mrr": 1.0,
+        "mean_ap": 1.0,
+        "diagnostics_complete": True,
+        "degradation_rate": 0.0,
+        "duplicate_result_count": 0,
+        "semantic_abstention_rate": 0.0,
+    }
+
+    assert validate_provider_report(
+        report, ProviderEvidencePolicy(min_repetitions=2, require_diagnostics=True)
+    ) == []
+
+    unavailable = dict(report)
+    unavailable["diagnostics_complete"] = None
+    assert "diagnostics are unavailable or incomplete" in validate_provider_report(
+        unavailable,
+        ProviderEvidencePolicy(min_repetitions=2, require_diagnostics=True),
+    )
+
+
+def test_provider_evidence_returns_deterministic_acceptance_report() -> None:
+    """Acceptance serialization sorts deltas and reports stability failures."""
+    baseline = {
+        "mean_recall_at_k": 1.0,
+        "mean_ndcg_at_k": 1.0,
+        "mean_mrr": 1.0,
+        "mean_ap": 1.0,
+        "diagnostics_complete": True,
+        "degradation_rate": 0.0,
+        "duplicate_result_count": 0,
+        "semantic_abstention_rate": 0.1,
+    }
+    candidate = dict(baseline)
+    candidate.update(
+        degradation_rate=0.2,
+        duplicate_result_count=1,
+        semantic_abstention_rate=0.3,
+    )
+
+    result = compare_provider_report(
+        candidate,
+        baseline,
+        ProviderEvidencePolicy(
+            require_diagnostics=True,
+            max_degradation_rate=0.1,
+            max_duplicate_result_count=0,
+            max_semantic_abstention_rate_delta=0.1,
+        ),
+    )
+
+    assert result["passed"] is False
+    assert list(result.to_dict()["deltas"]) == [
+        "mean_ap",
+        "mean_mrr",
+        "mean_ndcg_at_k",
+        "mean_recall_at_k",
+    ]
+    assert any("degradation_rate" in failure for failure in result.failures)

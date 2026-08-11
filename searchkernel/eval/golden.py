@@ -41,6 +41,9 @@ class GoldenEntry:
     split: str | None = None
     """Optional dataset split: train, validation, or test."""
 
+    query_class: str | None = None
+    """Optional provider-neutral query class for evaluation slices."""
+
     def __post_init__(self) -> None:
         """Normalize mutable inputs and make graded gains authoritative."""
         self.relevant_ids = list(self.relevant_ids)
@@ -74,6 +77,8 @@ class GoldenEntry:
             data["corpus_version"] = self.corpus_version
         if self.split is not None:
             data["split"] = self.split
+        if self.query_class is not None:
+            data["query_class"] = self.query_class
         return data
 
     @classmethod
@@ -89,6 +94,7 @@ class GoldenEntry:
             tags=data.get("tags", []),
             corpus_version=data.get("corpus_version"),
             split=data.get("split"),
+            query_class=data.get("query_class"),
         )
 
 

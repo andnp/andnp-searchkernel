@@ -1,5 +1,11 @@
 """Evaluation and observability harness for retrieval quality and latency measurement."""
 
+from searchkernel.eval.evidence import (
+    AcceptanceReport,
+    EvidencePolicy,
+    compare_report,
+    validate_report,
+)
 from searchkernel.eval.gates import (
     EvalGatePolicy,
     EvalGateResult,
@@ -15,6 +21,7 @@ from searchkernel.eval.runner import (
     EvalReport,
     MetricSnapshot,
     SearchExecution,
+    SearchObservation,
     SliceReport,
     ab_eval,
     run_benchmark,
@@ -30,6 +37,7 @@ from searchkernel.eval.synthetic import (
 
 __all__ = [
     "AbReport",
+    "AcceptanceReport",
     "BenchmarkConfig",
     "BenchmarkHooks",
     "BenchmarkReport",
@@ -37,11 +45,14 @@ __all__ = [
     "EvalGateResult",
     "EvalReport",
     "EvaluationGateError",
+    "EvidencePolicy",
     "MetricSnapshot",
     "SearchExecution",
+    "SearchObservation",
     "SliceReport",
     "SyntheticCorpus",
     "ab_eval",
+    "compare_report",
     "enforce_ab_gate",
     "evaluate_ab_gate",
     "make_1k_corpus",
@@ -50,4 +61,5 @@ __all__ = [
     "make_synthetic_corpus",
     "run_benchmark",
     "run_eval",
+    "validate_report",
 ]

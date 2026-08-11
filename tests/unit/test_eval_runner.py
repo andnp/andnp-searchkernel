@@ -114,6 +114,46 @@ def test_run_eval_reports_duplicate_result_ids():
     assert report.to_dict()["per_query_metrics"][0]["duplicate_result_ids"] == ["a"]
 
 
+def test_run_eval_preserves_diagnostic_unavailability_and_measured_zero() -> None:
+    """Unavailable diagnostics remain null while measured false values yield zero."""
+    golden_set = GoldenSet(
+        entries=[
+            GoldenEntry(query="known", relevant_ids=["a"]),
+            GoldenEntry(query="unknown", relevant_ids=["b"]),
+        ]
+    )
+
+    def search(query: str) -> SearchExecution:
+        if query == "known":
+            return SearchExecution(
+                ids=("a",),
+                diagnostics_complete=True,
+                degraded=False,
+                semantic_abstained=False,
+            )
+        return SearchExecution(ids=("b",))
+
+    report = run_eval(golden_set, search)
+
+    assert report.diagnostics_complete is False
+    assert report.degradation_rate == 0.0
+    assert report.semantic_abstention_rate == 0.0
+    assert report.duplicate_result_count == 0
+    assert report.duplicate_result_rate == 0.0
+
+
+def test_run_eval_aggregates_query_class_slices() -> None:
+    """Query classes produce deterministic provider-neutral slice aggregates."""
+    golden_set = GoldenSet(
+        entries=[GoldenEntry(query="q", relevant_ids=["a"], query_class="broad")]
+    )
+
+    report = run_eval(golden_set, lambda query: ["a"])
+
+    assert report.slices["query_class:broad"].count == 1
+    assert report.metrics[0].query_class == "broad"
+
+
 def test_run_eval_latency_percentiles():
     """Test that latency percentiles are computed."""
     golden_set = GoldenSet(
@@ -356,6 +396,8 @@ def test_run_eval_empty_golden_set():
     assert len(report.metrics) == 0
     assert report.mean_recall_at_k is None
     assert report.latency_p50_ms is None
+    assert report.degradation_rate is None
+    assert report.semantic_abstention_rate is None
 
 
 def test_ab_eval():
