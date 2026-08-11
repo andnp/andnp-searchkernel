@@ -29,8 +29,15 @@ class BenchmarkConfig:
     concurrency: int = 1
     capture_trace: bool = False
     corpus_version: str | None = None
+    split: str | None = None
     backend: str | None = None
     model_fingerprint: str | None = None
+    vector_dimension: int | None = None
+    indexing_fingerprint: str | None = None
+    ann_build_fingerprint: str | None = None
+    ann_query_policy_fingerprint: str | None = None
+    routing_fingerprint: str | None = None
+    fusion_fingerprint: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     result_source_fn: Callable[[str], str | None] | None = None
     relevant_source_fn: Callable[[str], str | None] | None = None
@@ -346,8 +353,15 @@ def _config_metadata(config: BenchmarkConfig, mode: str) -> dict[str, Any]:
         "concurrency": config.concurrency,
         "capture_trace": config.capture_trace,
         "corpus_version": config.corpus_version,
+        "split": config.split,
         "backend": config.backend,
         "model_fingerprint": config.model_fingerprint,
+        "vector_dimension": config.vector_dimension,
+        "indexing_fingerprint": config.indexing_fingerprint,
+        "ann_build_fingerprint": config.ann_build_fingerprint,
+        "ann_query_policy_fingerprint": config.ann_query_policy_fingerprint,
+        "routing_fingerprint": config.routing_fingerprint,
+        "fusion_fingerprint": config.fusion_fingerprint,
         "metadata": config.metadata,
     }
     environment = _environment_metadata()
@@ -356,8 +370,15 @@ def _config_metadata(config: BenchmarkConfig, mode: str) -> dict[str, Any]:
         "config": config_values,
         "config_fingerprint": _fingerprint(config_values),
         "corpus_version": config.corpus_version,
+        "split": config.split,
         "backend": config.backend,
         "model_fingerprint": config.model_fingerprint,
+        "vector_dimension": config.vector_dimension,
+        "indexing_fingerprint": config.indexing_fingerprint,
+        "ann_build_fingerprint": config.ann_build_fingerprint,
+        "ann_query_policy_fingerprint": config.ann_query_policy_fingerprint,
+        "routing_fingerprint": config.routing_fingerprint,
+        "fusion_fingerprint": config.fusion_fingerprint,
         "environment": environment,
         "environment_fingerprint": _fingerprint(environment),
         **config.metadata,

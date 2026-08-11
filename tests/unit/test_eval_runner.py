@@ -18,6 +18,34 @@ from searchkernel.eval.runner import (
 )
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("split", "test"),
+        ("vector_dimension", 384),
+        ("indexing_fingerprint", "index-v1"),
+        ("ann_build_fingerprint", "ann-build-v1"),
+        ("ann_query_policy_fingerprint", "ann-query-v1"),
+        ("routing_fingerprint", "routing-v1"),
+        ("fusion_fingerprint", "fusion-v1"),
+    ],
+)
+def test_run_eval_config_metadata_fields_are_fingerprinted(field_name, value):
+    """Schema metadata is serialized and changes the config fingerprint."""
+    golden_set = GoldenSet(entries=[GoldenEntry(query="q", relevant_ids=["a"])])
+
+    baseline = run_eval(golden_set, lambda query: ["a"])
+    changed = run_eval(
+        golden_set,
+        lambda query: ["a"],
+        config=BenchmarkConfig(**{field_name: value}),
+    )
+
+    assert changed.metadata[field_name] == value
+    assert changed.to_dict()["metadata"][field_name] == value
+    assert changed.metadata["config_fingerprint"] != baseline.metadata["config_fingerprint"]
+
+
 def test_run_eval_perfect_search():
     """Test eval with a perfect search function."""
     golden_set = GoldenSet(
