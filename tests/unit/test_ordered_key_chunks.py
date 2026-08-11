@@ -45,9 +45,12 @@ def test_embedding_cache_handles_duplicate_keys_across_bounded_batches(
 
     requested = ["key-900", "key-0", "key-900", *vectors]
 
-    assert cache.get_many(requested) == vectors
-    assert cache.metrics.hits == len(vectors)
-    assert cache.metrics.misses == 0
+    try:
+        assert cache.get_many(requested) == vectors
+        assert cache.metrics.hits == len(vectors)
+        assert cache.metrics.misses == 0
+    finally:
+        cache.close()
 
 
 def test_embedding_cache_empty_lookup_is_a_fast_path(tmp_path: Path) -> None:
@@ -56,6 +59,9 @@ def test_embedding_cache_empty_lookup_is_a_fast_path(tmp_path: Path) -> None:
     """
     cache = SQLiteEmbeddingCache(tmp_path / "embeddings.db", "encoder")
 
-    assert cache.get_many([]) == {}
-    assert cache.metrics.hits == 0
-    assert cache.metrics.misses == 0
+    try:
+        assert cache.get_many([]) == {}
+        assert cache.metrics.hits == 0
+        assert cache.metrics.misses == 0
+    finally:
+        cache.close()
