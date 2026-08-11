@@ -98,6 +98,18 @@ def _fuzzy_term_score(query_term: str, tokens: Sequence[str]) -> float:
     )
 
 
+class _FallbackHeapItem:
+    __slots__ = ("hit",)
+
+    def __init__(self, hit: RecordHit) -> None:
+        self.hit = hit
+
+    def __lt__(self, other: Self) -> bool:
+        if self.hit.score != other.hit.score:
+            return self.hit.score < other.hit.score
+        return self.hit.storage_key > other.hit.storage_key
+
+
 class _VectorSnapshotCache(dict[tuple[str, int], VectorSnapshot]):
     """Clear metadata alongside snapshots when storage is externally reset."""
 
@@ -1404,6 +1416,7 @@ class LocalRecordBackend:
         if not terms:
             return []
         clauses, parameters = self._keyword_filter_sql(filters)
+        heap: list[_FallbackHeapItem] = []
         with self._lock:
             conn = self._db.get_connection()
             rows = conn.execute(
@@ -1413,36 +1426,34 @@ class LocalRecordBackend:
                        indexed_text, uri, metadata
                 FROM local_records r
                 WHERE {" AND ".join(clause.replace("r.", "") for clause in clauses)}
-                LIMIT ?
                 """,
-                (*parameters, _FALLBACK_SCAN_MAX_ROWS + 1),
-            ).fetchall()
-        if len(rows) > _FALLBACK_SCAN_MAX_ROWS:
-            self._keyword_search_diagnostic = (
-                "FTS5 indexed lexical search is unavailable; "
-                f"scan fallback refuses corpora over {_FALLBACK_SCAN_MAX_ROWS} rows"
+                (*parameters,),
             )
-            return []
-        hits: list[RecordHit] = []
-        for row in rows:
-            if filters and not self._matches(row, filters):
-                continue
-            indexed_text = row["indexed_text"] or row["body"]
-            haystack = f"{row['title']} {indexed_text}".lower()
-            score = sum(haystack.count(term) for term in terms)
-            if score:
-                hits.append(
-                    RecordHit(
-                        RecordIdentity(
-                            row["workspace_id"],
-                            row["source_kind"],
-                            row["source_id"],
-                        ),
-                        float(score),
-                    )
+            for row in rows:
+                if filters and not self._matches(row, filters):
+                    continue
+                indexed_text = row["indexed_text"] or row["body"]
+                haystack = f"{row['title']} {indexed_text}".lower()
+                score = sum(haystack.count(term) for term in terms)
+                if not score:
+                    continue
+                hit = RecordHit(
+                    RecordIdentity(
+                        row["workspace_id"],
+                        row["source_kind"],
+                        row["source_id"],
+                    ),
+                    float(score),
                 )
-        hits.sort(key=lambda item: (-item.score, item.storage_key))
-        return hits[:k]
+                candidate = _FallbackHeapItem(hit)
+                if len(heap) < k:
+                    heapq.heappush(heap, candidate)
+                elif heap[0] < candidate:
+                    heapq.heapreplace(heap, candidate)
+        return sorted(
+            (candidate.hit for candidate in heap),
+            key=lambda item: (-item.score, item.storage_key),
+        )
 
     def search_vector(
         self,

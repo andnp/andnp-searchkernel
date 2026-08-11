@@ -452,6 +452,40 @@ def test_keyword_search_applies_filters_to_natural_language_fallback(tmp_path) -
     ] == ["kept"]
 
 
+def test_keyword_scan_fallback_scans_large_corpora(tmp_path, monkeypatch) -> None:
+    """
+    The no-FTS fallback finds matches beyond its historical scan threshold.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record("note", f"unrelated-{index}", "unrelated")
+        for index in range(10_001)
+    ]
+    records.append(_record("note", "target", "needle"))
+    backend.index(records)
+    monkeypatch.setattr(backend, "_fts5_available", False)
+
+    assert [hit.source_id for hit in backend.search_keyword("needle", 1)] == [
+        "target"
+    ]
+
+
+def test_keyword_scan_fallback_returns_empty_for_large_no_match(tmp_path, monkeypatch) -> None:
+    """
+    The no-FTS fallback returns no hits when a large corpus has no match.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.index(
+        [
+            _record("note", f"record-{index}", "unrelated")
+            for index in range(10_001)
+        ]
+    )
+    monkeypatch.setattr(backend, "_fts5_available", False)
+
+    assert backend.search_keyword("missing", 10) == []
+
+
 def test_keyword_search_handles_case_sanitization_and_keyword_metadata(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     record = _record(
