@@ -62,10 +62,20 @@ class _CrossEncoderAdapter:
         self._model = model
 
     def predict(self, sentences: list[tuple[str, str]]) -> Iterable[object]:
+        max_input_chars = self.max_input_chars
+        if max_input_chars is not None:
+            sentences = [
+                (query, content[:max_input_chars]) for query, content in sentences
+            ]
         predictions = self._model.predict(sentences)
         if not _is_iterable_scores(predictions):
             raise TypeError("Cross-encoder returned a non-iterable score result")
         return predictions
+
+    @property
+    def max_input_chars(self) -> int | None:
+        value = getattr(self._model, "max_input_chars", None)
+        return value if isinstance(value, int) and value > 0 else None
 
 
 class ReRanker:
@@ -140,11 +150,20 @@ class ReRanker:
         if not candidates:
             return []
 
-        pairs: list[tuple[str, str, str]] = []
-        for chunk_id, _ in candidates:
+        pairs: list[tuple[int, str, str]] = []
+        bypassed: dict[int, tuple[str, float]] = {}
+        max_input_chars = getattr(self._model, "max_input_chars", None)
+        if not isinstance(max_input_chars, int) or max_input_chars <= 0:
+            max_input_chars = None
+        for position, (chunk_id, original_score) in enumerate(candidates):
             content = content_provider(chunk_id)
             if content:
-                pairs.append((chunk_id, query, content))
+                if max_input_chars is not None:
+                    content = content[:max_input_chars]
+                if content:
+                    pairs.append((position, chunk_id, content))
+                    continue
+            bypassed[position] = (chunk_id, original_score)
 
         if not pairs:
             return candidates[:top_n]
@@ -163,14 +182,15 @@ class ReRanker:
             )
 
         chunk_scores = [
-            (chunk_id, _sigmoid(float(score)))
-            for (chunk_id, _, _), score in zip(pairs, scores, strict=False)
+            (position, chunk_id, _sigmoid(float(score)))
+            for (position, chunk_id, _), score in zip(
+                pairs, scores, strict=False
+            )
         ]
-
-        missing_ids = {cid for cid, _ in candidates} - {cid for cid, _, _ in pairs}
-        for chunk_id, original_score in candidates:
-            if chunk_id in missing_ids:
-                chunk_scores.append((chunk_id, original_score * 0.5))
-
-        reranked = sorted(chunk_scores, key=lambda x: x[1], reverse=True)
-        return reranked[:top_n]
+        reranked = sorted(chunk_scores, key=lambda item: (-item[2], item[1]))
+        scored = iter((chunk_id, score) for _, chunk_id, score in reranked)
+        merged = [
+            bypassed[position] if position in bypassed else next(scored)
+            for position in range(len(candidates))
+        ]
+        return merged[:top_n]

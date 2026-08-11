@@ -881,40 +881,63 @@ class RecordSearchPipeline:
         if reranker is None or plan.rerank_budget <= 0 or not results:
             return list(results)
         selected = list(results[: plan.rerank_budget])
-        texts = [
-            f"{result.record.title}\n{result.record.body[:1000]}".strip()
-            for result in selected
-        ]
-        if not all(texts):
-            diagnostics.append("rerank:fallback:empty_text")
+        rerankable: list[tuple[int, RecordSearchResult, str]] = []
+        bypassed_positions: set[int] = set()
+        for position, result in enumerate(selected):
+            indexed_text = result.record.indexed_text or result.record.body
+            text = f"{result.record.title}\n{indexed_text}".strip()
+            max_chars = getattr(reranker, "max_input_chars", None)
+            if isinstance(max_chars, int) and max_chars > 0:
+                text = text[:max_chars]
+            if text:
+                rerankable.append((position, result, text))
+            else:
+                bypassed_positions.add(position)
+        if len(rerankable) != len(selected):
+            diagnostics.append("reranker_bypassed_empty_text")
+        if not rerankable:
             return list(results)
         try:
-            scores = await _call_async(reranker.rerank, query, texts)
-            if len(scores) != len(selected):
+            scores = await _call_async(
+                reranker.rerank, query, [text for _, _, text in rerankable]
+            )
+            if len(scores) != len(rerankable):
                 raise ValueError(
                     f"reranker returned {len(scores)} scores for "
-                    f"{len(selected)} candidates"
+                    f"{len(rerankable)} candidates"
                 )
-            reranked = []
-            for result, score in zip(selected, scores):
+            reranked: list[tuple[int, RecordSearchResult]] = []
+            for (position, result, _), score in zip(
+                rerankable, scores, strict=False
+            ):
                 score = float(score)
                 if not math.isfinite(score):
                     raise ValueError("reranker returned a non-finite score")
                 reranked.append(
-                    RecordSearchResult(
-                        record=result.record,
-                        score=score,
-                        provenance=result.provenance,
-                        chunk_matches=result.chunk_matches,
+                    (
+                        position,
+                        RecordSearchResult(
+                            record=result.record,
+                            score=score,
+                            provenance=result.provenance,
+                            chunk_matches=result.chunk_matches,
+                        ),
                     )
                 )
         except Exception as error:  # noqa: BLE001 - reranking is optional
             self._handle_error("rerank", error, failures)
             diagnostics.append(f"rerank:fallback:{type(error).__name__}")
             return list(results)
-        reranked.sort(key=lambda item: (-item.score, item.storage_key))
+        reranked.sort(key=lambda item: (-item[1].score, item[1].storage_key))
+        ranked_results = iter(result for _, result in reranked)
+        merged = [
+            selected[position]
+            if position in bypassed_positions
+            else next(ranked_results)
+            for position in range(len(selected))
+        ]
         diagnostics.append(f"rerank:applied:{len(reranked)}")
-        return [*reranked, *results[len(selected) :]]
+        return [*merged, *results[len(selected) :]]
 
     async def _aggregate_chunk_results(
         self,

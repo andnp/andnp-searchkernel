@@ -281,6 +281,37 @@ class TestReRankMissingContent:
         )
         assert len(result) == 2
 
+    def test_rerank_bypasses_empty_content_in_place_with_raw_score(self):
+        """
+        Empty content keeps its input position and original score.
+        """
+        class BudgetedCrossEncoder:
+            max_input_chars = 5
+
+            def __init__(self):
+                self.sentences = []
+
+            def predict(self, sentences):
+                self.sentences = sentences
+                return [2.0, 1.0]
+
+        model = BudgetedCrossEncoder()
+        reranker = ReRanker(model_factory=lambda _: model)
+        candidates = [("empty", 0.8), ("first", 0.7), ("second", 0.6)]
+
+        result = reranker.rerank(
+            "query",
+            candidates,
+            lambda chunk_id: {"empty": "", "first": "123456", "second": "abcde"}.get(
+                chunk_id
+            ),
+            top_n=3,
+        )
+
+        assert result[0] == ("empty", 0.8)
+        assert [chunk_id for chunk_id, _ in result[1:]] == ["first", "second"]
+        assert model.sentences == [("query", "12345"), ("query", "abcde")]
+
 
 class TestLazyModelLoading:
     def test_lazy_model_loading_not_loaded_on_init(self):
