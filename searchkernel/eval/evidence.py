@@ -14,8 +14,15 @@ QUALITY_METRICS = (
 )
 METADATA_COMPATIBILITY_FIELDS = (
     "corpus_version",
+    "split",
     "backend",
     "model_fingerprint",
+    "vector_dimension",
+    "indexing_fingerprint",
+    "ann_build_fingerprint",
+    "ann_query_policy_fingerprint",
+    "routing_fingerprint",
+    "fusion_fingerprint",
     "config_fingerprint",
     "environment_fingerprint",
 )

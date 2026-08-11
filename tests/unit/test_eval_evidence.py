@@ -81,8 +81,15 @@ def test_benchmark_evidence_rejects_incompatible_metadata_before_deltas() -> Non
     baseline = {
         "metadata": {
             "corpus_version": "v1",
+            "split": "test",
             "backend": "sqlite",
             "model_fingerprint": "model-v1",
+            "vector_dimension": 384,
+            "indexing_fingerprint": "index-v1",
+            "ann_build_fingerprint": "ann-build-v1",
+            "ann_query_policy_fingerprint": "ann-query-v1",
+            "routing_fingerprint": "routing-v1",
+            "fusion_fingerprint": "fusion-v1",
             "config_fingerprint": "config-v1",
             "environment_fingerprint": "env-v1",
         },
@@ -213,8 +220,15 @@ def test_provider_evidence_rejects_incompatible_metadata_before_deltas() -> None
     baseline = {
         "metadata": {
             "corpus_version": "v1",
+            "split": "test",
             "backend": "sqlite",
             "model_fingerprint": "model-v1",
+            "vector_dimension": 384,
+            "indexing_fingerprint": "index-v1",
+            "ann_build_fingerprint": "ann-build-v1",
+            "ann_query_policy_fingerprint": "ann-query-v1",
+            "routing_fingerprint": "routing-v1",
+            "fusion_fingerprint": "fusion-v1",
             "config_fingerprint": "config-v1",
             "environment_fingerprint": "env-v1",
         },
