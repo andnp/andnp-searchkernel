@@ -1108,6 +1108,7 @@ def test_local_schema_initializes_current_storage_tables(tmp_path: Path) -> None
 
 
 def test_scalar_and_batched_keyword_ingestion_are_equivalent() -> None:
+    """Scalar and batched keyword writes produce identical search hits."""
     records = [
         _record("note", "one", "alpha"),
         _record("note", "two", "beta alpha"),
@@ -1115,15 +1116,19 @@ def test_scalar_and_batched_keyword_ingestion_are_equivalent() -> None:
     ]
     scalar = LocalRecordBackend()
     batched = LocalRecordBackend()
-    for record in records:
-        scalar.index([record])
-    batched.index(records)
+    try:
+        for record in records:
+            scalar.index([record])
+        batched.index(records)
 
-    scalar_hits = scalar.search_keyword("alpha", 10)
-    batch_hits = batched.search_keyword("alpha", 10)
-    assert [(hit.storage_key, hit.score) for hit in scalar_hits] == [
-        (hit.storage_key, hit.score) for hit in batch_hits
-    ]
+        scalar_hits = scalar.search_keyword("alpha", 10)
+        batch_hits = batched.search_keyword("alpha", 10)
+        assert [(hit.storage_key, hit.score) for hit in scalar_hits] == [
+            (hit.storage_key, hit.score) for hit in batch_hits
+        ]
+    finally:
+        scalar.close()
+        batched.close()
 
 
 @pytest.mark.slow
