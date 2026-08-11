@@ -137,3 +137,20 @@ def test_provider_evidence_returns_deterministic_acceptance_report() -> None:
         "mean_recall_at_k",
     ]
     assert any("degradation_rate" in failure for failure in result.failures)
+
+
+def test_provider_evidence_treats_unavailable_baseline_metrics_as_unset() -> None:
+    """
+    Null baseline quality fields do not crash comparison or create a floor.
+    """
+    baseline = {field: None for field in ("mean_recall_at_k", "mean_ndcg_at_k", "mean_mrr", "mean_ap")}
+    candidate = {
+        "mean_recall_at_k": 0.9,
+        "mean_ndcg_at_k": 0.8,
+        "mean_mrr": 0.7,
+        "mean_ap": 0.6,
+    }
+
+    result = compare_provider_report(candidate, baseline, ProviderEvidencePolicy())
+
+    assert result.passed is True

@@ -124,7 +124,12 @@ def compare_report(
     deltas: dict[str, float] = {}
     for field in QUALITY_METRICS:
         value = candidate.get(field)
-        baseline_value = baseline.get(field, 0.0)
+        raw_baseline_value = baseline.get(field)
+        baseline_value = (
+            raw_baseline_value
+            if isinstance(raw_baseline_value, (int, float))
+            else 0.0
+        )
         minimum = max(getattr(policy, f"min_{field}"), baseline_value)
         if not isinstance(value, (int, float)) or value < minimum:
             failures.append(f"{field}={value!r} is below {minimum:.6f}")
