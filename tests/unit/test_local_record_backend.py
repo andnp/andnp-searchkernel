@@ -182,6 +182,24 @@ def test_local_batch_hydration_chunks_large_identity_lists(tmp_path) -> None:
     assert all(hydrated[record.storage_key] is not None for record in records)
 
 
+def test_local_record_operations_chunk_large_key_lists(tmp_path) -> None:
+    """Large record and graph batches stay below SQLite's variable limit."""
+    backend, _keyword, _vector, graph = _backend(tmp_path)
+    records = [_record("note", f"record-{index}", "body") for index in range(1001)]
+    backend.index(records)
+
+    graph.upsert_edges(
+        [
+            (records[index].storage_key, records[index + 1].storage_key, "next", 1.0)
+            for index in range(len(records) - 1)
+        ]
+    )
+
+    assert graph.neighbors(records[0].identity) == [
+        GraphNeighbor(records[1].identity, "next", 1.0)
+    ]
+
+
 def test_local_graph_top_neighbors_are_bounded_and_deterministic(tmp_path) -> None:
     backend, _keyword, _vector, graph = _backend(tmp_path)
     source = _record("note", "source", "source")

@@ -940,14 +940,15 @@ class LocalRecordBackend:
         conn: sqlite3.Connection, records: Sequence[Record]
     ) -> bool:
         keys = list(dict.fromkeys(record.storage_key for record in records))
-        if not keys:
-            return False
-        placeholders = ",".join("?" for _ in keys)
-        row = conn.execute(
-            f"SELECT 1 FROM local_vectors_v2 WHERE storage_key IN ({placeholders}) LIMIT 1",
-            keys,
-        ).fetchone()
-        return row is not None
+        for key_chunk in LocalRecordBackend._key_chunks(keys):
+            placeholders = ",".join("?" for _ in key_chunk)
+            row = conn.execute(
+                f"SELECT 1 FROM local_vectors_v2 WHERE storage_key IN ({placeholders}) LIMIT 1",
+                key_chunk,
+            ).fetchone()
+            if row is not None:
+                return True
+        return False
 
     @staticmethod
     def _status_values(filters: SearchFilters | None) -> set[str]:
@@ -2175,18 +2176,20 @@ class LocalRecordBackend:
                     {source_id for source_id, _, _, _ in rows}
                     | {target_id for _, target_id, _, _ in rows}
                 )
-                placeholders = ",".join("?" for _ in endpoint_keys)
-                existing_keys = {
-                    row[0]
-                    for row in conn.execute(
-                        f"""
-                        SELECT storage_key
-                        FROM local_records
-                        WHERE storage_key IN ({placeholders})
-                        """,
-                        endpoint_keys,
-                    ).fetchall()
-                }
+                existing_keys: set[str] = set()
+                for key_chunk in LocalRecordBackend._key_chunks(endpoint_keys):
+                    placeholders = ",".join("?" for _ in key_chunk)
+                    existing_keys.update(
+                        row[0]
+                        for row in conn.execute(
+                            f"""
+                            SELECT storage_key
+                            FROM local_records
+                            WHERE storage_key IN ({placeholders})
+                            """,
+                            key_chunk,
+                        ).fetchall()
+                    )
                 missing_keys = set(endpoint_keys) - existing_keys
                 if missing_keys:
                     raise ValueError(
