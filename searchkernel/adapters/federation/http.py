@@ -69,6 +69,7 @@ class HttpSearchSource:
         source_identity: SourceIdentity,
         *,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        verify: bool | str = True,
         max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         headers: Mapping[str, str] | None = None,
@@ -87,6 +88,7 @@ class HttpSearchSource:
         self.source_identity = source_identity
         self._base_url = base_url.rstrip("/")
         self._timeout_s = timeout_s
+        self._verify = verify
         self._max_request_bytes = max_request_bytes
         self._max_response_bytes = max_response_bytes
         self._headers = dict(headers or {})
@@ -118,7 +120,10 @@ class HttpSearchSource:
                 if self._client is None:
                     import httpx
 
-                    self._client = httpx.AsyncClient(timeout=self._timeout_s)
+                    self._client = httpx.AsyncClient(
+                        timeout=self._timeout_s,
+                        verify=self._verify,
+                    )
         return self._client
 
     def capabilities(self) -> SourceCapabilities:

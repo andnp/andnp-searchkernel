@@ -201,8 +201,20 @@ async def test_source_reuses_client_and_closes_it() -> None:
         await source.health()
         await source.aclose()
 
-    constructor.assert_called_once_with(timeout=5.0)
+    constructor.assert_called_once_with(timeout=5.0, verify=True)
     client.aclose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verify", ["/etc/ssl/custom-ca.pem", False])
+async def test_source_passes_custom_verify_to_client(verify: bool | str) -> None:
+    """Custom CA paths and disabled verification reach the HTTP client."""
+    client = _client(_response({"status": "ok"}))
+
+    with mock.patch("httpx.AsyncClient", return_value=client) as constructor:
+        await _source(verify=verify).health()
+
+    constructor.assert_called_once_with(timeout=5.0, verify=verify)
 
 
 @pytest.mark.asyncio
