@@ -685,6 +685,45 @@ async def test_parent_expansion_prefers_batch_resolution() -> None:
     assert expander.calls == 1
 
 
+async def test_missing_chunk_parent_is_reported_without_reordering_results() -> None:
+    """Report missing chunk parents while preserving lenient result ordering.
+
+    A hydrated chunk cannot become a result when its parent is unavailable,
+    but the search outcome must retain the existing missing-record contract.
+    """
+    parent = RecordIdentity(None, "fake", "missing-parent")
+    chunk = Record(
+        source_kind="fake",
+        source_id=f"{parent.storage_key}#chunk:0",
+        title="chunk",
+        body="chunk body",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        metadata={
+            "_searchkernel_chunk": True,
+            "_chunk_id": "0",
+            "_chunk_parent_storage_key": parent.storage_key,
+            "_chunk_metadata": {},
+        },
+    )
+    ordinary = _record("ordinary")
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore(
+            [RecordHit(chunk.identity, 1.0), RecordHit(ordinary.identity, 0.9)]
+        ),
+        hydrator=_hydrator({chunk.source_id: chunk, ordinary.source_id: ordinary}),
+        config=RecordSearchConfig(failure_mode="lenient"),
+    )
+
+    outcome = await pipeline.async_search("query", limit=2)
+
+    assert [result.record_id for result in outcome.results] == ["ordinary"]
+    assert outcome.missing_record_ids == ("missing-parent",)
+    assert outcome.diagnostic_evidence is not None
+    assert outcome.diagnostic_evidence.missing_record_ids == ("missing-parent",)
+    assert outcome.diagnostic_evidence.degraded
+
+
 async def test_policy_can_adjust_scores_reject_results_and_post_process() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b")}
     pipeline = RecordSearchPipeline(

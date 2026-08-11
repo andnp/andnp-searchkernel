@@ -815,6 +815,7 @@ class RecordSearchPipeline:
         hydrated = await self._aggregate_chunk_results(
             hydrated,
             failures,
+            missing_record_ids,
             limit=result_limit,
         )
         if self._policy.post_process is not None:
@@ -944,6 +945,7 @@ class RecordSearchPipeline:
         self,
         results: Sequence[RecordSearchResult],
         failures: list[RecordSearchFailure],
+        missing_record_ids: list[str],
         *,
         limit: int,
     ) -> list[RecordSearchResult]:
@@ -967,14 +969,20 @@ class RecordSearchPipeline:
         for parent_key, matches in grouped.items():
             parent = by_parent.get(parent_key)
             if parent is None:
+                parent_identity: RecordIdentity | None = None
                 try:
+                    parent_identity = RecordIdentity.from_storage_key(parent_key)
                     parent_record = await self._hydrate(
-                        RecordIdentity.from_storage_key(parent_key)
+                        parent_identity
                     )
                 except Exception as error:  # noqa: BLE001 - staged hydration failure
                     self._handle_error("hydration", error, failures)
+                    if parent_identity is not None:
+                        missing_record_ids.append(parent_identity.source_id)
                     continue
                 if parent_record is None:
+                    assert parent_identity is not None
+                    missing_record_ids.append(parent_identity.source_id)
                     continue
                 best = max(matches, key=lambda item: (-item.score, item.storage_key))
                 parent = RecordSearchResult(
