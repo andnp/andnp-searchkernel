@@ -2750,6 +2750,42 @@ async def test_hydration_merges_cache_hits_and_batch_loads_in_candidate_order() 
     assert [result.record_id for result in outcome.results] == ["a", "b"]
 
 
+async def test_bulk_hydration_batches_misses_and_preserves_candidate_order() -> None:
+    """Hydration batches stay bounded while all ranked records are returned."""
+    record_ids = [f"record-{index}" for index in range(5)]
+    records = {record_id: _record(record_id) for record_id in record_ids}
+
+    class BatchHydrator:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        async def hydrate_records(
+            self,
+            identities: Sequence[RecordIdentity],
+        ) -> dict[str, Record]:
+            self.calls.append([identity.source_id for identity in identities])
+            return {
+                identity.storage_key: records[identity.source_id]
+                for identity in identities
+            }
+
+    hydrator = BatchHydrator()
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([(record_id, 1.0) for record_id in record_ids]),
+        hydrator=hydrator,
+        config=RecordSearchConfig(max_hydration_batch_size=2),
+    )
+
+    outcome = await pipeline.async_search("query", limit=5)
+
+    assert hydrator.calls == [
+        ["record-0", "record-1"],
+        ["record-2", "record-3"],
+        ["record-4"],
+    ]
+    assert [result.record_id for result in outcome.results] == record_ids
+
+
 async def test_missing_top_candidate_backfills_from_lower_ranked_candidates() -> None:
     records = {record_id: _record(record_id) for record_id in ("b", "c")}
 

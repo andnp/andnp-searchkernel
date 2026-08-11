@@ -240,6 +240,7 @@ class RecordSearchConfig:
     max_neighbors_per_seed: int = 10
     max_graph_concurrency: int = 8
     max_hydration_concurrency: int = 8
+    max_hydration_batch_size: int = 100
     artifact_confidence_threshold: float = 0.75
     rerank_budget: int = 0
     expansion_enabled: bool = False
@@ -1271,26 +1272,31 @@ class RecordSearchPipeline:
             return cached
         hydrate_records = getattr(self._hydrator, "hydrate_records", None)
         if callable(hydrate_records):
-            result = await _capture_stage(
-                "hydration",
-                lambda: _call_async(
-                    hydrate_records,
-                    [candidate.identity for candidate in misses],
-                ),
-            )
-            if result[2] is not None:
-                for candidate in misses:
-                    key = versioned_keys.get(candidate.storage_key)
-                    if key is not None:
-                        self._hydration_cache.fail(key, result[2])
-            records = self._consume_stage(result, failures)
-            if records is None:
-                return cached
-            records_by_key = cast(Mapping[str, Record | None], records)
-            loaded = [
-                (candidate, records_by_key.get(candidate.storage_key))
-                for candidate in misses
-            ]
+            loaded: list[tuple[RecordSearchCandidate, Record | None]] = []
+            for offset in range(0, len(misses), self._config.max_hydration_batch_size):
+                hydration_batch = misses[
+                    offset : offset + self._config.max_hydration_batch_size
+                ]
+                result = await _capture_stage(
+                    "hydration",
+                    lambda batch=hydration_batch: _call_async(
+                        hydrate_records,
+                        [candidate.identity for candidate in batch],
+                    ),
+                )
+                if result[2] is not None:
+                    for candidate in hydration_batch:
+                        key = versioned_keys.get(candidate.storage_key)
+                        if key is not None:
+                            self._hydration_cache.fail(key, result[2])
+                records = self._consume_stage(result, failures)
+                if records is None:
+                    continue
+                records_by_key = cast(Mapping[str, Record | None], records)
+                loaded.extend(
+                    (candidate, records_by_key.get(candidate.storage_key))
+                    for candidate in hydration_batch
+                )
             self._store_hydration_cache(
                 versioned,
                 loaded,
@@ -1989,6 +1995,8 @@ class RecordSearchPipeline:
             raise ValueError("graph_only_penalty must be between zero and one")
         if self._config.max_hydration_concurrency < 1:
             raise ValueError("max_hydration_concurrency must be positive")
+        if self._config.max_hydration_batch_size < 1:
+            raise ValueError("max_hydration_batch_size must be positive")
         if self._config.max_chunk_matches < 1:
             raise ValueError("max_chunk_matches must be positive")
         if self._config.failure_mode not in {"strict", "lenient"}:
