@@ -14,6 +14,13 @@ QUALITY_METRICS = (
     "mean_mrr",
     "mean_ap",
 )
+METADATA_COMPATIBILITY_FIELDS = (
+    "corpus_version",
+    "backend",
+    "model_fingerprint",
+    "config_fingerprint",
+    "environment_fingerprint",
+)
 
 
 @dataclass(frozen=True)
@@ -26,6 +33,7 @@ class EvidencePolicy:
     min_mean_mrr: float = 0.0
     min_mean_ap: float = 0.0
     max_latency_regression_ratio: float | None = None
+    require_metadata_compatibility: bool = False
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> EvidencePolicy:
@@ -39,6 +47,9 @@ class EvidencePolicy:
                 None
                 if values.get("max_latency_regression_ratio") is None
                 else float(values["max_latency_regression_ratio"])
+            ),
+            require_metadata_compatibility=bool(
+                values.get("require_metadata_compatibility", False)
             ),
         )
         if policy.min_repetitions < 1:
@@ -92,6 +103,17 @@ def compare_report(
 ) -> dict[str, Any]:
     """Compare stable quality metrics and optionally relative latency."""
     failures: list[str] = []
+    metadata_failures = _metadata_compatibility_failures(
+        candidate, baseline, policy.require_metadata_compatibility
+    )
+    if metadata_failures:
+        return {
+            "passed": False,
+            "failures": metadata_failures,
+            "deltas": {},
+            "latency_regression_ratio": None,
+        }
+
     deltas: dict[str, float] = {}
     for field in QUALITY_METRICS:
         value = candidate.get(field)
@@ -114,3 +136,34 @@ def compare_report(
                     f"{policy.max_latency_regression_ratio:.6f}"
                 )
     return {"passed": not failures, "failures": failures, "deltas": deltas, "latency_regression_ratio": latency_ratio}
+
+
+def _metadata_compatibility_failures(
+    candidate: dict[str, Any], baseline: dict[str, Any], strict: bool
+) -> list[str]:
+    """Return incompatibilities while tolerating omitted legacy metadata."""
+    candidate_metadata = candidate.get("metadata")
+    baseline_metadata = baseline.get("metadata")
+    if not strict and not isinstance(candidate_metadata, dict):
+        return []
+    if not strict and not isinstance(baseline_metadata, dict):
+        return []
+    if not isinstance(candidate_metadata, dict) or not isinstance(baseline_metadata, dict):
+        return ["metadata compatibility requires metadata on both reports"]
+
+    failures: list[str] = []
+    for field in METADATA_COMPATIBILITY_FIELDS:
+        candidate_value = candidate_metadata.get(field)
+        baseline_value = baseline_metadata.get(field)
+        if strict and (not candidate_value or not baseline_value):
+            failures.append(f"metadata field unavailable for compatibility: {field}")
+        elif (
+            candidate_value is not None
+            and baseline_value is not None
+            and candidate_value != baseline_value
+        ):
+            failures.append(
+                f"metadata incompatible: {field}={candidate_value!r} "
+                f"does not match baseline {baseline_value!r}"
+            )
+    return failures

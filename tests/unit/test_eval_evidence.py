@@ -278,5 +278,4 @@ def test_provider_evidence_allows_omitted_metadata_by_default() -> None:
     result = compare_provider_report(candidate, baseline, ProviderEvidencePolicy())
 
     assert result.passed is True
-    assert result.deltas[0][0] == "mean_recall_at_k"
-    assert result.deltas[0][1] == pytest.approx(0.1)
+    assert dict(result.deltas)["mean_recall_at_k"] == pytest.approx(0.1)
