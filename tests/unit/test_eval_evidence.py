@@ -1,5 +1,7 @@
 """Tests for benchmark artifact contracts and stable regression gates."""
 
+import pytest
+
 from benchmarks.evidence import EvidencePolicy, compare_report, validate_report
 from searchkernel.eval.evidence import (
     EvidencePolicy as ProviderEvidencePolicy,
@@ -70,6 +72,54 @@ def test_compare_report_can_enable_relative_latency_gate() -> None:
 
     assert result["passed"] is False
     assert any("latency_p95 regression" in failure for failure in result["failures"])
+
+
+def test_benchmark_evidence_rejects_incompatible_metadata_before_deltas() -> None:
+    """
+    The public benchmark wrapper rejects strict metadata mismatches first.
+    """
+    baseline = {
+        "metadata": {
+            "corpus_version": "v1",
+            "backend": "sqlite",
+            "model_fingerprint": "model-v1",
+            "config_fingerprint": "config-v1",
+            "environment_fingerprint": "env-v1",
+        },
+        "mean_recall_at_k": 0.8,
+    }
+    candidate = dict(baseline)
+    candidate["metadata"] = dict(baseline["metadata"])
+    candidate["metadata"]["config_fingerprint"] = "config-v2"
+    candidate["mean_recall_at_k"] = 0.9
+
+    result = compare_report(
+        candidate,
+        baseline,
+        EvidencePolicy(require_metadata_compatibility=True),
+    )
+
+    assert result["passed"] is False
+    assert any("metadata incompatible: config_fingerprint" in failure for failure in result["failures"])
+    assert result["deltas"] == {}
+
+
+def test_benchmark_evidence_loads_strict_metadata_policy() -> None:
+    """
+    JSON policies can opt into strict report metadata compatibility.
+    """
+    policy = EvidencePolicy.from_dict({"require_metadata_compatibility": True})
+
+    result = compare_report(
+        {"mean_recall_at_k": 1.0},
+        {"mean_recall_at_k": 1.0},
+        policy,
+    )
+
+    assert result["passed"] is False
+    assert result["failures"] == [
+        "metadata compatibility requires metadata on both reports"
+    ]
 
 
 def test_provider_evidence_uses_none_for_unavailable_diagnostics() -> None:
@@ -154,3 +204,79 @@ def test_provider_evidence_treats_unavailable_baseline_metrics_as_unset() -> Non
     result = compare_provider_report(candidate, baseline, ProviderEvidencePolicy())
 
     assert result.passed is True
+
+
+def test_provider_evidence_rejects_incompatible_metadata_before_deltas() -> None:
+    """
+    Strictly comparable reports reject metadata mismatches before quality deltas.
+    """
+    baseline = {
+        "metadata": {
+            "corpus_version": "v1",
+            "backend": "sqlite",
+            "model_fingerprint": "model-v1",
+            "config_fingerprint": "config-v1",
+            "environment_fingerprint": "env-v1",
+        },
+        "mean_recall_at_k": 0.8,
+    }
+    candidate = dict(baseline)
+    candidate["metadata"] = dict(baseline["metadata"])
+    candidate["metadata"]["backend"] = "postgres"
+    candidate["mean_recall_at_k"] = 0.9
+
+    result = compare_provider_report(
+        candidate,
+        baseline,
+        ProviderEvidencePolicy(require_metadata_compatibility=True),
+    )
+
+    assert result.passed is False
+    assert any(
+        "metadata incompatible: backend='postgres'" in failure
+        for failure in result.failures
+    )
+    assert result.deltas == ()
+
+
+def test_provider_evidence_strict_metadata_requires_the_report_contract() -> None:
+    """
+    Strict metadata comparison rejects legacy reports without contract fields.
+    """
+    report = {"mean_recall_at_k": 1.0}
+
+    result = compare_provider_report(
+        report,
+        report,
+        ProviderEvidencePolicy(require_metadata_compatibility=True),
+    )
+
+    assert result.passed is False
+    assert result.failures == (
+        "metadata compatibility requires metadata on both reports",
+    )
+
+
+def test_provider_evidence_allows_omitted_metadata_by_default() -> None:
+    """
+    Default comparison remains compatible with reports from before metadata.
+    """
+    candidate = _report()
+    baseline = {
+        field: candidate[field]
+        for field in (
+            "mean_recall_at_k",
+            "mean_ndcg_at_k",
+            "mean_mrr",
+            "mean_ap",
+        )
+    }
+    candidate.pop("metadata")
+    candidate["mean_recall_at_k"] = 0.9
+    baseline["mean_recall_at_k"] = 0.8
+
+    result = compare_provider_report(candidate, baseline, ProviderEvidencePolicy())
+
+    assert result.passed is True
+    assert result.deltas[0][0] == "mean_recall_at_k"
+    assert result.deltas[0][1] == pytest.approx(0.1)

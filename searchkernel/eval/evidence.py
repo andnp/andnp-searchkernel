@@ -12,6 +12,13 @@ QUALITY_METRICS = (
     "mean_mrr",
     "mean_ap",
 )
+METADATA_COMPATIBILITY_FIELDS = (
+    "corpus_version",
+    "backend",
+    "model_fingerprint",
+    "config_fingerprint",
+    "environment_fingerprint",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +35,7 @@ class EvidencePolicy:
     max_degradation_rate: float | None = None
     max_duplicate_result_count: int | None = None
     max_semantic_abstention_rate_delta: float | None = None
+    require_metadata_compatibility: bool = False
 
     def __post_init__(self) -> None:
         if self.min_repetitions < 1:
@@ -121,6 +129,12 @@ def compare_report(
 ) -> AcceptanceReport:
     """Compare quality, diagnostics, duplicates, abstention, and latency."""
     failures: list[str] = []
+    metadata_failures = _metadata_compatibility_failures(
+        candidate, baseline, policy.require_metadata_compatibility
+    )
+    if metadata_failures:
+        return AcceptanceReport(passed=False, failures=tuple(metadata_failures))
+
     deltas: dict[str, float] = {}
     for field in QUALITY_METRICS:
         value = candidate.get(field)
@@ -201,3 +215,33 @@ def compare_report(
 
 def _finite_number(value: object) -> TypeGuard[int | float]:
     return isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def _metadata_compatibility_failures(
+    candidate: dict[str, Any], baseline: dict[str, Any], strict: bool
+) -> list[str]:
+    """Return incompatibilities while tolerating omitted legacy metadata."""
+    candidate_metadata = candidate.get("metadata")
+    baseline_metadata = baseline.get("metadata")
+    if not strict and not isinstance(candidate_metadata, dict):
+        return []
+    if not strict and not isinstance(baseline_metadata, dict):
+        return []
+    if not isinstance(candidate_metadata, dict) or not isinstance(baseline_metadata, dict):
+        return ["metadata compatibility requires metadata on both reports"]
+
+    failures: list[str] = []
+    for field in METADATA_COMPATIBILITY_FIELDS:
+        candidate_value = candidate_metadata.get(field)
+        baseline_value = baseline_metadata.get(field)
+        if strict and (not candidate_value or not baseline_value):
+            failures.append(f"metadata field unavailable for compatibility: {field}")
+        elif (
+            candidate_value is not None
+            and baseline_value is not None
+            and candidate_value != baseline_value
+        ):
+            failures.append(
+                f"metadata incompatible: {field}={candidate_value!r}"
+            )
+    return failures
