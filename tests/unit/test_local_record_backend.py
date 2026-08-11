@@ -486,6 +486,32 @@ def test_keyword_scan_fallback_returns_empty_for_large_no_match(tmp_path, monkey
     assert backend.search_keyword("missing", 10) == []
 
 
+def test_keyword_scan_fallback_matches_uri_and_metadata_keywords(tmp_path, monkeypatch) -> None:
+    """
+    The fallback searches the same URI and metadata keyword fields as FTS.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.index(
+        [
+            _record(
+                "note",
+                "artifact",
+                "unrelated body",
+                uri="/repo/needle.py",
+                metadata={"tags": ["keyword"]},
+            )
+        ]
+    )
+    monkeypatch.setattr(backend, "_fts5_available", False)
+
+    assert [hit.source_id for hit in backend.search_keyword("needle", 10)] == [
+        "artifact"
+    ]
+    assert [hit.source_id for hit in backend.search_keyword("keyword", 10)] == [
+        "artifact"
+    ]
+
+
 def test_keyword_search_handles_case_sanitization_and_keyword_metadata(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     record = _record(

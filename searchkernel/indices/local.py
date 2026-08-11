@@ -61,6 +61,7 @@ _LOCAL_KEYWORD_SCHEMA_VERSION = 4
 _LOCAL_FTS_TABLE = "local_records_fts"
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
+_FALLBACK_SCAN_BATCH_SIZE = 1_000
 _FUZZY_QUERY_MAX_TERMS = 4
 _FUZZY_ROW_TOKEN_LIMIT = 256
 _FUZZY_TERM_RATIO = 0.82
@@ -1417,23 +1418,38 @@ class LocalRecordBackend:
             return []
         clauses, parameters = self._keyword_filter_sql(filters)
         heap: list[_FallbackHeapItem] = []
-        with self._lock:
-            conn = self._db.get_connection()
-            rows = conn.execute(
-                f"""
-                SELECT storage_key, workspace_id, source_kind, source_id, status,
-                       title, body,
-                       indexed_text, uri, metadata
-                FROM local_records r
-                WHERE {" AND ".join(clause.replace("r.", "") for clause in clauses)}
-                """,
-                (*parameters,),
-            )
+        last_rowid = 0
+        while True:
+            with self._lock:
+                conn = self._db.get_connection()
+                rows = conn.execute(
+                    f"""
+                    SELECT r.rowid, storage_key, workspace_id, source_kind,
+                           source_id, status, title, body, indexed_text, uri,
+                           keywords, metadata
+                    FROM local_records r
+                    WHERE r.rowid > ?
+                      AND {" AND ".join(clause.replace("r.", "") for clause in clauses)}
+                    ORDER BY r.rowid ASC
+                    LIMIT ?
+                    """,
+                    (last_rowid, *parameters, _FALLBACK_SCAN_BATCH_SIZE),
+                ).fetchall()
+            if not rows:
+                break
+            last_rowid = int(rows[-1]["rowid"])
             for row in rows:
                 if filters and not self._matches(row, filters):
                     continue
                 indexed_text = row["indexed_text"] or row["body"]
-                haystack = f"{row['title']} {indexed_text}".lower()
+                haystack = " ".join(
+                    (
+                        row["title"] or "",
+                        indexed_text or "",
+                        row["uri"] or "",
+                        row["keywords"] or "",
+                    )
+                ).lower()
                 score = sum(haystack.count(term) for term in terms)
                 if not score:
                     continue
@@ -1450,6 +1466,8 @@ class LocalRecordBackend:
                     heapq.heappush(heap, candidate)
                 elif heap[0] < candidate:
                     heapq.heapreplace(heap, candidate)
+            if len(rows) < _FALLBACK_SCAN_BATCH_SIZE:
+                break
         return sorted(
             (candidate.hit for candidate in heap),
             key=lambda item: (-item.score, item.storage_key),
