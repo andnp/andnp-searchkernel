@@ -22,6 +22,7 @@ def test_schema_bootstrap_has_public_compatibility_entry_points() -> None:
 
 class _BulkCursor:
     def __init__(self) -> None:
+        self.connection = None
         self.executed: list[tuple[object, object]] = []
         self.executemany_calls: list[tuple[object, object]] = []
 
@@ -147,14 +148,21 @@ def test_upsert_submits_records_with_one_psycopg3_bulk_call() -> None:
             created_at=now,
             updated_at=now,
             metadata={"index": index},
+            embedding=[0.1, 0.2, 0.3],
         )
         for index in range(2)
     ]
 
     store.upsert(records, model_name="test-model", dim=3)
 
-    assert len(cursor.executemany_calls) == 1
-    statement, rows = cursor.executemany_calls[0]
+    assert len(cursor.executemany_calls) == 2
+    record_calls = [
+        call for call in cursor.executemany_calls if "INSERT INTO records" in str(call[0])
+    ]
+    vector_calls = [call for call in cursor.executemany_calls if call not in record_calls]
+    assert len(record_calls) == 1
+    assert len(vector_calls) == 1
+    statement, rows = record_calls[0]
     assert "INSERT INTO records" in str(statement)
     assert len(rows) == len(records)
     assert rows[0][0] == records[0].storage_key
