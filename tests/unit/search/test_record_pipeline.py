@@ -187,6 +187,8 @@ async def test_keyword_only_hydrates_records_with_deterministic_ties() -> None:
         outcome.results[0].storage_key: ("keyword",),
         outcome.results[1].storage_key: ("keyword",),
     }
+    assert outcome.diagnostic_evidence.raw_pre_fusion_overlap.available
+    assert outcome.diagnostic_evidence.raw_pre_fusion_overlap.count == 0
 
 
 async def test_minimum_candidate_limit_applies_to_store_acquisition() -> None:
@@ -245,10 +247,9 @@ async def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
         "keyword",
         "vector",
     )
-    assert outcome.diagnostic_evidence.raw_pre_fusion_overlap.state == (
-        "unavailable"
-    )
-    assert not outcome.diagnostic_evidence.raw_pre_fusion_overlap.available
+    assert outcome.diagnostic_evidence.raw_pre_fusion_overlap.available
+    assert outcome.diagnostic_evidence.raw_pre_fusion_overlap.count == 1
+    assert outcome.diagnostic_evidence.final_duplicate_count == 0
 
 
 async def test_exact_identifier_outranks_nearby_keyword_match() -> None:
@@ -366,6 +367,8 @@ async def test_semantic_retrieval_mode_routes_only_vector(
     )
     assert outcome.diagnostic_evidence is not None
     assert outcome.diagnostic_evidence.enabled_lanes == ("vector",)
+    assert outcome.diagnostic_evidence.raw_pre_fusion_overlap.available
+    assert outcome.diagnostic_evidence.raw_pre_fusion_overlap.count == 0
     assert {
         (skip.lane, skip.reason)
         for skip in outcome.diagnostic_evidence.skipped_lanes
@@ -2655,6 +2658,8 @@ async def test_diagnostics_count_duplicates_after_final_post_processing() -> Non
     record = _record("a")
     pipeline = RecordSearchPipeline(
         keyword_store=FakeKeywordStore([("a", 1.0)]),
+        vector_store=FakeVectorStore([("a", 0.9)]),
+        embedding_provider=FakeEmbedder(),
         hydrator=_hydrator({"a": record}),
         policy=RecordSearchPolicy(
             post_process=lambda results: [*results, results[0]],
@@ -2665,6 +2670,7 @@ async def test_diagnostics_count_duplicates_after_final_post_processing() -> Non
 
     assert [result.record_id for result in outcome.results] == ["a", "a"]
     assert outcome.diagnostic_evidence is not None
+    assert outcome.diagnostic_evidence.raw_pre_fusion_overlap.count == 1
     assert outcome.diagnostic_evidence.final_duplicate_count == 1
 
 

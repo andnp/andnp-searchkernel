@@ -410,6 +410,10 @@ class RecordSearchPipeline:
         cache_diagnostics: list[str] = []
         diagnostics: list[str] = []
         candidate_counts: dict[str, int] = {}
+        raw_pre_fusion_overlap = DiagnosticCapability(
+            state="unavailable",
+            reason="raw pre-fusion overlap is not retained by the pipeline",
+        )
         trace = (
             QueryTrace(query_text=query, include_query=False)
             if self._config.capture_trace
@@ -601,6 +605,7 @@ class RecordSearchPipeline:
                     else:
                         rankings["vector"] = cast(list[RecordHit], value)
 
+            raw_pre_fusion_overlap = _raw_pre_fusion_overlap(rankings, failures)
             fused_scores: dict[str, float] = {}
             if rankings:
                 candidate_counts = {
@@ -860,12 +865,7 @@ class RecordSearchPipeline:
                     for result in hydrated
                 },
                 final_duplicate_count=_duplicate_count(hydrated),
-                raw_pre_fusion_overlap=DiagnosticCapability(
-                    state="unavailable",
-                    reason=(
-                        "raw pre-fusion overlap is not retained by the pipeline"
-                    ),
-                ),
+                raw_pre_fusion_overlap=raw_pre_fusion_overlap,
             ),
         )
 
@@ -2267,6 +2267,32 @@ def _plan_diagnostics(plan: QueryPlan) -> list[str]:
 def _duplicate_count(results: Sequence[RecordSearchResult]) -> int:
     storage_keys = [result.storage_key for result in results]
     return len(storage_keys) - len(set(storage_keys))
+
+
+def _raw_pre_fusion_overlap(
+    rankings: Mapping[str, Sequence[RecordHit]],
+    failures: Sequence[RecordSearchFailure],
+) -> DiagnosticCapability:
+    if not rankings:
+        return DiagnosticCapability(
+            state="unavailable",
+            reason="raw pre-fusion overlap is not retained by the pipeline",
+        )
+    if any(failure.stage in {"keyword", "vector"} for failure in failures):
+        return DiagnosticCapability(
+            state="unavailable",
+            reason="raw pre-fusion overlap is not retained by the pipeline",
+        )
+    if len(rankings) == 1:
+        return DiagnosticCapability(state="available", count=0)
+
+    lane_keys = [
+        {hit.storage_key for hit in ranking} for ranking in rankings.values()
+    ]
+    overlap = lane_keys[0].copy()
+    for keys in lane_keys[1:]:
+        overlap.intersection_update(keys)
+    return DiagnosticCapability(state="available", count=len(overlap))
 
 
 def _semantic_only_requested(filters: Mapping[str, object]) -> bool:
