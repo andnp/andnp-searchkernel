@@ -161,6 +161,12 @@ class InMemorySQLiteDatabase:
         except sqlite3.ProgrammingError:
             return
 
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except (AttributeError, sqlite3.Error):
+            return
+
 
 class DatabaseManager:
     """Thread-safe SQLite database manager with WAL mode."""
