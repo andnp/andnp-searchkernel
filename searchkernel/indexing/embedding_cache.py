@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
-_SQLITE_LOOKUP_BATCH_SIZE = 900
+from searchkernel.utils.ordered_key_chunks import (
+    DEFAULT_KEY_CHUNK_LIMIT,
+    iter_ordered_key_chunks,
+)
+
+_SQLITE_LOOKUP_BATCH_SIZE = DEFAULT_KEY_CHUNK_LIMIT
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,14 +57,19 @@ class SQLiteEmbeddingCache:
 
     def get_many(self, content_hashes: Sequence[str]) -> Mapping[str, Sequence[float]]:
         """Return valid vectors for this encoder namespace."""
-        hashes = tuple(dict.fromkeys(content_hashes))
-        if not hashes:
+        batches = tuple(
+            iter_ordered_key_chunks(
+                content_hashes,
+                limit=_SQLITE_LOOKUP_BATCH_SIZE,
+            )
+        )
+        if not batches:
             return {}
+        hash_count = sum(len(batch) for batch in batches)
         with self._lock:
             try:
                 rows = []
-                for start in range(0, len(hashes), _SQLITE_LOOKUP_BATCH_SIZE):
-                    batch = hashes[start : start + _SQLITE_LOOKUP_BATCH_SIZE]
+                for batch in batches:
                     placeholders = ",".join("?" for _ in batch)
                     rows.extend(
                         self._connection.execute(
@@ -72,7 +82,7 @@ class SQLiteEmbeddingCache:
                 if not self._is_malformed(error):
                     raise
                 self._recover()
-                self._add_metrics(misses=len(hashes), invalidations=1)
+                self._add_metrics(misses=hash_count, invalidations=1)
                 return {}
 
             result: dict[str, Sequence[float]] = {}
@@ -93,7 +103,7 @@ class SQLiteEmbeddingCache:
                 self._connection.commit()
             self._add_metrics(
                 hits=len(result),
-                misses=len(hashes) - len(result),
+                misses=hash_count - len(result),
                 invalidations=len(invalid),
             )
             return result
