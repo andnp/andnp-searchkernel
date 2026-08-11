@@ -47,6 +47,7 @@ from searchkernel.indices.local_vectors import (
     PackedVectorCodec,
     VectorSnapshot,
 )
+from searchkernel.indices.vector_revision import record_embedding_revision
 from searchkernel.storage.db import (
     DatabaseManager,
     InMemorySQLiteDatabase,
@@ -272,6 +273,7 @@ class LocalRecordBackend:
                 encoder_namespace TEXT NOT NULL,
                 dim INTEGER NOT NULL,
                 embedding BLOB NOT NULL,
+                revision TEXT,
                 format_version INTEGER NOT NULL,
                 normalization_policy TEXT NOT NULL,
                 PRIMARY KEY (storage_key, encoder_namespace, dim),
@@ -297,6 +299,7 @@ class LocalRecordBackend:
             );
             """
         )
+        self._ensure_local_vector_column(conn, "revision", "TEXT")
         self._ensure_local_record_column(conn, "keywords", "TEXT NOT NULL DEFAULT ''")
         self._ensure_local_record_column(conn, "indexed_text", "TEXT")
         self._initialize_keyword_schema(conn)
@@ -347,6 +350,18 @@ class LocalRecordBackend:
         }
         if column not in columns:
             conn.execute(f"ALTER TABLE local_records ADD COLUMN {column} {definition}")
+
+    @staticmethod
+    def _ensure_local_vector_column(
+        conn: sqlite3.Connection,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(local_vectors_v2)")
+        }
+        if column not in columns:
+            conn.execute(f"ALTER TABLE local_vectors_v2 ADD COLUMN {column} {definition}")
 
     @staticmethod
     def _metadata_keyword_text(metadata: dict[str, Any]) -> str:
@@ -867,7 +882,7 @@ class LocalRecordBackend:
                         f"Dimension mismatch for model {model_name!r}: "
                         f"expected {existing_dim}, got {dim}"
                     )
-                packed_vectors: list[tuple[str, bytes]] = []
+                packed_vectors: list[tuple[str, bytes, str]] = []
                 for record in rows:
                     if record.embedding is not None:
                         packed_vectors.append(
@@ -878,6 +893,7 @@ class LocalRecordBackend:
                                     dim,
                                     context=f"embedding for {record.storage_key}",
                                 ),
+                                record_embedding_revision(record, model_name, dim),
                             )
                         )
                 vector_affected = bool(packed_vectors) or self._records_have_vectors(
@@ -888,10 +904,11 @@ class LocalRecordBackend:
                     """
                     INSERT INTO local_vectors_v2 (
                         storage_key, encoder_namespace, dim, embedding,
-                        format_version, normalization_policy
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        revision, format_version, normalization_policy
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(storage_key, encoder_namespace, dim) DO UPDATE SET
                         embedding = excluded.embedding,
+                        revision = excluded.revision,
                         format_version = excluded.format_version,
                         normalization_policy = excluded.normalization_policy
                     """,
@@ -901,10 +918,11 @@ class LocalRecordBackend:
                             model_name,
                             dim,
                             embedding,
+                            revision,
                             VECTOR_FORMAT_VERSION,
                             NORMALIZATION_POLICY,
                         )
-                        for storage_key, embedding in packed_vectors
+                        for storage_key, embedding, revision in packed_vectors
                     ],
                 )
                 self._epoch_lane.bump(

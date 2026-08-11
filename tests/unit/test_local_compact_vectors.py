@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ from searchkernel.indices import (
 )
 from searchkernel.indices.faiss_local import FAISSConfiguration
 from searchkernel.indices.local_vectors import PackedVectorCodec
+from searchkernel.indices.vector_revision import record_embedding_revision
 
 
 def _record(
@@ -74,7 +76,7 @@ def test_local_vector_store_round_trip_uses_packed_schema(tmp_path: Path) -> Non
     hits = store.search([3.0, 4.0], 1, model_name="model", dim=2)
     row = backend.db_manager.get_connection().execute(
         """
-        SELECT embedding, format_version, normalization_policy
+        SELECT embedding, revision, format_version, normalization_policy
         FROM local_vectors_v2
         WHERE storage_key = ? AND encoder_namespace = ?
         """,
@@ -84,7 +86,84 @@ def test_local_vector_store_round_trip_uses_packed_schema(tmp_path: Path) -> Non
     assert hits[0].storage_key == record.storage_key
     assert row[0] is not None
     assert len(row[0]) == 8
-    assert row[1:] == (2, "l2")
+    assert row[1] == record_embedding_revision(record, "model", 2)
+    assert row[2:] == (2, "l2")
+
+
+def test_record_embedding_revision_tracks_identity_content_model_and_dimension() -> None:
+    """Revision changes when any embedding-relevant input changes."""
+    record = _record("revision", [1.0, 0.0])
+
+    base_revision = record_embedding_revision(record, "model", 2)
+    revisions = {
+        base_revision,
+        record_embedding_revision(record, "other-model", 2),
+        record_embedding_revision(record, "model", 3),
+    }
+    record.body = "changed content"
+    changed_revision = record_embedding_revision(record, "model", 2)
+    revisions.add(changed_revision)
+
+    assert len(revisions) == 4
+    assert changed_revision != base_revision
+
+
+def test_local_vector_schema_adds_revision_to_legacy_rows(tmp_path: Path) -> None:
+    """Legacy vector rows remain searchable while their revision stays null."""
+    db_path = tmp_path / "legacy-vectors.db"
+    backend = LocalRecordBackend(db_path)
+    record = _record("legacy", [1.0, 0.0])
+    backend.index([record])
+    backend.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE local_vectors_v2")
+    conn.execute(
+        """
+        CREATE TABLE local_vectors_v2 (
+            storage_key TEXT NOT NULL,
+            encoder_namespace TEXT NOT NULL,
+            dim INTEGER NOT NULL,
+            embedding BLOB NOT NULL,
+            format_version INTEGER NOT NULL,
+            normalization_policy TEXT NOT NULL,
+            PRIMARY KEY (storage_key, encoder_namespace, dim)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO local_vectors_v2
+            (storage_key, encoder_namespace, dim, embedding, format_version,
+             normalization_policy)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record.storage_key,
+            "model",
+            2,
+            PackedVectorCodec.encode(record.embedding, 2),
+            2,
+            "l2",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    restored = LocalRecordBackend(db_path)
+    columns = {
+        row[1]
+        for row in restored.db_manager.get_connection().execute(
+            "PRAGMA table_info(local_vectors_v2)"
+        )
+    }
+    revision = restored.db_manager.get_connection().execute(
+        "SELECT revision FROM local_vectors_v2"
+    ).fetchone()[0]
+
+    assert "revision" in columns
+    assert revision is None
+    assert restored.search_vector([1.0, 0.0], 1, model_name="model", dim=2)
 
 
 def test_exact_search_has_cosine_parity_deterministic_ties_and_filters() -> None:

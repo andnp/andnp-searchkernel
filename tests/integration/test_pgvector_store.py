@@ -312,6 +312,38 @@ class TestVectorStore:
             """
         ) == (None,)
 
+    def test_vector_revision_persists_and_legacy_tables_are_initialized(
+        self, pg_conn, fixture_records
+    ):
+        """Vector bootstrap persists revisions and repairs old tables."""
+        store = PGVectorStore(pg_conn)
+        record = fixture_records[0]
+        model_name = "revision-model"
+        dim = 4
+        table_name = _vector_table_name(model_name, dim)
+
+        store.upsert([record], model_name=model_name, dim=dim)
+        revision = pg_conn.execute_one(
+            f'SELECT revision FROM "{table_name}" WHERE record_id = %s;',
+            (record.storage_key,),
+        )[0]
+        assert revision
+
+        connection = pg_conn.get_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(f'ALTER TABLE "{table_name}" DROP COLUMN revision;')
+            connection.commit()
+        finally:
+            pg_conn.put_connection(connection)
+        store.upsert([record], model_name=model_name, dim=dim)
+
+        restored_revision = pg_conn.execute_one(
+            f'SELECT revision FROM "{table_name}" WHERE record_id = %s;',
+            (record.storage_key,),
+        )[0]
+        assert restored_revision == revision
+
     def test_epoch_tracking(self, pg_conn, fixture_records):
         """Test that epoch is incremented on upsert/delete."""
         store = PGVectorStore(pg_conn)

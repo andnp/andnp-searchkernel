@@ -46,6 +46,7 @@ from searchkernel.domain.vector_filters import (
     filter_values,
     status_values,
 )
+from searchkernel.indices.vector_revision import record_embedding_revision
 
 logger = logging.getLogger(__name__)
 
@@ -916,6 +917,11 @@ class PGVectorStore:
                     f"Dimension mismatch for model {model_name}: "
                     f"expected {existing_dim}, got {dim}"
                 )
+            cursor.execute(
+                self._sql.SQL(
+                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS revision TEXT;"
+                ).format(table=self._sql.Identifier(existing_table))
+            )
             return existing_table
 
         table_name = _vector_table_name(model_name, dim)
@@ -929,6 +935,11 @@ class PGVectorStore:
                 "updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"
                 ");"
             ).format(table=self._sql.Identifier(table_name), dim=self._sql.SQL(str(int(dim))))
+        )
+        cursor.execute(
+            self._sql.SQL(
+                "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS revision TEXT;"
+            ).format(table=self._sql.Identifier(table_name))
         )
 
         cursor.execute(
@@ -1050,30 +1061,36 @@ class PGVectorStore:
 
             # Upsert vectors into the per-model typed table
             upsert_vec_sql = self._sql.SQL(
-                "INSERT INTO {table} (record_id, embedding) "
-                "VALUES (%s, %s::vector) "
+                "INSERT INTO {table} (record_id, embedding, revision) "
+                "VALUES (%s, %s::vector, %s) "
                 "ON CONFLICT (record_id) DO UPDATE SET "
-                "embedding = EXCLUDED.embedding, updated_at = CURRENT_TIMESTAMP;"
+                "embedding = EXCLUDED.embedding, revision = EXCLUDED.revision, "
+                "updated_at = CURRENT_TIMESTAMP;"
             ).format(table=self._sql.Identifier(table_name))
 
             vector_rows = [
-                (record.storage_key, _vector_literal(record.embedding))
+                (
+                    record.storage_key,
+                    _vector_literal(record.embedding),
+                    record_embedding_revision(record, model_name, dim),
+                )
                 for record in records
             ]
             if vector_rows:
                 if isinstance(self.conn_pool, Psycopg3Connection):
                     insert_sql = (
                         "INSERT INTO " + self._sql.Identifier(table_name).as_string(cursor)
-                        + " (record_id, embedding) VALUES (%s, %s::vector) "
+                        + " (record_id, embedding, revision) VALUES (%s, %s::vector, %s) "
                         "ON CONFLICT (record_id) DO UPDATE SET "
-                        "embedding = EXCLUDED.embedding, updated_at = CURRENT_TIMESTAMP;"
+                        "embedding = EXCLUDED.embedding, revision = EXCLUDED.revision, "
+                        "updated_at = CURRENT_TIMESTAMP;"
                     )
                     cursor.executemany(insert_sql, vector_rows)
                 else:
                     psycopg2.extras.execute_values(
                         cursor,
                         upsert_vec_sql.as_string(cursor).replace(
-                            "VALUES (%s, %s::vector)", "VALUES %s"
+                            "VALUES (%s, %s::vector, %s)", "VALUES %s"
                         ),
                         vector_rows,
                     )

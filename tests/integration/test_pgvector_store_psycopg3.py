@@ -16,6 +16,7 @@ from searchkernel.adapters.stores.pgvector import (
     PGKeywordStore,
     PGVectorStore,
     Psycopg3Connection,
+    _vector_table_name,
     create_schema,
 )
 from searchkernel.domain import (
@@ -148,6 +149,23 @@ class TestPsycopg3VectorStore:
         # First result should be close to the first records
         result_ids = [r[0] for r in results]
         assert "test:1" in result_ids or "test:2" in result_ids
+
+    def test_vector_revision_persists_with_psycopg3(self, pg_conn, fixture_records):
+        """Psycopg3 vector upserts persist the deterministic revision."""
+        store = PGVectorStore(pg_conn)
+        record = fixture_records[0]
+        model_name = "revision-model"
+        dim = 4
+
+        store.upsert([record], model_name=model_name, dim=dim)
+
+        table_name = _vector_table_name(model_name, dim)
+        revision = pg_conn.execute_one(
+            f'SELECT revision FROM "{table_name}" WHERE record_id = %s;',
+            (record.storage_key,),
+        )[0]
+
+        assert revision
 
 
 class TestPsycopg3KeywordStore:
