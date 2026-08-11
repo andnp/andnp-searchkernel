@@ -50,6 +50,16 @@ from searchkernel.ports.federation import (
 from searchkernel.ports.federation import (
     SourceCapabilities as FederationSourceCapabilities,
 )
+from searchkernel.ports.freshness import (
+    FreshnessDecision,
+    FreshnessPolicy,
+    FreshnessProvider,
+    FreshnessSnapshot,
+    FreshnessStatus,
+    VersionSnapshot,
+    VersionToken,
+    validate_fresh_hit,
+)
 from searchkernel.ports.graph import BatchGraphStore
 from searchkernel.ports.index_manager import IndexManagerPort
 from searchkernel.ports.llm import LLMProvider
@@ -122,6 +132,11 @@ __all__ = [
     "EmbeddingWrite",
     "FailureStage",
     "FederationSourceCapabilities",
+    "FreshnessDecision",
+    "FreshnessPolicy",
+    "FreshnessProvider",
+    "FreshnessSnapshot",
+    "FreshnessStatus",
     "GraphEdge",
     "GraphNeighbor",
     "GraphStore",
@@ -162,5 +177,8 @@ __all__ = [
     "SourceCapabilities",
     "SourceIdentity",
     "VectorStore",
+    "VersionSnapshot",
+    "VersionToken",
     "extract_retrieval_fields",
+    "validate_fresh_hit",
 ]
