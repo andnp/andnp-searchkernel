@@ -1356,6 +1356,16 @@ class PGVectorStore:
         return _POSTGRES_EPOCH_LANE.read_all(self.conn_pool)
 
 
+def _postgres_tsquery(query: str) -> tuple[str, str]:
+    """Choose a parameterized PostgreSQL query shape for lexical intent."""
+    stripped = query.strip()
+    if stripped.startswith('"') and stripped.endswith('"'):
+        return "phraseto_tsquery('english', %s)", stripped[1:-1]
+    if stripped.endswith("*") and re.fullmatch(r"[\w]+\*", stripped):
+        return "to_tsquery('english', %s)", f"{stripped[:-1]}:*"
+    return "plainto_tsquery('english', %s)", query
+
+
 class PGKeywordStore:
     """Postgres full-text search implementation of KeywordStore port."""
 
@@ -1384,7 +1394,14 @@ class PGKeywordStore:
             rows = [
                 (
                     record.storage_key,
-                    f"{record.title} {record.indexed_text or record.body}",
+                    " ".join(
+                        (
+                            record.title,
+                            record.indexed_text or record.body,
+                            record.uri or "",
+                            json.dumps(record.metadata, sort_keys=True),
+                        )
+                    ),
                 )
                 for record in records
             ]
@@ -1450,9 +1467,10 @@ class PGKeywordStore:
             )
             where_clause = "AND " + " AND ".join(where_parts)
 
+            query_expression, query_value = _postgres_tsquery(query)
             sql = f"""
                 WITH search_query AS (
-                    SELECT plainto_tsquery('english', %s) AS query
+                    SELECT {query_expression} AS query
                 )
                 SELECT r.workspace_id, r.source_kind, r.source_id,
                        ts_rank(
@@ -1474,7 +1492,7 @@ class PGKeywordStore:
                 ORDER BY relevance DESC, r.record_id ASC
                 LIMIT %s;
             """
-            params = [query, *filter_params, k]
+            params = [query_value, *filter_params, k]
 
             cursor.execute(sql, params)
             results = cursor.fetchall()

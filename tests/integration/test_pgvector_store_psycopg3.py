@@ -26,6 +26,7 @@ from searchkernel.domain import (
     RecordIdentity,
     RecordStatus,
 )
+from searchkernel.indices import LocalRecordBackend
 from tests.integration.conftest import pg_dsn_for_schema, pg_worker_schema
 
 
@@ -170,6 +171,59 @@ class TestPsycopg3VectorStore:
 
 class TestPsycopg3KeywordStore:
     """Tests for KeywordStore with psycopg3 connection pool."""
+
+    def test_lexical_queries_match_local_backend(self, pg_conn, tmp_path):
+        """Keep Psycopg3 lexical retrieval aligned with the local contract.
+
+        Phrase, prefix, artifact, filter, empty-query, and tie ordering cases
+        exercise the query shapes that must remain portable across backends.
+        """
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        records = [
+            Record(
+                workspace_id=workspace,
+                source_kind="note",
+                source_id=source_id,
+                title=title,
+                body=body,
+                uri=uri,
+                status=status,
+                created_at=now,
+                updated_at=now,
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            )
+            for workspace, source_id, title, body, uri, status in (
+                ("workspace-a", "phrase", "Alpha beta guide", "alpha beta phrase", "src/searchkernel/search.py", RecordStatus.ACTIVE),
+                ("workspace-a", "prefix", "Alphabet", "alphabet soup", "", RecordStatus.ACTIVE),
+                ("workspace-a", "symbol", "Parser", "parse_record implementation", "", RecordStatus.ACTIVE),
+                ("workspace-a", "active", "Common active", "common token", "", RecordStatus.ACTIVE),
+                ("workspace-b", "other-workspace", "Common other workspace", "common token", "", RecordStatus.ACTIVE),
+                ("workspace-a", "archived", "Common archived", "common token", "", RecordStatus.ARCHIVED),
+            )
+        ]
+        local = LocalRecordBackend(tmp_path / "local.db")
+        local.index(records)
+        keyword_store = PGKeywordStore(pg_conn)
+        PGVectorStore(pg_conn).upsert(records, "lexical-parity", 4)
+        keyword_store.index(records)
+
+        cases = [
+            ('"alpha beta"', None),
+            ("alph*", None),
+            ("src/searchkernel/search.py", None),
+            ("parse_record", None),
+            ("common", {"workspace_id": "workspace-a", "statuses": ["active"]}),
+            ("", None),
+        ]
+        for query, filters in cases:
+            local_keys = [hit.storage_key for hit in local.search_keyword(query, 10, filters)]
+            pg_keys = [hit.storage_key for hit in keyword_store.search(query, 10, filters)]
+            assert set(pg_keys) == set(local_keys)
+
+        tie_records = [record for record in records if record.source_id in {"active", "other-workspace"}]
+        assert [hit.storage_key for hit in keyword_store.search("common", 10)] == sorted(
+            record.storage_key for record in tie_records
+        )
 
     def test_keyword_search_with_psycopg3(self, pg_conn, fixture_records):
         """Test full-text search works end-to-end with Psycopg3Connection."""

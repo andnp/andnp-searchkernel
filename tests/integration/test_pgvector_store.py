@@ -767,6 +767,101 @@ class TestVectorStore:
 class TestKeywordStore:
     """Tests for KeywordStore port implementation."""
 
+    def test_lexical_queries_match_local_backend(self, pg_conn, tmp_path):
+        """Keep PostgreSQL lexical retrieval aligned with the local contract.
+
+        Phrase, prefix, artifact, filter, empty-query, and tie ordering cases
+        exercise the query shapes that must remain portable across backends.
+        """
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        records = [
+            Record(
+                workspace_id="workspace-a",
+                source_kind="note",
+                source_id="phrase",
+                title="Alpha beta guide",
+                body="alpha beta phrase",
+                uri="src/searchkernel/search.py",
+                created_at=now,
+                updated_at=now,
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            ),
+            Record(
+                workspace_id="workspace-a",
+                source_kind="note",
+                source_id="prefix",
+                title="Alphabet",
+                body="alphabet soup",
+                created_at=now,
+                updated_at=now,
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            ),
+            Record(
+                workspace_id="workspace-a",
+                source_kind="note",
+                source_id="symbol",
+                title="Parser",
+                body="parse_record implementation",
+                created_at=now,
+                updated_at=now,
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            ),
+            Record(
+                workspace_id="workspace-a",
+                source_kind="note",
+                source_id="active",
+                title="Common active",
+                body="common token",
+                created_at=now,
+                updated_at=now,
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            ),
+            Record(
+                workspace_id="workspace-b",
+                source_kind="note",
+                source_id="other-workspace",
+                title="Common other workspace",
+                body="common token",
+                created_at=now,
+                updated_at=now,
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            ),
+            Record(
+                workspace_id="workspace-a",
+                source_kind="note",
+                source_id="archived",
+                title="Common archived",
+                body="common token",
+                status=RecordStatus.ARCHIVED,
+                created_at=now,
+                updated_at=now,
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            ),
+        ]
+        local = LocalRecordBackend(tmp_path / "local.db")
+        local.index(records)
+        keyword_store = PGKeywordStore(pg_conn)
+        PGVectorStore(pg_conn).upsert(records, "lexical-parity", 4)
+        keyword_store.index(records)
+
+        cases = [
+            ('"alpha beta"', None),
+            ("alph*", None),
+            ("src/searchkernel/search.py", None),
+            ("parse_record", None),
+            ("common", {"workspace_id": "workspace-a", "statuses": ["active"]}),
+            ("", None),
+        ]
+        for query, filters in cases:
+            local_keys = [hit.storage_key for hit in local.search_keyword(query, 10, filters)]
+            pg_keys = [hit.storage_key for hit in keyword_store.search(query, 10, filters)]
+            assert set(pg_keys) == set(local_keys)
+
+        tie_records = [record for record in records if record.source_id in {"active", "other-workspace"}]
+        assert [hit.storage_key for hit in keyword_store.search("common", 10)] == sorted(
+            record.storage_key for record in tie_records
+        )
+
     def test_keyword_search(self, pg_conn, fixture_records):
         """Test full-text search returns expected results."""
         vector_store = PGVectorStore(pg_conn)
