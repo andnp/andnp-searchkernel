@@ -170,3 +170,23 @@ def test_pgvector_source_scoped_filter_rejects_unsafe_field_names() -> None:
                 }
             }
         )
+
+
+def test_pgvector_source_scoped_filter_combines_identity_and_non_empty_metadata() -> None:
+    """PostgreSQL applies workspace identity and membership presence pre-limit."""
+    clauses, parameters = build_pgvector_filter_sql(
+        {
+            "source_scoped_filters": {
+                "gdrive": {
+                    "workspace_ids": ["workspace-a"],
+                    "metadata_non_empty": ["scope_memberships"],
+                }
+            }
+        }
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert "r.workspace_id = ANY(%s)" in sql_text
+    assert "jsonb_array_length" in sql_text
+    assert ["workspace-a"] in parameters
+    assert "workspace-a" not in sql_text

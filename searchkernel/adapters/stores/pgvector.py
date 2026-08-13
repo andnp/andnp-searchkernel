@@ -196,6 +196,25 @@ def build_pgvector_filter_sql(
         parameters.append(source_kinds)
 
     for source_filter in compile_source_scoped_filters(filters):
+        if source_filter.workspace_ids is not None:
+            if not source_filter.workspace_ids:
+                clauses.append(f"{record_alias}.source_kind <> %s")
+                parameters.append(source_filter.source_kind)
+            else:
+                clauses.append(
+                    f"({record_alias}.source_kind <> %s OR "
+                    f"{record_alias}.workspace_id = ANY(%s))"
+                )
+                parameters.extend(
+                    [source_filter.source_kind, list(source_filter.workspace_ids)]
+                )
+        for field in source_filter.metadata_non_empty:
+            clauses.append(
+                f"({record_alias}.source_kind <> %s OR ("
+                f"jsonb_typeof({record_alias}.metadata -> %s) = 'array' AND "
+                f"jsonb_array_length({record_alias}.metadata -> %s) > 0))"
+            )
+            parameters.extend([source_filter.source_kind, field, field])
         for field, allowed_values in source_filter.metadata_contains_any:
             if not allowed_values:
                 clauses.append(f"{record_alias}.source_kind <> %s")

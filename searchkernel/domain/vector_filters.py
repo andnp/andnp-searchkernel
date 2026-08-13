@@ -83,14 +83,20 @@ class SourceScopedFilter:
     """Authorization constraints owned by one source kind."""
 
     source_kind: str
+    workspace_ids: frozenset[str] | None
+    metadata_non_empty: tuple[str, ...]
     metadata_contains_any: tuple[tuple[str, frozenset[str]], ...]
 
-    def matches(self, metadata: Mapping[str, Any]) -> bool:
+    def matches(self, workspace_id: str | None, metadata: Mapping[str, Any]) -> bool:
+        if self.workspace_ids is not None and workspace_id not in self.workspace_ids:
+            return False
+        for field in self.metadata_non_empty:
+            value = metadata.get(field)
+            if not isinstance(value, list) or not value:
+                return False
         for field, allowed_values in self.metadata_contains_any:
             value = metadata.get(field)
-            if not isinstance(value, list):
-                return False
-            if not any(
+            if not isinstance(value, list) or not any(
                 isinstance(item, str) and item in allowed_values for item in value
             ):
                 return False
@@ -100,57 +106,99 @@ class SourceScopedFilter:
 def compile_source_scoped_filters(
     filters: Mapping[str, Any] | None,
 ) -> tuple[SourceScopedFilter, ...]:
-    """Validate and compile provider-neutral source authorization filters."""
-    if not filters or "source_scoped_filters" not in filters:
+    """Validate and compile source-scoped authorization constraints."""
+    if not filters:
         return ()
-    source_filters = filters["source_scoped_filters"]
-    if not isinstance(source_filters, Mapping):
-        raise TypeError("source_scoped_filters must be a mapping")
-
     compiled: list[SourceScopedFilter] = []
-    for source_kind, constraints in source_filters.items():
-        if not isinstance(source_kind, str) or not source_kind:
-            raise TypeError("source_scoped_filters keys must be non-empty strings")
-        if not isinstance(constraints, Mapping):
-            raise TypeError(
-                f"source_scoped_filters[{source_kind!r}] must be a mapping"
-            )
-        if set(constraints) != {"metadata_contains_any"}:
-            raise ValueError(
-                f"source_scoped_filters[{source_kind!r}] must contain only "
-                "metadata_contains_any"
-            )
-        metadata_filters = constraints["metadata_contains_any"]
-        if not isinstance(metadata_filters, Mapping):
-            raise TypeError(
-                f"source_scoped_filters[{source_kind!r}].metadata_contains_any "
-                "must be a mapping"
-            )
-        fields: list[tuple[str, frozenset[str]]] = []
-        for field, allowed_values in metadata_filters.items():
-            if not isinstance(field, str) or not _METADATA_FIELD_RE.fullmatch(field):
+    if "source_scoped_filters" in filters:
+        source_filters = filters["source_scoped_filters"]
+        if not isinstance(source_filters, Mapping):
+            raise TypeError("source_scoped_filters must be a mapping")
+        for source_kind, constraints in source_filters.items():
+            if not isinstance(source_kind, str) or not source_kind:
+                raise TypeError("source_scoped_filters keys must be non-empty strings")
+            if not isinstance(constraints, Mapping):
+                raise TypeError(
+                    f"source_scoped_filters[{source_kind!r}] must be a mapping"
+                )
+            allowed_keys = {
+                "workspace_ids",
+                "metadata_non_empty",
+                "metadata_contains_any",
+            }
+            if not set(constraints).intersection(allowed_keys) or not set(
+                constraints
+            ).issubset(allowed_keys):
                 raise ValueError(
-                    f"metadata_contains_any field {field!r} is invalid"
+                    f"source_scoped_filters[{source_kind!r}] has invalid constraints"
                 )
-            if (
-                isinstance(allowed_values, (str, bytes, Mapping))
-                or allowed_values is None
-            ):
-                raise TypeError(
-                    f"metadata_contains_any[{field!r}] must be a sequence"
+            workspace_ids = (
+                _compile_string_list(constraints["workspace_ids"], "workspace_ids")
+                if "workspace_ids" in constraints
+                else None
+            )
+            metadata_non_empty = (
+                _compile_metadata_keys(
+                    constraints["metadata_non_empty"], "metadata_non_empty"
                 )
-            try:
-                values = tuple(allowed_values)
-            except TypeError as error:
-                raise TypeError(
-                    f"metadata_contains_any[{field!r}] must be a sequence"
-                ) from error
-            if not all(isinstance(value, str) for value in values):
-                raise TypeError(
-                    f"metadata_contains_any[{field!r}] values must be strings"
+                if "metadata_non_empty" in constraints
+                else ()
+            )
+            metadata_contains_any = (
+                _compile_metadata_contains_any(constraints["metadata_contains_any"])
+                if "metadata_contains_any" in constraints
+                else ()
+            )
+            compiled.append(
+                SourceScopedFilter(
+                    source_kind,
+                    workspace_ids,
+                    metadata_non_empty,
+                    metadata_contains_any,
                 )
-            fields.append((field, frozenset(values)))
-        compiled.append(SourceScopedFilter(source_kind, tuple(fields)))
+            )
+
+    return tuple(compiled)
+
+
+def _compile_string_list(
+    value: Any,
+    name: str,
+) -> frozenset[str]:
+    if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, list):
+        raise TypeError(f"{name} must be a list")
+    if not all(isinstance(item, str) for item in value):
+        raise TypeError(f"{name} must contain only strings")
+    return frozenset(value)
+
+
+def _compile_metadata_keys(
+    value: Any,
+    name: str,
+) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, list):
+        raise TypeError(f"{name} must be a list")
+    keys = tuple(value)
+    if not all(isinstance(key, str) and _METADATA_FIELD_RE.fullmatch(key) for key in keys):
+        raise ValueError(f"{name} must contain valid metadata keys")
+    return keys
+
+
+def _compile_metadata_contains_any(
+    value: Any,
+) -> tuple[tuple[str, frozenset[str]], ...]:
+    if not isinstance(value, Mapping):
+        raise TypeError("metadata_contains_any must be a mapping")
+    compiled: list[tuple[str, frozenset[str]]] = []
+    for key, values in value.items():
+        _compile_metadata_keys([key], "metadata_contains_any field")
+        compiled.append(
+            (
+                key,
+                _compile_string_list(values, f"metadata_contains_any[{key!r}]")
+                or frozenset(),
+            )
+        )
     return tuple(compiled)
 
 
@@ -217,11 +265,16 @@ class CompiledVectorFilter:
             return False
 
         metadata = metadata_mapping(metadata)
-        for source_filter in self.source_scoped_filters:
-            if source_filter.source_kind == source_kind and not source_filter.matches(
-                metadata
-            ):
-                return False
+        scoped_filters = [
+            source_filter
+            for source_filter in self.source_scoped_filters
+            if source_filter.source_kind == source_kind
+        ]
+        if scoped_filters and not all(
+            source_filter.matches(workspace_id, metadata)
+            for source_filter in scoped_filters
+        ):
+            return False
         project_id = metadata.get("project_id")
         if self.project_values is not None and str(project_id) not in self.project_values:
             return False

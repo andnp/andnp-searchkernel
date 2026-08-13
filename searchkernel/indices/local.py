@@ -1086,12 +1086,32 @@ class LocalRecordBackend:
             )
 
         for source_filter in compile_source_scoped_filters(filters):
+            if source_filter.workspace_ids is not None:
+                if not source_filter.workspace_ids:
+                    clauses.append("r.source_kind <> ?")
+                    parameters.append(source_filter.source_kind)
+                else:
+                    placeholders = ", ".join("?" for _ in source_filter.workspace_ids)
+                    clauses.append(
+                        f"(r.source_kind <> ? OR r.workspace_id IN ({placeholders}))"
+                    )
+                    parameters.extend(
+                        [source_filter.source_kind, *source_filter.workspace_ids]
+                    )
+            for field in source_filter.metadata_non_empty:
+                path = f"$.{field}"
+                clauses.append(
+                    "(r.source_kind <> ? OR ("
+                    "json_type(json_extract(r.metadata, ?)) = 'array' AND "
+                    "json_array_length(json_extract(r.metadata, ?)) > 0))"
+                )
+                parameters.extend([source_filter.source_kind, path, path])
             for field, allowed_values in source_filter.metadata_contains_any:
+                path = f"$.{field}"
                 if not allowed_values:
                     clauses.append("r.source_kind <> ?")
                     parameters.append(source_filter.source_kind)
                     continue
-                path = f"$.{field}"
                 placeholders = ", ".join("?" for _ in allowed_values)
                 clauses.append(
                     "(r.source_kind <> ? OR ("
@@ -1100,12 +1120,7 @@ class LocalRecordBackend:
                     f"WHERE item.type = 'text' AND item.value IN ({placeholders}))" "))"
                 )
                 parameters.extend(
-                    [
-                        source_filter.source_kind,
-                        path,
-                        path,
-                        *allowed_values,
-                    ]
+                    [source_filter.source_kind, path, path, *allowed_values]
                 )
 
         project_values = filters.get("project_ids")

@@ -209,10 +209,93 @@ def test_source_scoped_filter_empty_allowed_values_fail_closed() -> None:
     )
 
 
+def test_source_scoped_filter_requires_identity_and_non_empty_membership() -> None:
+    """Drive authorization combines workspace identity with scope membership."""
+    predicate = compile_vector_filters(
+        {
+            "source_scoped_filters": {
+                "gdrive": {
+                    "workspace_ids": ["workspace-a"],
+                    "metadata_non_empty": ["scope_memberships"],
+                }
+            }
+        }
+    )
+
+    assert predicate.matches(
+        storage_key="record:workspace-a:gdrive:allowed",
+        source_id="allowed",
+        workspace_id="workspace-a",
+        source_kind="gdrive",
+        status="active",
+        metadata={"scope_memberships": ["shared-drive:drive-a"]},
+    )
+    assert not predicate.matches(
+        storage_key="record:workspace-b:gdrive:wrong-workspace",
+        source_id="wrong-workspace",
+        workspace_id="workspace-b",
+        source_kind="gdrive",
+        status="active",
+        metadata={"scope_memberships": ["shared-drive:drive-a"]},
+    )
+    assert not predicate.matches(
+        storage_key="record:workspace-a:gdrive:missing-scope",
+        source_id="missing-scope",
+        workspace_id="workspace-a",
+        source_kind="gdrive",
+        status="active",
+        metadata={"scope_memberships": []},
+    )
+    assert predicate.matches(
+        storage_key="record:workspace-b:commit:unscoped",
+        source_id="unscoped",
+        workspace_id="workspace-b",
+        source_kind="commit",
+        status="active",
+        metadata={},
+    )
+
+
+def test_source_scoped_filter_empty_workspace_ids_fail_closed() -> None:
+    """An empty workspace claim denies only the scoped source kind."""
+    predicate = compile_vector_filters(
+        {
+            "source_scoped_filters": {
+                "gdrive": {
+                    "workspace_ids": [],
+                    "metadata_non_empty": ["scope_memberships"],
+                }
+            }
+        }
+    )
+
+    assert not predicate.matches(
+        storage_key="record:workspace-a:gdrive:denied",
+        source_id="denied",
+        workspace_id="workspace-a",
+        source_kind="gdrive",
+        status="active",
+        metadata={"scope_memberships": ["shared-drive:drive-a"]},
+    )
+    assert predicate.matches(
+        storage_key="record:workspace-a:commit:unscoped",
+        source_id="unscoped",
+        workspace_id="workspace-a",
+        source_kind="commit",
+        status="active",
+        metadata={},
+    )
+
+
 @pytest.mark.parametrize(
     "filters",
     [
         {"source_scoped_filters": []},
+        {
+            "source_scoped_filters": {
+                "gdrive": {"workspace_ids": "workspace-a"}
+            }
+        },
         {
             "source_scoped_filters": {
                 "note": {"metadata_contains_any": {"teams": "search"}}
