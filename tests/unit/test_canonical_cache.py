@@ -209,6 +209,39 @@ def test_candidate_key_is_stable_and_epoch_sensitive() -> None:
         )
 
 
+def test_candidate_key_separates_source_scoped_authorization_variants() -> None:
+    """Distinct authorization claims cannot share a candidate-cache entry."""
+    common = {
+        "query": "query",
+        "requested_limit": 1,
+        "acquisition_limit": 5,
+        "adaptive_limit": None,
+        "routing_fingerprint": "routing/v1",
+        "encoder_namespace": None,
+        "policy_version": "policy/v1",
+        "epochs": SearchEpochs(),
+    }
+    first = CandidateCacheKey.build(
+        **common,
+        filters={
+            "source_scoped_filters": {
+                "note": {"metadata_contains_any": {"acl": ["first"]}}
+            }
+        },
+    )
+    second = CandidateCacheKey.build(
+        **common,
+        filters={
+            "source_scoped_filters": {
+                "note": {"metadata_contains_any": {"acl": ["second"]}}
+            }
+        },
+    )
+
+    assert first != second
+    assert first.filters != second.filters
+
+
 def test_candidate_cache_is_bounded_and_defensive() -> None:
     cache: CandidateResultCache[list[str]] = CandidateResultCache(max_entries=1)
     key = CandidateCacheKey.build(
