@@ -905,6 +905,43 @@ def test_keyword_empty_project_scopes_match_nothing(tmp_path) -> None:
     assert backend.search_keyword("common", 10, {"project_id": []}) == []
 
 
+def test_source_scoped_filters_apply_before_local_keyword_and_vector_limits(
+    tmp_path,
+) -> None:
+    """Unauthorized high-score local records cannot consume the result limit."""
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record(
+            "note",
+            f"blocked-{index}",
+            "common",
+            metadata={"acl": ["blocked"]},
+        )
+        for index in range(3)
+    ]
+    allowed = _record("note", "allowed", "common", metadata={"acl": ["allowed"]})
+    records.append(allowed)
+    for record in records:
+        record.embedding = [1.0, 0.0]
+    backend.index(records)
+    backend.upsert(records, "model", 2)
+    filters = {
+        "source_scoped_filters": {
+            "note": {"metadata_contains_any": {"acl": ["allowed"]}}
+        }
+    }
+
+    assert [hit.source_id for hit in backend.search_keyword("common", 1, filters)] == [
+        "allowed"
+    ]
+    assert [
+        hit.source_id
+        for hit in backend.search_vector(
+            [1.0, 0.0], 1, model_name="model", dim=2, filters=filters
+        )
+    ] == ["allowed"]
+
+
 @pytest.mark.asyncio
 async def test_scoped_keyword_candidates_match_public_pipeline_boundary(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")

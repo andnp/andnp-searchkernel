@@ -16,6 +16,7 @@ import numpy as np
 from searchkernel.domain import Record, RecordHit, RecordIdentity, Vector
 from searchkernel.domain.vector_filters import (
     CompiledVectorFilter,
+    compile_source_scoped_filters,
     compile_vector_filters,
     metadata_mapping,
 )
@@ -206,6 +207,23 @@ class FAISSLocalVectorStore:
         query = PackedVectorCodec.normalize(
             query_vector, dim, context="query vector"
         )
+        if compile_source_scoped_filters(filters):
+            self._last_search_diagnostics = {
+                "strategy": "exact_filtered",
+                "requested_k": k,
+                "fallback": False,
+            }
+            hits = self._backend.search_vector(
+                query_vector,
+                k,
+                model_name=model_name,
+                dim=dim,
+                filters=filters,
+            )
+            self._last_search_diagnostics.update(
+                {"returned": len(hits), "under_returned": len(hits) < k}
+            )
+            return hits
         self._last_search_diagnostics = {
             "strategy": self.search_strategy,
             "configuration_fingerprint": self.configuration.fingerprint,

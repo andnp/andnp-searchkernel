@@ -489,6 +489,47 @@ def test_faiss_approximate_search_enforces_filtered_candidate_budget(
     assert diagnostics["under_returned"] is True
 
 
+def test_faiss_authorization_filters_use_exact_path_before_limit(
+    tmp_path: Path,
+) -> None:
+    """Approximate FAISS search cannot discard authorized low-score records."""
+    pytest.importorskip("faiss")
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record(
+            f"blocked-{index}",
+            [1.0, 0.0],
+            metadata={"acl": ["blocked"]},
+        )
+        for index in range(3)
+    ]
+    records.extend(
+        [
+            _record("eligible-1", [0.8, 0.6], metadata={"acl": ["allowed"]}),
+            _record("eligible-2", [0.6, 0.8], metadata={"acl": ["allowed"]}),
+        ]
+    )
+    backend.upsert(records, "model", 2)
+    store = FAISSLocalVectorStore(
+        backend,
+        index_path=tmp_path / "faiss",
+        search_strategy="approximate",
+        max_scan_candidates=2,
+    )
+    filters = {
+        "source_scoped_filters": {
+            "note": {"metadata_contains_any": {"acl": ["allowed"]}}
+        }
+    }
+
+    hits = store.search(
+        [1.0, 0.0], 2, model_name="model", dim=2, filters=filters
+    )
+
+    assert [hit.source_id for hit in hits] == ["eligible-1", "eligible-2"]
+    assert store.last_search_diagnostics["strategy"] == "exact_filtered"
+
+
 def test_faiss_batches_candidate_validation_and_preserves_filters(
     tmp_path: Path,
 ) -> None:

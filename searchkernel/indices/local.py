@@ -37,6 +37,7 @@ from searchkernel.domain import (
 )
 from searchkernel.domain.vector_filters import (
     candidate_storage_keys,
+    compile_source_scoped_filters,
     metadata_mapping,
     record_matches_vector_filters,
 )
@@ -1083,6 +1084,29 @@ class LocalRecordBackend:
             LocalRecordBackend._append_keyword_in_filter(
                 clauses, parameters, "r.source_kind", source_kinds
             )
+
+        for source_filter in compile_source_scoped_filters(filters):
+            for field, allowed_values in source_filter.metadata_contains_any:
+                if not allowed_values:
+                    clauses.append("r.source_kind <> ?")
+                    parameters.append(source_filter.source_kind)
+                    continue
+                path = f"$.{field}"
+                placeholders = ", ".join("?" for _ in allowed_values)
+                clauses.append(
+                    "(r.source_kind <> ? OR ("
+                    "json_type(json_extract(r.metadata, ?)) = 'array' AND "
+                    "EXISTS (SELECT 1 FROM json_each(r.metadata, ?) AS item "
+                    f"WHERE item.type = 'text' AND item.value IN ({placeholders}))" "))"
+                )
+                parameters.extend(
+                    [
+                        source_filter.source_kind,
+                        path,
+                        path,
+                        *allowed_values,
+                    ]
+                )
 
         project_values = filters.get("project_ids")
         if project_values is None:
