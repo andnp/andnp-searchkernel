@@ -222,11 +222,12 @@ def build_pgvector_filter_sql(
                 continue
             clauses.append(
                 f"({record_alias}.source_kind <> %s OR EXISTS ("
-                "SELECT 1 FROM jsonb_array_elements_text("
+                "SELECT 1 FROM jsonb_array_elements("
                 f"CASE WHEN jsonb_typeof({record_alias}.metadata -> %s) = 'array' "
                 f"THEN {record_alias}.metadata -> %s ELSE '[]'::jsonb END"
                 ") AS scoped_value(value) "
-                "WHERE scoped_value.value = ANY(%s)))"
+                "WHERE jsonb_typeof(scoped_value.value) = 'string' "
+                "AND scoped_value.value #>> '{}' = ANY(%s)))"
             )
             parameters.extend(
                 [source_filter.source_kind, field, field, list(allowed_values)]

@@ -151,9 +151,24 @@ def test_pgvector_source_scoped_filter_uses_parameterized_array_overlap() -> Non
     )
 
     sql_text = " AND ".join(clauses)
-    assert "jsonb_array_elements_text" in sql_text
+    assert "jsonb_array_elements" in sql_text
     assert allowed not in sql_text
     assert [allowed] in parameters
+
+
+def test_pgvector_source_scoped_filter_matches_only_string_array_values() -> None:
+    """PostgreSQL authorization matches the shared string-array contract."""
+    clauses, _ = build_pgvector_filter_sql(
+        {
+            "source_scoped_filters": {
+                "note": {"metadata_contains_any": {"acl": ["1"]}}
+            }
+        }
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert "jsonb_typeof(scoped_value.value) = 'string'" in sql_text
+    assert "scoped_value.value #>> '{}' = ANY(%s)" in sql_text
 
 
 def test_pgvector_source_scoped_filter_rejects_unsafe_field_names() -> None:
