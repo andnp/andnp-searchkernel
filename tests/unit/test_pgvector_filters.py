@@ -1,3 +1,5 @@
+import pytest
+
 from searchkernel.adapters.stores.pgvector import build_pgvector_filter_sql
 from searchkernel.domain import RecordIdentity, RecordStatus
 
@@ -135,3 +137,36 @@ def test_pgvector_keyword_filter_sql_supports_keyword_filter_aliases() -> None:
     assert ["note"] in parameters
     assert ["keep"] in parameters
     assert ["doc-1"] in parameters
+
+
+def test_pgvector_source_scoped_filter_uses_parameterized_array_overlap() -> None:
+    """Authorization values stay parameters while array overlap is SQL-side."""
+    allowed = "allowed'); DROP TABLE records; --"
+    clauses, parameters = build_pgvector_filter_sql(
+        {
+            "source_scoped_filters": {
+                "note": {"metadata_contains_any": {"acl": [allowed]}}
+            }
+        }
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert "jsonb_array_elements_text" in sql_text
+    assert allowed not in sql_text
+    assert [allowed] in parameters
+
+
+def test_pgvector_source_scoped_filter_rejects_unsafe_field_names() -> None:
+    """Authorization JSON field names are validated before SQL construction."""
+    with pytest.raises(ValueError, match="metadata_contains_any field"):
+        build_pgvector_filter_sql(
+            {
+                "source_scoped_filters": {
+                    "note": {
+                        "metadata_contains_any": {
+                            "acl'); DROP TABLE records; --": ["allowed"]
+                        }
+                    }
+                }
+            }
+        )

@@ -43,6 +43,7 @@ from searchkernel.domain import (
 )
 from searchkernel.domain.vector_filters import (
     candidate_storage_keys,
+    compile_source_scoped_filters,
     filter_values,
     status_values,
 )
@@ -193,6 +194,24 @@ def build_pgvector_filter_sql(
             return ["FALSE"], []
         clauses.append(f"{record_alias}.source_kind = ANY(%s)")
         parameters.append(source_kinds)
+
+    for source_filter in compile_source_scoped_filters(filters):
+        for field, allowed_values in source_filter.metadata_contains_any:
+            if not allowed_values:
+                clauses.append(f"{record_alias}.source_kind <> %s")
+                parameters.append(source_filter.source_kind)
+                continue
+            clauses.append(
+                f"({record_alias}.source_kind <> %s OR EXISTS ("
+                "SELECT 1 FROM jsonb_array_elements_text("
+                f"CASE WHEN jsonb_typeof({record_alias}.metadata -> %s) = 'array' "
+                f"THEN {record_alias}.metadata -> %s ELSE '[]'::jsonb END"
+                ") AS scoped_value(value) "
+                "WHERE scoped_value.value = ANY(%s)))"
+            )
+            parameters.extend(
+                [source_filter.source_kind, field, field, list(allowed_values)]
+            )
 
     candidate_value = filters.get("candidate_ids")
     if candidate_value is None:
