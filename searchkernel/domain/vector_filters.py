@@ -1,11 +1,14 @@
 """Canonical vector eligibility filters shared by local and SQL stores."""
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from searchkernel.domain.models import RecordIdentity, RecordStatus
+
+_METADATA_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def filter_values(value: Any) -> list[Any]:
@@ -75,6 +78,82 @@ def _string_values(
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class SourceScopedFilter:
+    """Authorization constraints owned by one source kind."""
+
+    source_kind: str
+    metadata_contains_any: tuple[tuple[str, frozenset[str]], ...]
+
+    def matches(self, metadata: Mapping[str, Any]) -> bool:
+        for field, allowed_values in self.metadata_contains_any:
+            value = metadata.get(field)
+            if not isinstance(value, list):
+                return False
+            if not any(
+                isinstance(item, str) and item in allowed_values for item in value
+            ):
+                return False
+        return True
+
+
+def compile_source_scoped_filters(
+    filters: Mapping[str, Any] | None,
+) -> tuple[SourceScopedFilter, ...]:
+    """Validate and compile provider-neutral source authorization filters."""
+    if not filters or "source_scoped_filters" not in filters:
+        return ()
+    source_filters = filters["source_scoped_filters"]
+    if not isinstance(source_filters, Mapping):
+        raise TypeError("source_scoped_filters must be a mapping")
+
+    compiled: list[SourceScopedFilter] = []
+    for source_kind, constraints in source_filters.items():
+        if not isinstance(source_kind, str) or not source_kind:
+            raise TypeError("source_scoped_filters keys must be non-empty strings")
+        if not isinstance(constraints, Mapping):
+            raise TypeError(
+                f"source_scoped_filters[{source_kind!r}] must be a mapping"
+            )
+        if set(constraints) != {"metadata_contains_any"}:
+            raise ValueError(
+                f"source_scoped_filters[{source_kind!r}] must contain only "
+                "metadata_contains_any"
+            )
+        metadata_filters = constraints["metadata_contains_any"]
+        if not isinstance(metadata_filters, Mapping):
+            raise TypeError(
+                f"source_scoped_filters[{source_kind!r}].metadata_contains_any "
+                "must be a mapping"
+            )
+        fields: list[tuple[str, frozenset[str]]] = []
+        for field, allowed_values in metadata_filters.items():
+            if not isinstance(field, str) or not _METADATA_FIELD_RE.fullmatch(field):
+                raise ValueError(
+                    f"metadata_contains_any field {field!r} is invalid"
+                )
+            if (
+                isinstance(allowed_values, (str, bytes, Mapping))
+                or allowed_values is None
+            ):
+                raise TypeError(
+                    f"metadata_contains_any[{field!r}] must be a sequence"
+                )
+            try:
+                values = tuple(allowed_values)
+            except TypeError as error:
+                raise TypeError(
+                    f"metadata_contains_any[{field!r}] must be a sequence"
+                ) from error
+            if not all(isinstance(value, str) for value in values):
+                raise TypeError(
+                    f"metadata_contains_any[{field!r}] values must be strings"
+                )
+            fields.append((field, frozenset(values)))
+        compiled.append(SourceScopedFilter(source_kind, tuple(fields)))
+    return tuple(compiled)
+
+
 def _path_variants(value: Any) -> set[str]:
     normalized = str(value).replace("\\", "/")
     variants = {normalized}
@@ -112,6 +191,7 @@ class CompiledVectorFilter:
     document_values: frozenset[str] | None
     excluded_documents: frozenset[str] | None
     metadata_equals: tuple[tuple[str, str], ...] | None
+    source_scoped_filters: tuple[SourceScopedFilter, ...]
 
     def matches(
         self,
@@ -137,6 +217,11 @@ class CompiledVectorFilter:
             return False
 
         metadata = metadata_mapping(metadata)
+        for source_filter in self.source_scoped_filters:
+            if source_filter.source_kind == source_kind and not source_filter.matches(
+                metadata
+            ):
+                return False
         project_id = metadata.get("project_id")
         if self.project_values is not None and str(project_id) not in self.project_values:
             return False
@@ -176,6 +261,7 @@ def compile_vector_filters(
     filters: Mapping[str, Any] | None,
 ) -> CompiledVectorFilter:
     filters = filters or {}
+    source_scoped_filters = compile_source_scoped_filters(filters)
 
     def string_set(*names: str) -> frozenset[str] | None:
         values = _string_values(filters, *names)
@@ -245,6 +331,7 @@ def compile_vector_filters(
             frozenset(excluded_documents) if excluded_documents is not None else None
         ),
         metadata_equals=compiled_metadata,
+        source_scoped_filters=source_scoped_filters,
     )
 
 

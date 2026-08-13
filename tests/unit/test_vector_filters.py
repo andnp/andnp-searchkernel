@@ -1,7 +1,12 @@
 from datetime import UTC, datetime
 
+import pytest
+
 from searchkernel.domain import Record, RecordIdentity
-from searchkernel.domain.vector_filters import compile_vector_filters
+from searchkernel.domain.vector_filters import (
+    compile_source_scoped_filters,
+    compile_vector_filters,
+)
 from searchkernel.indices import LocalRecordBackend
 
 
@@ -138,3 +143,91 @@ def test_compiled_vector_filter_reuses_normalized_constraints() -> None:
         metadata=record.metadata,
         uri=record.uri,
     )
+
+
+def test_source_scoped_filter_requires_array_overlap_and_passes_unscoped_sources() -> None:
+    """Scoped sources require an authorized metadata-array overlap only."""
+    predicate = compile_vector_filters(
+        {
+            "source_scoped_filters": {
+                "note": {"metadata_contains_any": {"teams": ["search", "ops"]}}
+            }
+        }
+    )
+
+    assert predicate.matches(
+        storage_key="record:workspace:note:allowed",
+        source_id="allowed",
+        workspace_id="workspace",
+        source_kind="note",
+        status="active",
+        metadata={"teams": ["other", "search"]},
+    )
+    assert not predicate.matches(
+        storage_key="record:workspace:note:blocked",
+        source_id="blocked",
+        workspace_id="workspace",
+        source_kind="note",
+        status="active",
+        metadata={"teams": ["other"]},
+    )
+    assert predicate.matches(
+        storage_key="record:workspace:commit:unscoped",
+        source_id="unscoped",
+        workspace_id="workspace",
+        source_kind="commit",
+        status="active",
+        metadata={},
+    )
+
+
+def test_source_scoped_filter_empty_allowed_values_fail_closed() -> None:
+    """An empty authorization claim rejects only its scoped source kind."""
+    predicate = compile_vector_filters(
+        {
+            "source_scoped_filters": {
+                "note": {"metadata_contains_any": {"teams": []}}
+            }
+        }
+    )
+
+    assert not predicate.matches(
+        storage_key="record:workspace:note:blocked",
+        source_id="blocked",
+        workspace_id="workspace",
+        source_kind="note",
+        status="active",
+        metadata={"teams": ["search"]},
+    )
+    assert predicate.matches(
+        storage_key="record:workspace:commit:unscoped",
+        source_id="unscoped",
+        workspace_id="workspace",
+        source_kind="commit",
+        status="active",
+        metadata={},
+    )
+
+
+@pytest.mark.parametrize(
+    "filters",
+    [
+        {"source_scoped_filters": []},
+        {
+            "source_scoped_filters": {
+                "note": {"metadata_contains_any": {"teams": "search"}}
+            }
+        },
+        {
+            "source_scoped_filters": {
+                "note": {"metadata_contains_any": {"teams": [1]}}
+            }
+        },
+    ],
+)
+def test_source_scoped_filter_rejects_malformed_values(
+    filters: dict[str, object],
+) -> None:
+    """Malformed authorization data raises a deterministic validation error."""
+    with pytest.raises((TypeError, ValueError)):
+        compile_source_scoped_filters(filters)
