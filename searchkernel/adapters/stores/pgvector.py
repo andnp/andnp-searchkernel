@@ -1433,34 +1433,41 @@ class PGKeywordStore:
             rows = [
                 (
                     record.storage_key,
+                    record.title,
+                    record.indexed_text or record.body,
                     " ".join(
-                        (
-                            record.title,
-                            record.indexed_text or record.body,
-                            record.uri or "",
-                            json.dumps(record.metadata, sort_keys=True),
-                        )
+                        (record.uri or "", json.dumps(record.metadata, sort_keys=True))
                     ),
                 )
                 for record in records
             ]
 
+            weighted_tsvector = """
+                setweight(to_tsvector('english', {title}), 'A') ||
+                setweight(to_tsvector('english', {body}), 'B') ||
+                setweight(to_tsvector('english', {rest}), 'D')
+            """
+
             if isinstance(self.conn_pool, Psycopg3Connection):
                 cursor.executemany(
-                    """
+                    f"""
                     UPDATE records AS r
-                    SET tsvector_body = to_tsvector('english', %s)
+                    SET tsvector_body = {weighted_tsvector.format(title="%s", body="%s", rest="%s")}
                     WHERE r.record_id = %s;
                     """,
-                    [(text, record_id) for record_id, text in rows],
+                    [(title, body, rest, record_id) for record_id, title, body, rest in rows],
                 )
             else:
                 psycopg2.extras.execute_values(
                     cursor,
-                    """
+                    f"""
                     UPDATE records AS r
-                    SET tsvector_body = to_tsvector('english', data.search_text)
-                    FROM (VALUES %s) AS data(record_id, search_text)
+                    SET tsvector_body = {
+                        weighted_tsvector.format(
+                            title="data.title", body="data.body", rest="data.rest"
+                        )
+                    }
+                    FROM (VALUES %s) AS data(record_id, title, body, rest)
                     WHERE r.record_id = data.record_id;
                     """,
                     rows,
@@ -1512,17 +1519,7 @@ class PGKeywordStore:
                     SELECT {query_expression} AS query
                 )
                 SELECT r.workspace_id, r.source_kind, r.source_id,
-                       ts_rank(
-                           setweight(to_tsvector('english', r.title), 'A') ||
-                           setweight(
-                               to_tsvector(
-                                   'english',
-                                   COALESCE(NULLIF(r.indexed_text, ''), r.body)
-                               ),
-                               'B'
-                           ),
-                           search_query.query
-                       ) AS relevance,
+                       ts_rank(r.tsvector_body, search_query.query) AS relevance,
                        r.record_id
                 FROM records AS r
                 CROSS JOIN search_query
