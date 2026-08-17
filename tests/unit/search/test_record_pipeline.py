@@ -1942,7 +1942,7 @@ async def test_artifact_keyword_confidence_skips_embedding() -> None:
 
     embedder = CountingEmbedder()
     pipeline = RecordSearchPipeline(
-        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        keyword_store=FakeKeywordStore([("a", 40.0)]),
         vector_store=FakeVectorStore([("a", 0.9)]),
         embedding_provider=embedder,
         hydrator=_hydrator({"a": _record("a")}),
@@ -1966,7 +1966,7 @@ async def test_artifact_eligibility_policy_approves_with_query_context() -> None
         return context.query == "src/search_kernel.py" and context.limit == 1
 
     pipeline = RecordSearchPipeline(
-        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        keyword_store=FakeKeywordStore([("a", 40.0)]),
         vector_store=FakeVectorStore([("a", 0.9)]),
         embedding_provider=FakeEmbedder(),
         hydrator=_hydrator({"a": _record("a")}),
@@ -1995,7 +1995,7 @@ async def test_artifact_eligibility_policy_veto_keeps_vector_lane() -> None:
     embedder = CountingEmbedder()
     vector_store = FakeVectorStore([("vector", 0.9)])
     pipeline = RecordSearchPipeline(
-        keyword_store=FakeKeywordStore([("keyword", 1.0)]),
+        keyword_store=FakeKeywordStore([("keyword", 40.0)]),
         vector_store=vector_store,
         embedding_provider=embedder,
         hydrator=_hydrator(

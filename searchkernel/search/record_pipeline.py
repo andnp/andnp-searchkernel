@@ -61,7 +61,7 @@ from searchkernel.search.fusion import (
     fuse_calibrated_scores,
     fuse_reciprocal_rank,
 )
-from searchkernel.search.lane_confidence import lane_confidence
+from searchkernel.search.lane_confidence import keyword_confidence, lane_confidence
 from searchkernel.search.normalization import normalize_scores
 from searchkernel.search.pipeline_candidate_acquisition import (
     CandidateAcquirer,
@@ -506,6 +506,7 @@ class RecordSearchPipeline:
                     rankings.get("keyword", ()),
                     requested_limit=limit,
                     threshold=self._config.artifact_confidence_threshold,
+                    saturation_k=self._config.keyword_saturation_k,
                 )
                 candidate_set_eligible = (
                     self._policy.query_candidate_set_eligible
@@ -2383,11 +2384,13 @@ def _artifact_results_are_confident(
     *,
     requested_limit: int,
     threshold: float,
+    saturation_k: float,
 ) -> bool:
     return (
         len(ranking) >= requested_limit
         and bool(ranking)
-        and ranking[0].score >= threshold
+        and keyword_confidence(ranking[0].score, saturation_k=saturation_k)
+        >= threshold
     )
 
 
