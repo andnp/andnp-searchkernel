@@ -78,6 +78,12 @@ class RecordIdentity:
     workspace_id: str | None
     source_kind: str
     source_id: str
+    _storage_key: str | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         _validate_identity_part("workspace_id", self.workspace_id, allow_none=True)
@@ -86,11 +92,15 @@ class RecordIdentity:
 
     @property
     def storage_key(self) -> str:
-        return canonical_storage_key(
-            self.workspace_id,
-            self.source_kind,
-            self.source_id,
-        )
+        cached = self._storage_key
+        if cached is None:
+            cached = canonical_storage_key(
+                self.workspace_id,
+                self.source_kind,
+                self.source_id,
+            )
+            object.__setattr__(self, "_storage_key", cached)
+        return cached
 
     def to_dict(self) -> dict[str, str | None]:
         """Return the portable representation used by API boundaries."""
