@@ -67,6 +67,23 @@ _LOCAL_KEYWORD_SCHEMA_VERSION = 4
 _LOCAL_FTS_TABLE = "local_records_fts"
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
+_FILTERED_KEYWORD_OVERFETCH = 4
+_KEYWORD_SQL_FILTERS = frozenset(
+    {
+        "candidate_ids",
+        "candidate_storage_keys",
+        "excluded_project_ids",
+        "excluded_projects",
+        "project_filter",
+        "project_id",
+        "project_ids",
+        "source_filter",
+        "source_kind",
+        "source_kinds",
+        "statuses",
+        "workspace_id",
+    }
+)
 _FALLBACK_SCAN_BATCH_SIZE = 1_000
 _FUZZY_QUERY_MAX_TERMS = 4
 _FUZZY_TERM_RATIO = 0.82
@@ -1334,6 +1351,8 @@ class LocalRecordBackend:
         limit = k
         if needs_artifact_rerank:
             limit = max(k, math.ceil(k * self._keyword_overfetch_multiplier))
+        if filters and not set(filters).issubset(_KEYWORD_SQL_FILTERS):
+            limit = min(limit * _FILTERED_KEYWORD_OVERFETCH, _FALLBACK_SCAN_MAX_ROWS)
         def fetch_rows(current_query: str) -> list[sqlite3.Row]:
             clauses, parameters = self._keyword_filter_sql(filters)
             clauses.insert(0, f"{_LOCAL_FTS_TABLE} MATCH ?")
@@ -1361,7 +1380,7 @@ class LocalRecordBackend:
                     ORDER BY score DESC, r.storage_key ASC
                     LIMIT ?
                     """,
-                    (*parameters, limit if not filters else -1),
+                    (*parameters, limit),
                 ).fetchall()
 
         def build_hits(rows: Sequence[sqlite3.Row]) -> list[RecordHit]:

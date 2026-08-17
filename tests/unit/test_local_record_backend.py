@@ -1186,6 +1186,38 @@ def test_scalar_and_batched_keyword_ingestion_are_equivalent() -> None:
         batched.close()
 
 
+def test_filtered_keyword_search_bounds_post_filter_candidates(tmp_path: Path) -> None:
+    """
+    Keep post-filtered FTS searches from materializing every matching row.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record(
+            "note",
+            f"record-{index}",
+            "common token",
+            metadata={"kind": "note"},
+        )
+        for index in range(50)
+    ]
+    backend.index(records)
+    statements: list[str] = []
+    connection = backend.db_manager.get_connection()
+    connection.set_trace_callback(statements.append)
+    try:
+        hits = backend.search_keyword(
+            "common",
+            1,
+            {"statuses": [RecordStatus.ACTIVE], "metadata_equals": {"kind": "note"}},
+        )
+    finally:
+        connection.set_trace_callback(None)
+
+    assert len(hits) == 1
+    assert any("LIMIT 4" in statement for statement in statements)
+    assert all("LIMIT -1" not in statement for statement in statements)
+
+
 @pytest.mark.slow
 def test_marked_keyword_scale_smoke() -> None:
     backend = LocalRecordBackend()
