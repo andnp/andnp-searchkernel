@@ -829,12 +829,14 @@ class RecordSearchPipeline:
             failures,
             diagnostics,
         )
+        exact_identifier_keys = _exact_identifier_result_keys(hydrated, query)
         hydrated = self._apply_exact_identifier_result_priority(hydrated, query)
         hydrated = await self._aggregate_chunk_results(
             hydrated,
             failures,
             missing_record_ids,
             limit=result_limit,
+            priority_keys=exact_identifier_keys,
         )
         if self._policy.post_process is not None:
             hydrated = list(self._policy.post_process(hydrated))
@@ -966,6 +968,7 @@ class RecordSearchPipeline:
         missing_record_ids: list[str],
         *,
         limit: int,
+        priority_keys: frozenset[str] = frozenset(),
     ) -> list[RecordSearchResult]:
         grouped: dict[str, list[RecordSearchResult]] = {}
         ordinary: list[RecordSearchResult] = []
@@ -1050,7 +1053,13 @@ class RecordSearchPipeline:
                 for item in aggregated
             ]
 
-        aggregated.sort(key=lambda item: (-item.score, item.storage_key))
+        aggregated.sort(
+            key=lambda item: (
+                item.storage_key not in priority_keys,
+                -item.score,
+                item.storage_key,
+            )
+        )
         return aggregated[:limit]
 
     async def _capture_optional_stage(
@@ -1541,31 +1550,26 @@ class RecordSearchPipeline:
         results: Sequence[RecordSearchResult],
         query: str,
     ) -> list[RecordSearchResult]:
-        normalized_query = query.strip().casefold()
-        exact = [
-            result
-            for result in results
-            if normalized_query in _record_identifiers(result.record)
-        ]
-        if not exact:
+        exact_keys = _exact_identifier_result_keys(results, query)
+        if not exact_keys:
             return list(results)
-        boosted_score = max(result.score for result in results) + 1.0
-        exact_keys = {result.storage_key for result in exact}
         adjusted = [
             dataclass_replace(
                 result,
-                score=(
-                    boosted_score
-                    if result.storage_key in exact_keys
-                    else result.score
-                ),
                 provenance=_identifier_provenance(result.provenance, result.score),
             )
             if result.storage_key in exact_keys
             else result
             for result in results
         ]
-        return sorted(adjusted, key=lambda item: (-item.score, item.storage_key))
+        return sorted(
+            adjusted,
+            key=lambda item: (
+                item.storage_key not in exact_keys,
+                -item.score,
+                item.storage_key,
+            ),
+        )
 
     async def _expand_parents(
         self,
@@ -2125,6 +2129,18 @@ def _identifier_provenance(
     enriched = provenance.clone()
     enriched.add_strategy("exact_identifier", 1, score)
     return enriched
+
+
+def _exact_identifier_result_keys(
+    results: Sequence[RecordSearchResult],
+    query: str,
+) -> frozenset[str]:
+    normalized_query = query.strip().casefold()
+    return frozenset(
+        result.storage_key
+        for result in results
+        if normalized_query in _record_identifiers(result.record)
+    )
 
 
 def _candidate_identifiers(candidate: RecordSearchCandidate) -> frozenset[str]:
