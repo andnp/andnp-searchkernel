@@ -199,6 +199,18 @@ class RecordSearchCandidate:
     def storage_key(self) -> str:
         return self.identity.storage_key
 
+    def __deepcopy__(self, memo: dict[int, object]) -> RecordSearchCandidate:
+        cached = memo.get(id(self))
+        if isinstance(cached, RecordSearchCandidate):
+            return cached
+        clone = RecordSearchCandidate(
+            identity=self.identity,
+            score=self.score,
+            provenance=self.provenance.clone(),
+        )
+        memo[id(self)] = clone
+        return clone
+
 
 class RecordSearchError(RuntimeError):
     """Raised when strict retrieval cannot complete a pipeline stage."""

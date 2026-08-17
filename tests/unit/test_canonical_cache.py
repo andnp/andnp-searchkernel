@@ -5,7 +5,12 @@ from typing import Any
 
 import pytest
 
-from searchkernel.domain import Record, RecordHit, RecordIdentity
+from searchkernel.domain import (
+    Record,
+    RecordHit,
+    RecordIdentity,
+    SearchResultProvenance,
+)
 from searchkernel.runtime import (
     CandidateCacheKey,
     CandidateResultCache,
@@ -15,7 +20,10 @@ from searchkernel.runtime import (
     SearchEpochs,
     UnstableCacheKey,
 )
-from searchkernel.search.record_pipeline import RecordSearchPipeline
+from searchkernel.search.record_pipeline import (
+    RecordSearchCandidate,
+    RecordSearchPipeline,
+)
 
 
 @dataclass
@@ -260,6 +268,43 @@ def test_candidate_cache_is_bounded_and_defensive() -> None:
     value.append("changed")
     assert cache.get(key) == ["a"]
     assert cache.metrics.hits == 1
+
+
+def test_candidate_cache_isolates_mutable_candidate_provenance() -> None:
+    """Protect cached candidate provenance from mutations after retrieval."""
+    cache: CandidateResultCache[tuple[RecordSearchCandidate, ...]] = CandidateResultCache()
+    key = CandidateCacheKey.build(
+        query="query",
+        filters={},
+        requested_limit=1,
+        acquisition_limit=5,
+        adaptive_limit=None,
+        routing_fingerprint="r",
+        encoder_namespace=None,
+        epochs=SearchEpochs(),
+        policy_version=None,
+    )
+    identity = RecordIdentity("workspace", "note", "1")
+    provenance = SearchResultProvenance(record_identity=identity)
+    provenance.add_strategy("keyword", 1, 1.0)
+    cache.set(
+        key,
+        (
+            RecordSearchCandidate(
+                identity=identity,
+                score=1.0,
+                provenance=provenance,
+            ),
+        ),
+    )
+
+    cached = cache.get(key)
+    assert cached is not None
+    cached[0].provenance.add_strategy("mutated", 2, 0.5)
+
+    stored = cache.get(key)
+    assert stored is not None
+    assert "mutated" not in stored[0].provenance.strategies
 
 
 def test_hydration_cache_requires_version_in_key_and_expires_missing() -> None:
