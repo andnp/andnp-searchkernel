@@ -449,7 +449,6 @@ class SearchResultProvenance:
 
     strategies: tuple[str, ...] = ()
     strategy_details: dict[str, StrategyContribution] = field(default_factory=dict)
-    project_uplift: float | None = None
     parent_expanded_from: str | None = None
     record_identity: RecordIdentity | None = None
     parent_expanded_from_identity: RecordIdentity | None = None
@@ -470,7 +469,6 @@ class SearchResultProvenance:
             record_identity=self.record_identity,
             strategies=tuple(self.strategies),
             strategy_details=dict(self.strategy_details),
-            project_uplift=self.project_uplift,
             parent_expanded_from=self.parent_expanded_from,
             parent_expanded_from_identity=self.parent_expanded_from_identity,
         )
@@ -492,8 +490,6 @@ class SearchResultProvenance:
             }
 
         adjustments: dict[str, object] = {}
-        if self.project_uplift is not None and self.project_uplift != 1.0:
-            adjustments["project_uplift"] = self.project_uplift
         if self.parent_expanded_from is not None:
             adjustments["parent_expanded_from"] = self.parent_expanded_from
         if self.parent_expanded_from_identity is not None:
