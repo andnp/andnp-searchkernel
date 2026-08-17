@@ -63,8 +63,15 @@ def fuse_calibrated_scores(
         weight = float(weights.get(strategy, 1.0))
         if not math.isfinite(weight) or weight < 0:
             raise ValueError("strategy weights must be finite and non-negative")
-        for (item_id, _raw_score), calibrated in zip(
-            ranking, normalize_scores(raw_scores)
-        ):
+
+        # A lane whose raw scores are all tied (including a single hit) gives no
+        # signal about which of its items is better, so it must not fuse in as
+        # maximum confidence for every item it returns.
+        if raw_scores and min(raw_scores) == max(raw_scores):
+            calibrated_scores = [0.5] * len(raw_scores)
+        else:
+            calibrated_scores = normalize_scores(raw_scores)
+
+        for (item_id, _raw_score), calibrated in zip(ranking, calibrated_scores):
             scores[item_id] = scores.get(item_id, 0.0) + weight * calibrated
     return scores

@@ -86,6 +86,22 @@ def test_calibrated_fusion_retains_vector_only_recall() -> None:
     assert records[0].source_id in ranked
 
 
+def test_calibrated_fusion_does_not_let_a_single_hit_lane_dominate() -> None:
+    """
+    A lane returning one weak hit has no basis for ranking it above items
+    from a lane with a rich, well-separated result set.
+    """
+    scores = fuse_calibrated_scores(
+        {
+            "fallback": [("weak-hit", 0.01)],
+            "keyword": [("strong-match", 100.0), ("distractor", 1.0)],
+        }
+    )
+
+    assert scores["weak-hit"] == 0.5
+    assert scores["strong-match"] > scores["weak-hit"]
+
+
 def test_calibrated_fusion_rejects_non_finite_lane_scores() -> None:
     with pytest.raises(ValueError, match="lane scores must be finite"):
         fuse_calibrated_scores({"keyword": [("record", float("nan"))]})
