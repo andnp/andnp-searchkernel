@@ -64,6 +64,8 @@ from searchkernel.utils.ordered_key_chunks import (
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 _LOCAL_KEYWORD_SCHEMA = "local_records_fts"
 _LOCAL_KEYWORD_SCHEMA_VERSION = 4
+_RECORD_IDENTITY_VERSION_KEY = "record_identity_version"
+_LOCAL_RECORD_IDENTITY_VERSION = 2
 _LOCAL_FTS_TABLE = "local_records_fts"
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
@@ -350,7 +352,49 @@ class LocalRecordBackend:
         self._ensure_local_record_column(conn, "indexed_text", "TEXT")
         self._initialize_keyword_schema(conn)
         self._initialize_graph_schema(conn)
+        self._record_identity_stale = self._resolve_record_identity_staleness(conn)
         conn.commit()
+
+    def _resolve_record_identity_staleness(self, conn: sqlite3.Connection) -> bool:
+        version_row = conn.execute(
+            "SELECT value FROM system_state WHERE key = ?",
+            (_RECORD_IDENTITY_VERSION_KEY,),
+        ).fetchone()
+        if version_row is not None:
+            # An unreadable marker cannot prove the store is current, and
+            # refusing to open it would be worse than reporting it stale.
+            try:
+                return int(version_row[0]) != _LOCAL_RECORD_IDENTITY_VERSION
+            except (TypeError, ValueError):
+                return True
+        has_records = (
+            conn.execute("SELECT 1 FROM local_records LIMIT 1").fetchone() is not None
+        )
+        if has_records:
+            return True
+        self._write_record_identity_version(conn)
+        return False
+
+    @staticmethod
+    def _write_record_identity_version(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "INSERT INTO system_state (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (_RECORD_IDENTITY_VERSION_KEY, str(_LOCAL_RECORD_IDENTITY_VERSION)),
+        )
+
+    @property
+    def record_identity_stale(self) -> bool:
+        """Whether stored records were written under an older identity scheme."""
+        return self._record_identity_stale
+
+    def mark_record_identity_current(self) -> None:
+        """Record that the store has been rebuilt under the current identity scheme."""
+        with self._lock:
+            conn = self._db.get_connection()
+            self._write_record_identity_version(conn)
+            conn.commit()
+        self._record_identity_stale = False
 
     @staticmethod
     def _canonical_graph_storage_key(storage_key: str) -> str:
