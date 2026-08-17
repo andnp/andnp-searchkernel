@@ -9,6 +9,18 @@ from searchkernel.domain import Chunk, Record
 from searchkernel.ports.chunking_config import ChunkTuningConfig
 
 
+def _char_offsets_for(content_bytes: bytes, byte_offsets: set[int]) -> dict[int, int]:
+    """Map each byte offset to its character offset in one forward pass."""
+    offsets: dict[int, int] = {}
+    previous_byte = 0
+    characters = 0
+    for byte_offset in sorted(byte_offsets):
+        characters += len(content_bytes[previous_byte:byte_offset].decode("utf8"))
+        previous_byte = byte_offset
+        offsets[byte_offset] = characters
+    return offsets
+
+
 @dataclass
 class HeaderNode:
     level: int
@@ -114,20 +126,7 @@ class HeaderBasedChunker(ChunkingStrategy):
 
     def _extract_headers(self, root_node, content_bytes: bytes) -> list[HeaderNode]:
         headers = []
-        byte_to_char = [0] * (len(content_bytes) + 1)
-        char_pos = 0
-        byte_pos = 0
-        for char_pos, char in enumerate(content_bytes.decode("utf8"), start=1):
-            codepoint = ord(char)
-            if codepoint <= 0x7F:
-                byte_pos += 1
-            elif codepoint <= 0x7FF:
-                byte_pos += 2
-            elif codepoint <= 0xFFFF:
-                byte_pos += 3
-            else:
-                byte_pos += 4
-            byte_to_char[byte_pos] = char_pos
+        byte_spans: list[tuple[int, int]] = []
 
         def find_inline(node):
             if node.type == "inline":
@@ -177,19 +176,20 @@ class HeaderBasedChunker(ChunkingStrategy):
                             .strip()
                         )
 
-                headers.append(
-                    HeaderNode(
-                        level=level,
-                        text=text,
-                        start_pos=byte_to_char[marker_start],
-                        end_pos=byte_to_char[node.end_byte],
-                    )
-                )
+                headers.append(HeaderNode(level=level, text=text, start_pos=0, end_pos=0))
+                byte_spans.append((marker_start, node.end_byte))
 
             for child in node.children:
                 visit(child)
 
         visit(root_node)
+        char_offsets = _char_offsets_for(
+            content_bytes,
+            {offset for span in byte_spans for offset in span},
+        )
+        for header, (start_byte, end_byte) in zip(headers, byte_spans, strict=True):
+            header.start_pos = char_offsets[start_byte]
+            header.end_pos = char_offsets[end_byte]
         return headers
 
     def _create_initial_chunks(
