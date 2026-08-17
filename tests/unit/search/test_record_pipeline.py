@@ -2192,7 +2192,7 @@ async def test_ordinary_query_does_not_touch_available_graph_store() -> None:
 async def test_adaptive_graph_expands_strong_ordinary_seed_without_displacing_it() -> None:
     records = {"seed": _record("seed"), "neighbor": _record("neighbor")}
     pipeline = RecordSearchPipeline(
-        keyword_store=FakeKeywordStore([("seed", 0.9)]),
+        keyword_store=FakeKeywordStore([("seed", 40.0)]),
         graph_store=FakeGraphStore(
             {"seed": [("neighbor", "related", 1.0)]}
         ),

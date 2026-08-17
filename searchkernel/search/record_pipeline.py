@@ -61,6 +61,7 @@ from searchkernel.search.fusion import (
     fuse_calibrated_scores,
     fuse_reciprocal_rank,
 )
+from searchkernel.search.lane_confidence import lane_confidence
 from searchkernel.search.normalization import normalize_scores
 from searchkernel.search.pipeline_candidate_acquisition import (
     CandidateAcquirer,
@@ -2031,7 +2032,11 @@ class RecordSearchPipeline:
         strong_seed_count = sum(
             any(
                 strategy in {"keyword", "vector"}
-                and contribution.raw_score
+                and lane_confidence(
+                    strategy,
+                    contribution.raw_score,
+                    saturation_k=self._config.keyword_saturation_k,
+                )
                 >= self._config.adaptive_graph_min_seed_score
                 for strategy, contribution in candidate.provenance.strategy_details.items()
             )
