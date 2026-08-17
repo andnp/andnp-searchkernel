@@ -241,6 +241,7 @@ class RecordSearchConfig:
     base_semantic_weight: float = 1.0
     base_keyword_weight: float = 1.0
     base_graph_weight: float = 1.0
+    keyword_saturation_k: float = 10.0
     graph_fusion: Literal["rrf", "max"] = "rrf"
     graph_depth: int = 1
     max_graph_seeds: int = 10
@@ -1966,6 +1967,10 @@ class RecordSearchPipeline:
                 raise ValueError(f"{name} must be positive")
         if self._config.rrf_k <= 0:
             raise ValueError("rrf_k must be positive")
+        if not math.isfinite(self._config.keyword_saturation_k) or (
+            self._config.keyword_saturation_k <= 0
+        ):
+            raise ValueError("keyword_saturation_k must be finite and positive")
         if self._config.fusion_mode not in {"rrf", "calibrated"}:
             raise ValueError("fusion_mode must be 'rrf' or 'calibrated'")
         for name in (
