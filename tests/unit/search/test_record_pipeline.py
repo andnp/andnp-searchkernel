@@ -3008,3 +3008,96 @@ async def test_hydration_completion_order_does_not_change_results() -> None:
     outcome = await pipeline.async_search("query", limit=3)
 
     assert [result.record_id for result in outcome.results] == ["a", "b", "c"]
+
+
+async def test_exact_identifier_matches_keep_their_relative_order() -> None:
+    """
+    Two records can share a source_id across workspaces, so one query can
+    match both exactly. Precedence over other results must not flatten the
+    order between them.
+    """
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    identities = {
+        workspace: RecordIdentity(workspace, "fake", "doc")
+        for workspace in ("w1", "w2")
+    }
+    records = {
+        workspace: Record(
+            workspace_id=workspace,
+            source_kind="fake",
+            source_id="doc",
+            title=workspace,
+            body=f"body for {workspace}",
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        for workspace in identities
+    }
+
+    class WorkspaceKeywordStore:
+        def index(self, records: list[Record]) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit]:
+            # w2 is the better match but sorts second by storage key.
+            return [
+                RecordHit(identities["w2"], 9.0),
+                RecordHit(identities["w1"], 1.0),
+            ]
+
+    def hydrate(record_id: RecordIdentity) -> Record | None:
+        return records.get(record_id.workspace_id or "")
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=WorkspaceKeywordStore(),
+        hydrator=hydrate,
+    )
+
+    outcome = await pipeline.async_search("doc", limit=2)
+
+    assert [result.record.workspace_id for result in outcome.results] == ["w2", "w1"]
+
+
+async def test_exact_identifier_outranks_an_aggregated_chunk_parent() -> None:
+    """
+    Chunk aggregation re-sorts the final results, so it must not discard the
+    precedence an exact identifier match already earned.
+    """
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    parent = _record("parent")
+    chunk = Record(
+        source_kind="fake",
+        source_id=f"{parent.identity.storage_key}#chunk:0",
+        title="chunk",
+        body="chunk body",
+        created_at=timestamp,
+        updated_at=timestamp,
+        metadata={
+            "_searchkernel_chunk": True,
+            "_chunk_id": "0",
+            "_chunk_parent_storage_key": parent.identity.storage_key,
+            "_chunk_metadata": {},
+        },
+    )
+    exact = _record("ENG-939")
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore(
+            [RecordHit(chunk.identity, 9.0), RecordHit(exact.identity, 1.0)]
+        ),
+        hydrator=_hydrator(
+            {
+                chunk.source_id: chunk,
+                parent.source_id: parent,
+                exact.source_id: exact,
+            }
+        ),
+    )
+
+    outcome = await pipeline.async_search("eng-939", limit=2)
+
+    assert [result.record_id for result in outcome.results] == ["ENG-939", "parent"]
