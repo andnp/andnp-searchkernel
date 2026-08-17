@@ -12,7 +12,6 @@ from searchkernel.search.fusion import (
     fuse_calibrated_scores,
     fuse_reciprocal_rank,
     rrf_score,
-    weighted_reciprocal_rank,
 )
 
 
@@ -82,24 +81,6 @@ class TestReciprocalRankFusion:
             "doc-a": 1 / 61,
             "doc-b": 1 / 62,
         }
-
-    def test_weighted_rrf_applies_strategy_weights(self):
-        scores = weighted_reciprocal_rank(
-            {"keyword": ["doc1"], "vector": ["doc2"]},
-            strategy_weights={"keyword": 2.0, "vector": 0.5},
-            k=10.0,
-        )
-
-        assert scores["doc1"] == pytest.approx(2 / 11)
-        assert scores["doc2"] == pytest.approx(0.5 / 11)
-
-    def test_weighted_rrf_preserves_equal_score_ties(self):
-        scores = weighted_reciprocal_rank(
-            {"keyword": ["doc-b"], "vector": ["doc-a"]},
-            strategy_weights={"keyword": 1.0, "vector": 1.0},
-        )
-
-        assert scores["doc-a"] == scores["doc-b"]
 
 
 class TestCalibratedScoreFusion:

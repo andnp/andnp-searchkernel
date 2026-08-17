@@ -42,20 +42,6 @@ def fuse_reciprocal_rank(
     return scores
 
 
-def weighted_reciprocal_rank(
-    rankings: Mapping[str, Sequence[str]],
-    *,
-    strategy_weights: Mapping[str, float],
-    k: float = 60.0,
-) -> dict[str, float]:
-    """Explicit weighted-RRF entry point for callers that prefer named lanes."""
-    return fuse_reciprocal_rank(
-        rankings,
-        k=k,
-        strategy_weights=strategy_weights,
-    )
-
-
 def fuse_calibrated_scores(
     rankings: Mapping[str, Sequence[tuple[str, float]]],
     *,
