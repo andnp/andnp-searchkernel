@@ -456,6 +456,7 @@ class FAISSLocalVectorStore:
                 (int(faiss_id) for faiss_id in ids[0]),
                 predicate,
             )
+            returned_count = int(np.count_nonzero(ids[0] != -1))
             for score, faiss_id in zip(scores[0], ids[0], strict=True):
                 storage_key = valid_storage_keys.get(int(faiss_id))
                 if storage_key is None:
@@ -472,6 +473,8 @@ class FAISSLocalVectorStore:
                 self._last_search_diagnostics["candidate_budget_hit"] = (
                     not exact and scan >= candidate_budget and len(hits) < k
                 )
+                break
+            if returned_count < scan:
                 break
             scan = min(candidate_budget, max(scan + 1, scan * 2))
             self._last_search_diagnostics["scan_limit"] = scan
