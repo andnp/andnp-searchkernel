@@ -183,6 +183,7 @@ class RecordSearchCandidate:
     identity: RecordIdentity
     score: float
     provenance: SearchResultProvenance
+    priority: int = 0
 
     @property
     def record_id(self) -> str:
@@ -208,6 +209,7 @@ class RecordSearchCandidate:
             identity=self.identity,
             score=self.score,
             provenance=self.provenance.clone(),
+            priority=self.priority,
         )
         memo[id(self)] = clone
         return clone
@@ -743,7 +745,7 @@ class RecordSearchPipeline:
                         )
 
             candidates = self._apply_score_adjustments(candidates, query_context)
-            candidates = self._apply_exact_identifier_boost(candidates, query)
+            candidates = self._apply_exact_identifier_priority(candidates, query)
             candidates = self._sort_candidates(candidates)
             if plan.signals.relationship and plan.graph_enabled:
                 candidates = self._apply_graph_priority(
@@ -1508,7 +1510,7 @@ class RecordSearchPipeline:
         return adjusted
 
     @staticmethod
-    def _apply_exact_identifier_boost(
+    def _apply_exact_identifier_priority(
         candidates: Sequence[RecordSearchCandidate],
         query: str,
     ) -> list[RecordSearchCandidate]:
@@ -1522,12 +1524,11 @@ class RecordSearchPipeline:
         ]
         if not exact:
             return list(candidates)
-        boosted_score = max(candidate.score for candidate in candidates) + 1.0
         exact_keys = {candidate.storage_key for candidate in exact}
         return [
             dataclass_replace(
                 candidate,
-                score=boosted_score if candidate.storage_key in exact_keys else candidate.score,
+                priority=1,
                 provenance=_identifier_provenance(candidate.provenance, candidate.score),
             )
             if candidate.storage_key in exact_keys
@@ -2025,7 +2026,10 @@ class RecordSearchPipeline:
     def _sort_candidates(
         candidates: Sequence[RecordSearchCandidate],
     ) -> list[RecordSearchCandidate]:
-        return sorted(candidates, key=lambda item: (-item.score, item.storage_key))
+        return sorted(
+            candidates,
+            key=lambda item: (-item.priority, -item.score, item.storage_key),
+        )
 
     def _adaptive_graph_ready(
         self, candidates: Sequence[RecordSearchCandidate]
@@ -2081,6 +2085,7 @@ class RecordSearchPipeline:
             adjusted,
             key=lambda candidate: (
                 candidate.storage_key not in direct_keys,
+                -candidate.priority,
                 -candidate.score,
                 candidate.storage_key,
             ),
