@@ -801,6 +801,68 @@ class RecordSearchPipeline:
                 "skip_reasons": adaptive_plan.diagnostic_skip_reasons,
             }
 
+    async def _expand_graph_stage(self, execution: _SearchExecution) -> None:
+        """Expand base candidates with graph neighbors and re-fuse, or pass through.
+
+        Sets ``execution.candidates`` on every path — the graph-enabled
+        success path, the empty-expansion ``else``, and the exception
+        handler — so the caller never sees the stale cache-lookup value.
+        ``direct_keys`` for graph priority is built from
+        ``execution.base_candidates`` (the pre-graph set), not the
+        post-expansion candidates.
+        """
+        plan = execution.routed_plan
+        base_candidates = execution.base_candidates
+        if plan.graph_enabled and base_candidates:
+            try:
+                graph_seeds = await self._resolve_graph_targets(
+                    base_candidates,
+                    execution.query_context,
+                    execution.filters,
+                )
+                graph_ranking = await self._expand_graph(
+                    graph_seeds,
+                    plan,
+                    execution.filters,
+                )
+                if graph_ranking:
+                    execution.candidate_counts["graph"] = len(graph_ranking)
+                    execution.rankings["graph"] = graph_ranking
+                    if self._config.graph_fusion == "max":
+                        fused_scores = dict(execution.fused_scores)
+                        for hit in graph_ranking:
+                            fused_scores[hit.storage_key] = max(
+                                fused_scores.get(hit.storage_key, 0.0),
+                                hit.score,
+                            )
+                    else:
+                        fused_scores = self._fuse_rankings(
+                            execution.rankings, plan
+                        )
+                    execution.fused_scores = fused_scores
+                    candidates = self._build_candidates(
+                        fused_scores, execution.rankings
+                    )
+                    candidates = self._apply_candidate_policy(
+                        candidates, execution.query_context
+                    )
+                    candidates = self._apply_graph_priority(
+                        candidates,
+                        direct_keys={
+                            candidate.storage_key
+                            for candidate in base_candidates
+                        },
+                        plan=plan,
+                    )
+                    execution.candidates = candidates
+                else:
+                    execution.candidates = base_candidates
+            except Exception as error:  # noqa: BLE001 - degraded mode captures backend failures
+                self._handle_error("graph", error, execution.failures)
+                execution.candidates = base_candidates
+        else:
+            execution.candidates = base_candidates
+
     async def async_search(
         self,
         query: str,
@@ -861,49 +923,9 @@ class RecordSearchPipeline:
             self._reroute_for_adaptive_graph(execution)
             plan = execution.plan
 
-            if plan.graph_enabled and base_candidates:
-                try:
-                    graph_seeds = await self._resolve_graph_targets(
-                        base_candidates,
-                        query_context,
-                        filters,
-                    )
-                    graph_ranking = await self._expand_graph(
-                        graph_seeds,
-                        plan,
-                        filters,
-                    )
-                    if graph_ranking:
-                        candidate_counts["graph"] = len(graph_ranking)
-                        rankings["graph"] = graph_ranking
-                        if self._config.graph_fusion == "max":
-                            fused_scores = dict(fused_scores)
-                            for hit in graph_ranking:
-                                fused_scores[hit.storage_key] = max(
-                                    fused_scores.get(hit.storage_key, 0.0),
-                                    hit.score,
-                                )
-                        else:
-                            fused_scores = self._fuse_rankings(rankings, plan)
-                        candidates = self._build_candidates(fused_scores, rankings)
-                        candidates = self._apply_candidate_policy(
-                            candidates, query_context
-                        )
-                        candidates = self._apply_graph_priority(
-                            candidates,
-                            direct_keys={
-                                candidate.storage_key
-                                for candidate in base_candidates
-                            },
-                            plan=plan,
-                        )
-                    else:
-                        candidates = base_candidates
-                except Exception as error:  # noqa: BLE001 - degraded mode captures backend failures
-                    self._handle_error("graph", error, failures)
-                    candidates = base_candidates
-            else:
-                candidates = base_candidates
+            await self._expand_graph_stage(execution)
+            candidates = execution.candidates
+            fused_scores = execution.fused_scores
 
             if (
                 plan.expansion_strategy is not None
