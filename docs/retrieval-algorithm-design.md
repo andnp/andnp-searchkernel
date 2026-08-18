@@ -46,16 +46,23 @@ what it replaces. Silent reordering of results is a bad surprise in a library
 whose current selling point is deterministic, explainable retrieval. Opting in
 is one argument at composition time.
 
-## Prerequisite: make the evaluation harness able to settle arguments
+## Make the evaluation harness able to settle arguments
 
 `eval/` already has `recall@k`, `nDCG@k`, `MRR`, and average precision, plus
 golden-corpus and gate machinery. What it cannot do is tell a real improvement
 from noise: there is no per-query paired comparison and no significance test.
 
-Every algorithm below changes ranking. On a golden set of realistic size, a
-1–3 point nDCG move is entirely consistent with chance. Without paired
-statistics, each proposal becomes an argument about plausibility rather than
-evidence — which is the failure mode these notes exist to avoid.
+Most algorithms below change ranking, and the size of the golden set decides
+whether a result means anything. At ~50 queries, a 1–3 point nDCG move is
+entirely consistent with chance; at ~500 queries with a consistent direction
+across them, the same move is solidly significant. Without paired statistics
+there is no way to tell those two situations apart, and each proposal becomes an
+argument about plausibility rather than evidence.
+
+**This gates ranking changes, not everything.** Behavior-preserving refactors
+and pure-composition batteries — decomposing `async_search`, splitting the
+backend, `CascadingReranker` — alter no ranking and should not wait on it.
+Applying the gate to them is process friction, not rigor.
 
 - **Plugs into** `eval/`, no new ports. Extend `runner.py` to retain per-query
   scores, add a paired bootstrap or permutation test and an effect size.
@@ -63,7 +70,8 @@ evidence — which is the failure mode these notes exist to avoid.
 - **Cost** ~200 lines.
 - **Risk** Low.
 
-Recommend doing this first regardless of what else is chosen.
+Do this before any ranking change, and alongside — not before — the structural
+refactors, which need no evidence to justify themselves.
 
 ## Ranking and fusion
 
@@ -78,20 +86,32 @@ an absolute threshold. It is still a guess about the shape of the curve.
 Isotonic regression fits the actual curve from labeled data: given
 `(raw_score, relevant)` pairs from the golden corpus, pool-adjacent-violators
 produces the monotone step function that best maps raw score to
-`P(relevant | score)`. Monotonicity is guaranteed by construction, so within-lane
-ranking can never be altered — the same invariant the current transfer functions
-hold.
+`P(relevant | score)`.
 
-- **Plugs into** A new `LaneCalibrator` port with `confidence(lane, raw) -> float`.
-  Ship `SaturatingCalibrator` (current behavior, needs no data, stays the default)
-  and `IsotonicCalibrator` (fitted, persists its curve alongside the index).
+One caveat that matters more than it first appears. PAVA is non-decreasing, so
+it can never *invert* two scores — but it is piecewise constant, so it can
+**tie** scores that were previously distinct. Within a single lane that is
+harmless if ties fall back to the raw score. Across lanes it is not: a plateau
+in one lane hands every tie-break inside that range to the other lane, quietly
+shifting the fusion balance. Either interpolate linearly between block
+midpoints, or retain the raw score as an explicit secondary sort key.
+
+- **Plugs into** Open question. A `LaneCalibrator` port with
+  `confidence(lane, raw) -> float` is one option; a policy callable is the other,
+  and a one-method Protocol is barely more than a callable. The argument for a
+  port is lifecycle rather than signature: a fitted calibrator has state that
+  must be fitted, persisted beside the index, and invalidated when the corpus
+  changes — which a bare callable has nowhere to put. Decide when building it.
+  Either way, ship `SaturatingCalibrator` (current behavior, needs no data,
+  stays the default) and `IsotonicCalibrator` (fitted).
 - **Stance** The *contract* is canonical — every lane reports `[0, 1]`
   confidence, and thresholds are expressed in those units. The *fitting* is
   pluggable, because it depends on having labels for your corpus.
 - **Cost** ~150 lines. PAVA is ~40 lines of numpy; no scikit-learn dependency
   needed.
-- **Risk** Overfits small label sets. Needs a minimum-sample guard that falls
-  back to the parametric calibrator.
+- **Risk** Overfits small label sets badly. Needs an explicit sample-size gate —
+  on the order of 50 positive and 50 negative examples per lane — falling back to
+  the parametric calibrator below it, rather than fitting whatever is available.
 - **Evidence** Calibration error (Brier score or reliability diagram) against a
   held-out split, plus confirmation that ranking is unchanged within each lane.
 
@@ -122,16 +142,24 @@ one document. Maximal marginal relevance greedily trades relevance against
 similarity to what is already selected:
 
 ```
-MMR = argmax [ λ · Rel(q, d) − (1 − λ) · max Sim(d, dⱼ) ]
+for d in R \ S:  MMR(d) = λ · Rel(q, d) − (1 − λ) · max Sim(d, dⱼ)
+                                                    dⱼ ∈ S
 ```
+
+**Both terms must be on the same scale**, or λ means nothing. This is the same
+trap the score-semantics work just closed: if `Rel` is a raw RRF score (~0.02)
+and `Sim` is cosine similarity (~0.8), the diversity penalty swamps relevance at
+every λ below about 0.98, and the knob appears inert until it suddenly isn't.
+Feed MMR the calibrated `[0, 1]` confidence, not the fused score.
 
 - **Plugs into** `RecordSearchPolicy.post_process`, which already exists. Ship a
   factory — `mmr_post_process(embedding_of, lambda_=0.7)` — returning a callable
   that satisfies the existing hook. No new port required.
 - **Stance** Pluggable, off by default. `λ` is genuinely domain-dependent: a
   documentation corpus wants diversity, a code-symbol lookup usually does not.
-- **Cost** ~80 lines. Vectorized with one normalized matmul, not the pairwise
-  Python loop the removed `dedup` module used.
+- **Cost** ~80 lines. The candidate-similarity matrix is one normalized matmul
+  rather than the removed `dedup` module's pairwise Python loop; the greedy
+  selection itself is still a loop over `k`, which is fine at result-set sizes.
 - **Risk** Low, and entirely opt-in.
 - **Evidence** `nDCG@10` roughly flat while distinct-source count and subtopic
   recall rise. If nDCG drops materially, λ is wrong for that corpus.
@@ -164,10 +192,15 @@ corpus size exactly where an approximate index is needed.
 
 The standard answer is a two-stage cascade: pack each embedding to one bit per
 dimension by sign, rank a wide candidate set by Hamming distance, then rescore
-the survivors with the original `float32` vectors. Memory drops roughly 32×,
-which also means corpora that previously fell off the snapshot cliff now fit in
-it — this fixes the block-scan pathology as a side effect, not just the
-throughput.
+the survivors with the original `float32` vectors. Memory drops 32× exactly
+(a 384-dim `float32` vector is 1536 bytes; packed, 48).
+
+That **moves the block-scan cliff out by 32×; it does not remove it.** A corpus
+large enough still falls off the snapshot into the same unindexed sequential
+scan. Fixing that pathology properly means giving the fallback an actual index
+(IVF or HNSW over the packed vectors), which is separate work. Worth being
+precise about, because "quantization fixes our scale problem" is the kind of
+claim that gets believed until the corpus doubles again.
 
 `numpy >= 2.0` is already required, so `np.packbits` and `np.bitwise_count` are
 available without a compiled extension.
@@ -178,7 +211,9 @@ available without a compiled extension.
   enough at small scale, and a library should not silently trade recall for
   speed.
 - **Cost** ~250 lines, plus a rescore oversampling knob (default ~10× the
-  requested `k`).
+  requested `k`). One implementation note: the obvious
+  `np.bitwise_count(matrix ^ query).sum(axis=-1)` allocates an `(N, dim/8)`
+  temporary on every query. Reuse a preallocated buffer via the `out=` argument.
 - **Risk** Recall loss, which is the whole tradeoff. Must be measured, not
   assumed.
 - **Evidence** `recall@10` against the exact engine on a fixed corpus, with
@@ -219,13 +254,29 @@ Two separable moves, and only the first is an algorithm choice at all:
    which is what a source-agnostic kernel requires. This is really a Phase 5
    refactor.
 2. **Algorithmic, optional.** Once there is a scorer seam, alternatives become
-   pluggable: the current ladder as `ArtifactAwareScorer`, a learning-to-rank
-   model trained on the golden corpus, or a learned-sparse (SPLADE-style)
+   pluggable: the current ladder as `ArtifactAwareScorer`, or a learned-sparse
    representation stored in an integer postings table.
 
-- **Cost** (1) ~150 lines of movement. (2) Large, and needs training data.
-- **Risk** (1) is behavior-preserving if done carefully and is well covered by
-  existing tests. (2) is a research project.
+**Learned sparse is closer than it looks.** SPLADE-style models
+(`naver/splade-v3`, `bge-m3` sparse) are pre-trained and zero-shot — used
+exactly like a dense encoder, no labels required. They produce per-term weights
+that go into a `(term, storage_key, weight)` table and score by integer dot
+product, which SQLite does natively. Grouping them with learning-to-rank was a
+category error: LTR genuinely needs labeled training data for *your* corpus,
+learned sparse does not. They belong in different tiers of this plan, and the
+sparse option deserves evaluating well before any LTR work.
+
+- **Cost** (1) ~150 lines of movement. (2) Learned sparse: a new keyword-store
+  adapter plus an ingestion-time encoder, moderate. LTR: large, needs labels.
+- **Risk** (1) is behavior-preserving and well covered by existing tests.
+  (2) Learned sparse adds a model dependency at ingest and grows the index;
+  measure index size before committing.
+
+**Field boosting.** Moving the heuristics out leaves consumers with no
+first-class way to say "title matters 3× more than body" — today that weighting
+is baked into the `bm25(fts, 5.0, 1.0, 4.0, 2.0)` call. Whatever replaces the
+ladder should expose per-field weights as configuration, or the move trades a
+bad abstraction for a missing one.
 
 ## Graph retrieval
 
@@ -285,16 +336,53 @@ Embed the whole document in one forward pass, then mean-pool token embeddings
 per chunk span, so each chunk vector retains document-wide context without any
 generation cost at ingest.
 
-- **Plugs into** Requires a new capability — the `EmbeddingProvider` port
-  returns one vector per text and cannot express per-token output. Would need a
-  `TokenEmbeddingSupport` marker following the `CandidateFilterSupport` idiom.
-- **Stance** Pluggable, and dependent on model support.
-- **Cost** ~300 lines, plus real constraints on which models qualify.
-- **Risk** Highest in these notes. Model support varies, document length is
-  capped by the backbone's context, and the capability leaks into the embedding
-  port's contract.
-- **Verdict** Defer. Contextual prefixes reach a similar goal with fewer model
-  constraints and no port change.
+- **Plugs into** An additive capability marker following the
+  `CandidateFilterSupport` idiom — `SpanEmbeddingSupport` with
+  `embed_spans(text, spans) -> list[Vector]`. Providers that cannot do it simply
+  do not declare it. This is a smaller change than it first appeared: the
+  existing `EmbeddingProvider` contract is untouched, not rewritten.
+- **Stance** Pluggable, dependent on model support.
+- **Cost** ~300 lines.
+- **Risk** Model support varies and document length is capped by the backbone's
+  context window (typically 8k tokens), so long documents still need splitting.
+- **Verdict** Revised — worth doing, and arguably *before* contextual prefixes.
+
+The cost comparison is lopsided in a way the first draft of this document got
+backwards. Contextual prefixes need one **generative** LLM call per chunk: a
+10k-document corpus at ~10 chunks each is 100k generations, which is hours of
+local GPU time or real API spend, repeated whenever content changes. Late
+chunking needs one **embedding forward pass per document** — work the pipeline
+already does — plus mean-pooling over token spans, which is numpy slicing.
+
+Same goal, one costs a model inference budget and the other costs a protocol
+extension. The port-contract objection was doing more argumentative work than it
+could support.
+
+## Asymmetric query and document embedding
+
+Modern embedding models are asymmetric: queries take an instruction prefix,
+documents do not. Getting this wrong does not fail loudly — it silently
+misaligns query and document representations and costs recall that looks like
+a bad model rather than a bad call.
+
+The `EmbeddingProvider` port has no query variant. `embed()` is documented as
+embedding documents, and the asymmetry currently lives inside the HuggingFace
+adapter, which says so directly in a comment: *"The EmbeddingProvider port
+itself has no query variant yet — that asymmetry lives here."* Any provider
+written against the port without reading that adapter will get it wrong.
+
+- **Plugs into** The `EmbeddingProvider` port, by formalizing `embed_query` next
+  to `embed`. `AsyncEmbeddingProvider` already has `embed_query`, so the sync
+  and async boundaries currently disagree with each other.
+- **Stance** Opinionated. This is a contract defect, not a choice — a provider
+  should not be able to satisfy the port while silently embedding queries as
+  documents.
+- **Cost** ~60 lines plus adapter updates.
+- **Risk** Touches a public port; existing implementations need a default.
+
+Not an algorithm, and worth doing before any retrieval-quality measurement:
+otherwise a recall number may be measuring this instead of whatever is under
+test.
 
 ## Refactors that are not choices
 
@@ -315,22 +403,53 @@ matter here because they decide how cleanly the algorithms can land.
 
 ## Suggested order
 
-Sequenced so each step makes the next cheaper or more measurable.
+Sequenced so each step makes the next cheaper or more measurable. Work that
+changes no ranking comes first, because it needs no evidence to justify it.
 
-1. **Evaluation harness with significance testing** — otherwise nothing below
-   can be judged.
-2. **Decompose `async_search`** — unblocks clean stage insertion.
-3. **Cascaded reranking** — pure composition, no new extension point, no
-   default change.
-4. **MMR diversity battery** — fills an existing socket.
-5. **Isotonic calibrator** — extends the confidence contract already in place.
-6. **Move lexical heuristics out of the store** — architectural debt with a
-   known shape.
-7. **Split `LocalRecordBackend`**, then the **binary vector engine**.
-8. **Query expansion batteries**.
-9. **PPR graph expansion**.
-10. **Token-aware chunking**, then **contextual prefixes**.
-11. **Late chunking** — revisit only if the earlier work leaves a gap it fills.
+**Ungated — no ranking change, start immediately**
 
-Items 1–5 are the highest confidence-to-cost ratio. Items 9–11 are worth
-deferring until there is a corpus whose measured behavior justifies them.
+1. **Decompose `async_search`** — gives every later stage a clean insertion
+   point instead of another conditional.
+2. **Split `LocalRecordBackend`** — gives the vector engine a real seam.
+3. **Cascaded reranking** — pure composition, no new extension point.
+
+**Foundations for judging anything**
+
+4. **Fix asymmetric query embedding** — otherwise later recall numbers may be
+   measuring this defect.
+5. **Evaluation harness with significance testing** — gates everything below.
+
+**Gated on evidence**
+
+6. **MMR diversity battery** — fills an existing socket; feed it calibrated
+   confidence, not fused score.
+7. **Isotonic calibrator** — extends the confidence contract already in place.
+8. **Move lexical heuristics out of the store**, with field weights as
+   configuration.
+9. **Binary vector engine** — and be honest that it moves the scale cliff
+   rather than removing it.
+10. **Query expansion batteries**.
+11. **Learned sparse retrieval** — zero-shot, so reachable once the scorer seam
+    from step 8 exists.
+12. **Late chunking**, then **token-aware chunking**.
+13. **PPR graph expansion** — value depends entirely on graph richness.
+14. **Contextual prefixes** — only if late chunking leaves a gap, given the
+    ingestion cost.
+
+Steps 1–7 are the highest confidence-to-cost. Steps 13–14 deserve a corpus whose
+measured behavior justifies them.
+
+## Considered and not proposed
+
+**ColBERT / PLAID late interaction.** Per-token vectors with MaxSim scoring
+genuinely address what single-vector embeddings lose — exact symbol names,
+version strings, configuration flags — and there is a fair argument that the
+lexical heuristic ladder exists precisely to bandage that weakness. It is
+excluded here on cost, not merit: it multiplies index size by roughly the token
+count per chunk, needs a centroid-plus-residual index to be tractable, and would
+be the largest single addition in this document.
+
+Learned sparse retrieval (step 11) targets the same weakness at a fraction of
+the cost and fits the existing inverted-index storage. If that lands and
+token-level matching is still the top failure mode in evaluation, revisit this
+with evidence in hand.
