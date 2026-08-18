@@ -217,14 +217,19 @@ class SQLiteEmbeddingCache:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS embeddings ("
                 "namespace TEXT NOT NULL, content_hash TEXT NOT NULL, "
-                "dimension INTEGER NOT NULL, vector TEXT NOT NULL, "
+                "dimension INTEGER NOT NULL, vector BLOB NOT NULL, "
                 "PRIMARY KEY (namespace, content_hash))"
             )
             columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(embeddings)")
+                row[1]: str(row[2]).upper()
+                for row in connection.execute("PRAGMA table_info(embeddings)")
             }
-            if columns != {"namespace", "content_hash", "dimension", "vector"}:
+            if set(columns) != {"namespace", "content_hash", "dimension", "vector"}:
                 raise sqlite3.DatabaseError("embedding cache schema is malformed")
+            if columns["vector"] != "BLOB":
+                raise sqlite3.DatabaseError(
+                    "embedding cache stores vectors as text and is malformed"
+                )
             connection.commit()
             return connection
         except sqlite3.DatabaseError:
