@@ -6,7 +6,7 @@ from typing import Any
 from searchkernel.domain.reindex import ActiveModelMetadata, MigrationState
 from searchkernel.utils.atomic_io import atomic_write_json
 
-CURRENT_MANIFEST_SPEC_VERSION = "1.1.0"
+CURRENT_MANIFEST_SPEC_VERSION = "2.0.0"
 
 
 @dataclass
