@@ -10,8 +10,9 @@ This is an ADDITIVE port implementation; no other adapters are modified.
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Self
+
+import numpy as np
 
 from searchkernel.domain import Vector
 
@@ -129,16 +130,21 @@ class OllamaEmbeddingProvider:
                 f"ollama returned {len(embeddings) if isinstance(embeddings, list) else 'an invalid number of'} "
                 f"embeddings for {len(texts)} inputs"
             )
+        if not embeddings:
+            return embeddings
         for index, vector in enumerate(embeddings):
-            if (
-                not isinstance(vector, list)
-                or len(vector) != self.dim
-                or not all(
-                    isinstance(value, (int, float)) and math.isfinite(float(value))
-                    for value in vector
-                )
-            ):
-                raise RuntimeError(
-                    f"ollama returned invalid embedding {index}: expected finite vector dimension {self.dim}"
-                )
+            if not isinstance(vector, list) or len(vector) != self.dim:
+                raise self._invalid_embedding(index)
+        try:
+            values = np.asarray(embeddings, dtype=np.float64)
+        except (TypeError, ValueError) as error:
+            raise self._invalid_embedding(0) from error
+        finite = np.isfinite(values).all(axis=1)
+        if not finite.all():
+            raise self._invalid_embedding(int(np.argmin(finite)))
         return embeddings
+
+    def _invalid_embedding(self, index: int) -> RuntimeError:
+        return RuntimeError(
+            f"ollama returned invalid embedding {index}: expected finite vector dimension {self.dim}"
+        )
