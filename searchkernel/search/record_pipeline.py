@@ -614,6 +614,69 @@ class RecordSearchPipeline:
             execution.diagnostics.append("vector:artifact_keyword_ineligible")
         return eligible
 
+    async def _acquire_bounded_vector_candidates(
+        self, execution: _SearchExecution
+    ) -> None:
+        """Acquire keyword hits and a vector lane constrained to their ids.
+
+        Runs keyword acquisition and query embedding concurrently, then
+        (if a policy narrows candidate ids or ranking order) runs the vector
+        lane bounded to the keyword result. Mutates ``execution.rankings``
+        and ``execution.failures`` in place.
+        """
+        plan = execution.routed_plan
+        query = execution.query
+        filters = execution.filters
+        failures = execution.failures
+        rankings = execution.rankings
+        stage_results = await _gather_tasks(
+            [
+                asyncio.create_task(
+                    _capture_stage(
+                        "keyword",
+                        lambda: self._candidate_acquirer.keyword(
+                            query, plan.keyword_candidate_budget, filters
+                        ),
+                    )
+                )
+                if plan.keyword_enabled
+                else None,
+                asyncio.create_task(
+                    _capture_stage(
+                        "vector",
+                        lambda: self._query_embedding(query),
+                    )
+                )
+                if self._vector_store is not None
+                else None,
+            ]
+        )
+        keyword_result = self._consume_stage(
+            _find_stage(stage_results, "keyword"),
+            failures,
+        )
+        if keyword_result is not None:
+            rankings["keyword"] = cast(list[RecordHit], keyword_result)
+        embedding_result = self._consume_stage(
+            _find_stage(stage_results, "vector"),
+            failures,
+        )
+        if embedding_result is not None:
+            vector_result = await _capture_stage(
+                "vector",
+                lambda: self._candidate_acquirer.vector(
+                    cast(tuple[Vector, str, int], embedding_result),
+                    plan.vector_candidate_budget,
+                    filters,
+                    rankings,
+                    context=execution.query_context,
+                    plan=plan,
+                ),
+            )
+            vector_value = self._consume_stage(vector_result, failures)
+            if vector_value is not None:
+                rankings["vector"] = cast(list[RecordHit], vector_value)
+
     async def async_search(
         self,
         query: str,
@@ -660,53 +723,7 @@ class RecordSearchPipeline:
             if plan.vector_enabled and plan.signals.artifact is False and (
                 self._policy.vector_candidate_ids is not None
             ):
-                stage_results = await _gather_tasks(
-                    [
-                        asyncio.create_task(
-                            _capture_stage(
-                                "keyword",
-                                lambda: self._candidate_acquirer.keyword(
-                                    query, plan.keyword_candidate_budget, filters
-                                ),
-                            )
-                        )
-                        if plan.keyword_enabled
-                        else None,
-                        asyncio.create_task(
-                            _capture_stage(
-                                "vector",
-                                lambda: self._query_embedding(query),
-                            )
-                        )
-                        if self._vector_store is not None
-                        else None,
-                    ]
-                )
-                keyword_result = self._consume_stage(
-                    _find_stage(stage_results, "keyword"),
-                    failures,
-                )
-                if keyword_result is not None:
-                    rankings["keyword"] = cast(list[RecordHit], keyword_result)
-                embedding_result = self._consume_stage(
-                    _find_stage(stage_results, "vector"),
-                    failures,
-                )
-                if embedding_result is not None:
-                    vector_result = await _capture_stage(
-                        "vector",
-                        lambda: self._candidate_acquirer.vector(
-                            cast(tuple[Vector, str, int], embedding_result),
-                            plan.vector_candidate_budget,
-                            filters,
-                            rankings,
-                            context=query_context,
-                            plan=plan,
-                        ),
-                    )
-                    vector_value = self._consume_stage(vector_result, failures)
-                    if vector_value is not None:
-                        rankings["vector"] = cast(list[RecordHit], vector_value)
+                await self._acquire_bounded_vector_candidates(execution)
             elif not artifact_path_complete and (
                 plan.vector_enabled or plan.keyword_enabled
             ):
