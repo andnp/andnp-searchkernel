@@ -26,6 +26,9 @@ class _Provider:
         self.calls.append(texts)
         return [[float(len(text))] for text in texts]
 
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed([text])[0]
+
 
 class _BlockingProvider(_Provider):
     def __init__(self) -> None:

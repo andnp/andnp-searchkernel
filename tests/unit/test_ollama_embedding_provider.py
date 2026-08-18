@@ -141,6 +141,29 @@ def test_embed_returns_vectors_in_order():
         }
 
 
+def test_embed_query_defaults_to_no_prefix():
+    provider = OllamaEmbeddingProvider("qwen3-embedding:0.6b", dim=2)
+    with mock.patch("httpx.Client.post") as mock_post:
+        mock_post.return_value = _mock_response({"embeddings": [[0.1, 0.2]]})
+        result = provider.embed_query("cats are mammals")
+
+        assert result == [0.1, 0.2]
+        assert mock_post.call_args.kwargs["json"]["input"] == ["cats are mammals"]
+
+
+def test_embed_query_applies_configured_prefix():
+    provider = OllamaEmbeddingProvider(
+        "nomic-embed-text", dim=2, query_prefix="search_query: "
+    )
+    with mock.patch("httpx.Client.post") as mock_post:
+        mock_post.return_value = _mock_response({"embeddings": [[0.1, 0.2]]})
+        provider.embed_query("cats are mammals")
+
+        assert mock_post.call_args.kwargs["json"]["input"] == [
+            "search_query: cats are mammals"
+        ]
+
+
 def test_custom_base_url_is_used():
     provider = OllamaEmbeddingProvider(
         "qwen3-embedding:0.6b", dim=1, base_url="http://gpu-box:11434/"

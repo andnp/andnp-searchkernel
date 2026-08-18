@@ -54,6 +54,9 @@ class FakeProvider:
             for text in texts
         ]
 
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed([text])[0]
+
 
 class FakeRecordSource:
     total_records: int | None

@@ -13,6 +13,9 @@ class _FakeEmbeddingProvider:
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [[1.0, 0.0] for _ in texts]
 
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed([text])[0]
+
 
 @pytest.fixture
 def local_composition(tmp_path):

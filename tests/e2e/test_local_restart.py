@@ -20,6 +20,9 @@ class _DeterministicEmbeddingProvider:
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [[1.0, 0.0] for _ in texts]
 
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed([text])[0]
+
 
 def _record(source_id: str, status: RecordStatus) -> Record:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)

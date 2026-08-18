@@ -24,6 +24,10 @@ class OllamaEmbeddingProvider:
 
     Requires an Ollama daemon reachable at ``base_url``. Missing models are
     pulled automatically unless ``auto_pull`` is disabled.
+
+    ``embed_query`` defaults to symmetric (no prefix) because this adapter
+    serves arbitrary Ollama models and cannot know which ones are
+    asymmetric. Pass ``query_prefix`` for models that need one.
     """
 
     def __init__(
@@ -35,6 +39,7 @@ class OllamaEmbeddingProvider:
         timeout: float = 60.0,
         auto_pull: bool = True,
         pull_timeout: float = 600.0,
+        query_prefix: str = "",
     ):
         import httpx
 
@@ -43,6 +48,7 @@ class OllamaEmbeddingProvider:
         self._client: httpx.Client = httpx.Client(timeout=timeout)
         self._auto_pull = auto_pull
         self._pull_timeout = pull_timeout
+        self._query_prefix = query_prefix
         try:
             self.dim = dim if dim is not None else self._resolve_dim()
         except Exception:
@@ -96,6 +102,19 @@ class OllamaEmbeddingProvider:
             timeout=self._pull_timeout,
         )
         response.raise_for_status()
+
+    def embed_query(self, text: str) -> Vector:
+        """Embed a single QUERY, applying ``query_prefix`` if configured.
+
+        Ollama serves arbitrary models, so this adapter cannot know whether
+        the configured model is asymmetric (e.g. ``nomic-embed-text`` wants
+        ``search_query:`` / ``search_document:`` prefixes) or symmetric.
+        Defaulting to no prefix preserves today's behavior for every
+        existing caller; ``query_prefix`` gives callers who know their
+        model's convention the seam to apply it correctly.
+        """
+        text_to_embed = f"{self._query_prefix}{text}" if self._query_prefix else text
+        return self.embed([text_to_embed])[0]
 
     def embed(self, texts: list[str]) -> list[Vector]:
         """Return one embedding per input text, in input order."""

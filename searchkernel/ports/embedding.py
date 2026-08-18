@@ -76,6 +76,20 @@ class EmbeddingProvider(EmbeddingBatchProvider, Protocol):
 
     dim: int
 
+    def embed_query(self, text: str) -> Vector:
+        """Embed a single QUERY, distinct from ``embed`` for DOCUMENTS.
+
+        Many embedding models are asymmetric: a query needs an instruction
+        prefix that a document does not. Calling ``embed`` on a query text
+        silently loses recall rather than failing loudly, because the
+        misalignment produces a vector that still looks valid -- it is just
+        pointed the wrong way relative to the document space. Requiring this
+        method separately forces every provider to make an explicit choice
+        about query handling instead of inheriting document behavior by
+        omission.
+        """
+        ...
+
 
 class AsyncEmbeddingProvider(Protocol):
     """Async query-embedding boundary used by record search."""

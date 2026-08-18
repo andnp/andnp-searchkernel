@@ -39,6 +39,9 @@ class _Embedder:
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [[float(len(text))] for text in texts]
 
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed([text])[0]
+
 
 def _record() -> Record:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
