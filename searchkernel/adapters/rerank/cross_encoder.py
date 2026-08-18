@@ -5,6 +5,7 @@ This is an ADDITIVE port implementation. No live path is affected.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 
 
@@ -29,3 +30,26 @@ class CrossEncoderReranker:
         if not documents:
             return []
         return self._score(query, documents)
+
+
+@functools.cache
+def sentence_transformers_cross_encoder(
+    model_name: str = "BAAI/bge-reranker-v2-m3",
+) -> Callable[[str, list[str]], list[float]]:
+    """Load a real cross-encoder model once and cache it by model_name.
+
+    Memoized because callers may build multiple reranker instances (e.g.
+    one runtime per data source) that should all share one loaded model
+    rather than each loading their own copy into memory.
+    """
+    import torch
+    from sentence_transformers import CrossEncoder
+
+    model = CrossEncoder(model_name, activation_fn=torch.nn.Sigmoid())
+
+    def score(query: str, documents: list[str]) -> list[float]:
+        pairs = [(query, doc) for doc in documents]
+        raw_scores = model.predict(pairs)
+        return [float(s) for s in raw_scores]
+
+    return score
