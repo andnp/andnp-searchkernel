@@ -52,6 +52,7 @@ from searchkernel.indices.local_vectors import (
     VectorSnapshot,
 )
 from searchkernel.indices.vector_revision import record_embedding_revision
+from searchkernel.ports.keyword_scoring import KeywordArtifactScorer
 from searchkernel.storage.db import (
     DatabaseManager,
     InMemorySQLiteDatabase,
@@ -946,6 +947,7 @@ class _KeywordEngine:
         metadata_keyword_text: Callable[[dict[str, Any]], str],
         metadata_uri: Callable[[dict[str, Any]], str],
         keyword_overfetch_multiplier: float,
+        artifact_scorer: KeywordArtifactScorer,
     ) -> None:
         self._access = access
         self._status_values = status_values
@@ -954,6 +956,7 @@ class _KeywordEngine:
         self._metadata_keyword_text = metadata_keyword_text
         self._metadata_uri = metadata_uri
         self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
+        self._artifact_scorer = artifact_scorer
         self._fts5_available = False
         self._keyword_search_diagnostic = (
             "FTS5 indexed lexical search has not been initialized"
@@ -2370,6 +2373,7 @@ class LocalRecordBackend:
         db_manager: SQLiteDatabase | None = None,
         sqlite_tuning: SQLiteTuning | None = None,
         keyword_overfetch_multiplier: float = 4.0,
+        keyword_artifact_scorer: KeywordArtifactScorer | None = None,
         vector_engine: str = "exact",
         faiss_threshold: int = 50_000,
         vector_snapshot_max_rows: int = 100_000,
@@ -2407,6 +2411,7 @@ class LocalRecordBackend:
         )
         self._epoch_lane = _LocalEpochLane()
         self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
+        self._keyword_artifact_scorer = keyword_artifact_scorer or _artifact_scoring.FilesystemArtifactScorer()
         self._vector_engine = vector_engine
         self._faiss_threshold = faiss_threshold
         self._vector_snapshot_max_rows = vector_snapshot_max_rows
@@ -2430,6 +2435,7 @@ class LocalRecordBackend:
             metadata_keyword_text=self._metadata_keyword_text,
             metadata_uri=self._metadata_uri,
             keyword_overfetch_multiplier=self._keyword_overfetch_multiplier,
+            artifact_scorer=self._keyword_artifact_scorer,
         )
         self._record_writer = _RecordWriter(
             self._access,

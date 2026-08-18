@@ -16,6 +16,7 @@ from searchkernel.indices import (
 )
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports.embedding import AsyncEmbeddingProvider, EmbeddingProvider
+from searchkernel.ports.keyword_scoring import KeywordArtifactScorer
 from searchkernel.ports.rerank import Reranker
 from searchkernel.search.orchestrator import SearchOrchestrator
 from searchkernel.search.record_pipeline import (
@@ -77,6 +78,7 @@ def build_local_record_kernel(
     reranker: Reranker | None = None,
     search_policy: RecordSearchPolicy | None = None,
     search_config: RecordSearchConfig | None = None,
+    keyword_artifact_scorer: KeywordArtifactScorer | None = None,
 ) -> LocalRecordKernel:
     """Build the durable local record stores and their search kernel."""
 
@@ -85,6 +87,7 @@ def build_local_record_kernel(
         vector_engine=vector_engine,
         vector_snapshot_max_rows=vector_snapshot_max_rows,
         vector_snapshot_max_bytes=vector_snapshot_max_bytes,
+        keyword_artifact_scorer=keyword_artifact_scorer,
     )
     vector_store = LocalVectorStore(backend, faiss_path=faiss_path)
     keyword_store = LocalKeywordStore(backend)
