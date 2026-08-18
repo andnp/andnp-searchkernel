@@ -65,9 +65,9 @@ def compute_doc_id_multi_root(file_path: Path, docs_roots: list[Path]) -> str:
     if common_root is None:
         return str(resolved_path.with_suffix("")).replace("\\", "/")
 
-    for docs_root in docs_roots:
+    for docs_root in _resolved_docs_roots(tuple(str(root) for root in docs_roots)):
         try:
-            resolved_path.relative_to(docs_root.resolve())
+            resolved_path.relative_to(docs_root)
             return compute_doc_id(resolved_path, common_root)
         except ValueError:
             continue
@@ -81,13 +81,18 @@ def compute_doc_id_multi_root(file_path: Path, docs_roots: list[Path]) -> str:
 
 
 @cache
+def _resolved_docs_roots(docs_roots: tuple[str, ...]) -> tuple[Path, ...]:
+    return tuple(Path(root).resolve() for root in docs_roots)
+
+
+@cache
 def _resolved_common_root(docs_roots: tuple[str, ...]) -> Path | None:
-    if not docs_roots:
+    resolved = _resolved_docs_roots(docs_roots)
+    if not resolved:
         return None
-    if len(docs_roots) == 1:
-        return Path(docs_roots[0]).resolve()
-    common = os.path.commonpath([str(Path(root).resolve()) for root in docs_roots])
-    return Path(common).resolve()
+    if len(resolved) == 1:
+        return resolved[0]
+    return Path(os.path.commonpath([str(root) for root in resolved])).resolve()
 
 
 def _compute_common_docs_root(docs_roots: list[Path]) -> Path | None:
