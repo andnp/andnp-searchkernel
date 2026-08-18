@@ -38,9 +38,9 @@ and the expanded query feeds `_candidate_acquirer.keyword` alone, never a
 re-embedding. So the hook carries *synonym-shaped* expansion, and a
 hypothetical answer document arrives truncated to a few words in the lexical
 lane, which is not HyDE in any meaningful sense. Real HyDE needs the expanded
-query to reach the vector lane, which no current hook allows. The shipped
-`hyde_expander` is honest about this in its docstring; treating the gap as
-closed would be the mistake.
+query to reach the vector lane, which no current hook allows. What ships is `hypothetical_answer_expander`, named for what it does rather
+than for HyDE, because a name promising retrieval behaviour the hook cannot
+deliver is worse than no battery at all.
 
 This is the useful lesson from the modules removed in the cleanup — `dedup`,
 `calibration`, `community`, `variance`. Those were batteries written without
@@ -240,8 +240,8 @@ gives the vector engine a real seam instead of a method on a 2,900-line class.
 ### Query expansion batteries
 
 **Shipped** as `searchkernel/search/expansion.py`: `synonym_expander` (no model
-required) and `hyde_expander` (any prompt-in/text-out callable, so no LLM client
-becomes a dependency). Both satisfy the existing `query_expander` hook and
+required) and `hypothetical_answer_expander` (any prompt-in/text-out callable, so
+no LLM client becomes a dependency). Both satisfy the existing `query_expander` hook and
 neither is wired on by default.
 
 Building them exposed a limit of the hook that this document had assumed away.

@@ -116,7 +116,7 @@ def synonym_expander(
     return expand
 
 
-_HYDE_PROMPT_TEMPLATE = (
+_HYPOTHETICAL_ANSWER_PROMPT = (
     "Write a short, plausible passage that would directly answer the "
     "following question, as if it were an excerpt from a real document. "
     "Do not mention that this is hypothetical or refer to the question "
@@ -125,17 +125,20 @@ _HYDE_PROMPT_TEMPLATE = (
 )
 
 
-def hyde_expander(
+def hypothetical_answer_expander(
     complete: Callable[[str], str],
     *,
     max_chars: int = 2000,
 ) -> Callable[[str], str]:
-    """Build a HyDE ``query_expander`` from a plain prompt-in/text-out callable.
+    """Expand a query with a model-written hypothetical answer.
 
-    HyDE (Hypothetical Document Embeddings) asks a model to write a short
-    hypothetical answer to the query; the theory is that a plausible answer
-    sits closer in embedding space to real answers than the question itself
-    does. ``complete`` takes the same shape ``LLMJudgeReranker`` uses
+    The idea comes from HyDE (Hypothetical Document Embeddings): a
+    plausible answer sits closer to real answers than the question does.
+    This is deliberately NOT named for it, because HyDE embeds the
+    hypothetical passage and searches the vector lane with it, and this
+    hook cannot: the pipeline keeps only the first few words of what is
+    returned and sends them to the lexical lane alone. Calling this HyDE
+    would promise retrieval behaviour it does not deliver. ``complete`` takes the same shape ``LLMJudgeReranker`` uses
     (``searchkernel/adapters/rerank/llm_judge.py``): a plain
     ``Callable[[str], str]``, so no LLM client library becomes a dependency
     of this module or its caller.
@@ -166,7 +169,7 @@ def hyde_expander(
         raise ValueError("max_chars must be positive")
 
     def expand(query: str) -> str:
-        prompt = _HYDE_PROMPT_TEMPLATE.format(query=query)
+        prompt = _HYPOTHETICAL_ANSWER_PROMPT.format(query=query)
         response = complete(prompt)
         return response[:max_chars]
 

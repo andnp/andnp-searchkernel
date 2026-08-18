@@ -1,6 +1,6 @@
 import pytest
 
-from searchkernel.search.expansion import hyde_expander, synonym_expander
+from searchkernel.search.expansion import hypothetical_answer_expander, synonym_expander
 
 
 def test_synonym_expander_appends_known_synonyms() -> None:
@@ -59,38 +59,38 @@ def test_synonym_expander_rejects_empty_synonyms() -> None:
         synonym_expander({})
 
 
-def test_hyde_expander_returns_the_models_text() -> None:
-    expand = hyde_expander(lambda _prompt: "a hypothetical answer")
+def test_hypothetical_answer_expander_returns_the_models_text() -> None:
+    expand = hypothetical_answer_expander(lambda _prompt: "a hypothetical answer")
     assert expand("what is searchkernel?") == "a hypothetical answer"
 
 
-def test_hyde_expander_passes_the_query_into_the_prompt() -> None:
+def test_hypothetical_answer_expander_passes_the_query_into_the_prompt() -> None:
     captured: list[str] = []
 
     def complete(prompt: str) -> str:
         captured.append(prompt)
         return "answer"
 
-    expand = hyde_expander(complete)
+    expand = hypothetical_answer_expander(complete)
     expand("what is searchkernel?")
 
     assert "what is searchkernel?" in captured[0]
 
 
-def test_hyde_expander_truncates_at_max_chars() -> None:
-    expand = hyde_expander(lambda _prompt: "x" * 100, max_chars=10)
+def test_hypothetical_answer_expander_truncates_at_max_chars() -> None:
+    expand = hypothetical_answer_expander(lambda _prompt: "x" * 100, max_chars=10)
     assert expand("query") == "x" * 10
 
 
-def test_hyde_expander_propagates_complete_failures() -> None:
+def test_hypothetical_answer_expander_propagates_complete_failures() -> None:
     def complete(_prompt: str) -> str:
         raise RuntimeError("model unavailable")
 
-    expand = hyde_expander(complete)
+    expand = hypothetical_answer_expander(complete)
     with pytest.raises(RuntimeError, match="model unavailable"):
         expand("query")
 
 
-def test_hyde_expander_rejects_non_positive_max_chars() -> None:
+def test_hypothetical_answer_expander_rejects_non_positive_max_chars() -> None:
     with pytest.raises(ValueError, match="max_chars"):
-        hyde_expander(lambda _prompt: "text", max_chars=0)
+        hypothetical_answer_expander(lambda _prompt: "text", max_chars=0)
