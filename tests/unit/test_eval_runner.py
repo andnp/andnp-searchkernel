@@ -13,6 +13,8 @@ from searchkernel.eval.runner import (
     _percentile,
     _stage_latency_percentiles,
     ab_eval,
+    paired_metric_scores,
+    per_query_metric_scores,
     run_benchmark,
     run_eval,
 )
@@ -487,3 +489,84 @@ def test_ab_eval_regression():
     recall_delta = ab_report.recall_at_k_delta
     assert recall_delta is not None
     assert recall_delta < 0
+
+
+class TestPerQueryMetricScores:
+    """Extraction of per-query metric values for paired significance testing."""
+
+    def test_returns_one_value_per_query_in_first_seen_order(self):
+        """Single-repetition reports map each query straight to its metric."""
+        golden_set = GoldenSet(
+            entries=[
+                GoldenEntry(query="q1", relevant_ids=["a"]),
+                GoldenEntry(query="q2", relevant_ids=["b"]),
+            ]
+        )
+        report = run_eval(golden_set, lambda query: ["a", "b"], k=1)
+
+        scores = per_query_metric_scores(report, "recall_at_k")
+
+        assert list(scores.keys()) == ["q1", "q2"]
+        assert scores["q1"] == 1.0
+        assert scores["q2"] == 0.0
+
+    def test_averages_across_repetitions_for_same_query(self):
+        """A query measured multiple times collapses to its mean score."""
+        golden_set = GoldenSet(entries=[GoldenEntry(query="q1", relevant_ids=["a"])])
+        calls = {"count": 0}
+
+        def flaky_search(query: str) -> list[str]:
+            calls["count"] += 1
+            return ["a"] if calls["count"] % 2 == 1 else ["z"]
+
+        report = run_eval(golden_set, flaky_search, k=1, measured_repetitions=2)
+
+        scores = per_query_metric_scores(report, "recall_at_k")
+
+        assert scores["q1"] == pytest.approx(0.5)
+
+    def test_unsupported_metric_name_raises(self):
+        """Only the documented metric fields are valid extraction targets."""
+        golden_set = GoldenSet(entries=[GoldenEntry(query="q1", relevant_ids=["a"])])
+        report = run_eval(golden_set, lambda query: ["a"], k=1)
+
+        with pytest.raises(ValueError):
+            per_query_metric_scores(report, "latency_ms")
+
+
+class TestPairedMetricScores:
+    """Aligning two reports' per-query values for compare_paired."""
+
+    def test_aligns_scores_by_query_across_two_reports(self):
+        """Values line up index-for-index by query, ready for a paired test."""
+        golden_set = GoldenSet(
+            entries=[
+                GoldenEntry(query="q1", relevant_ids=["a"]),
+                GoldenEntry(query="q2", relevant_ids=["b"]),
+            ]
+        )
+        baseline_report = run_eval(golden_set, lambda query: ["x"], k=2)
+        candidate_report = run_eval(golden_set, lambda query: ["a", "b"], k=2)
+
+        baseline, candidate = paired_metric_scores(
+            baseline_report, candidate_report, "recall_at_k"
+        )
+
+        assert baseline == [0.0, 0.0]
+        assert candidate == [1.0, 1.0]
+
+    def test_mismatched_query_sets_raise(self):
+        """A comparison across reports with different queries is not paired."""
+        report_a = run_eval(
+            GoldenSet(entries=[GoldenEntry(query="q1", relevant_ids=["a"])]),
+            lambda query: ["a"],
+            k=1,
+        )
+        report_b = run_eval(
+            GoldenSet(entries=[GoldenEntry(query="q2", relevant_ids=["a"])]),
+            lambda query: ["a"],
+            k=1,
+        )
+
+        with pytest.raises(ValueError):
+            paired_metric_scores(report_a, report_b, "recall_at_k")
