@@ -1,5 +1,7 @@
 """Unit tests for progressive semantic indexing subsystem."""
 
+import json
+import sqlite3
 import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -539,6 +541,92 @@ class TestSQLiteEmbeddingCache:
             ).close()
 
             assert calls == 1
+
+    def test_put_many_round_trips_at_float32_precision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.db"
+            cache = SQLiteEmbeddingCache(path, "namespace-1", dimension=3)
+            vector = [0.123456789, -0.987654321, 1.0 / 3.0]
+
+            cache.put_many({"hash-1": vector})
+
+            results = cache.get_many(["hash-1"])
+            expected = np.asarray(vector, dtype="<f4").tolist()
+            assert list(results["hash-1"]) == expected
+
+    def test_legacy_json_text_row_is_treated_as_miss_and_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.db"
+            cache = SQLiteEmbeddingCache(path, "namespace-1", dimension=3)
+            connection = sqlite3.connect(str(path))
+            connection.execute(
+                "INSERT OR REPLACE INTO embeddings "
+                "(namespace, content_hash, dimension, vector) VALUES (?, ?, ?, ?)",
+                ("namespace-1", "legacy-hash", 3, json.dumps([0.1, 0.2, 0.3])),
+            )
+            connection.commit()
+            connection.close()
+
+            results = cache.get_many(["legacy-hash"])
+
+            assert results == {}
+            remaining = cache._connection.execute(
+                "SELECT content_hash FROM embeddings WHERE content_hash = ?",
+                ("legacy-hash",),
+            ).fetchall()
+            assert remaining == []
+
+    def test_blob_with_wrong_length_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.db"
+            cache = SQLiteEmbeddingCache(path, "namespace-1", dimension=3)
+            connection = sqlite3.connect(str(path))
+            connection.execute(
+                "INSERT OR REPLACE INTO embeddings "
+                "(namespace, content_hash, dimension, vector) VALUES (?, ?, ?, ?)",
+                ("namespace-1", "short-hash", 3, b"\x00\x00\x00"),
+            )
+            connection.commit()
+            connection.close()
+
+            results = cache.get_many(["short-hash"])
+
+            assert results == {}
+            remaining = cache._connection.execute(
+                "SELECT content_hash FROM embeddings WHERE content_hash = ?",
+                ("short-hash",),
+            ).fetchall()
+            assert remaining == []
+
+    def test_old_format_cache_file_still_opens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.db"
+            connection = sqlite3.connect(str(path))
+            connection.execute(
+                "CREATE TABLE embeddings ("
+                "namespace TEXT NOT NULL, content_hash TEXT NOT NULL, "
+                "dimension INTEGER NOT NULL, vector TEXT NOT NULL, "
+                "PRIMARY KEY (namespace, content_hash))"
+            )
+            connection.execute(
+                "INSERT INTO embeddings "
+                "(namespace, content_hash, dimension, vector) VALUES (?, ?, ?, ?)",
+                ("namespace-1", "legacy-hash", 3, json.dumps([0.1, 0.2, 0.3])),
+            )
+            connection.commit()
+            connection.close()
+
+            cache = SQLiteEmbeddingCache(path, "namespace-1", dimension=3)
+
+            assert cache.get_many(["legacy-hash"]) == {}
+
+    def test_put_many_rejects_values_too_large_for_float32(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cache.db"
+            cache = SQLiteEmbeddingCache(path, "namespace-1", dimension=3)
+
+            with pytest.raises(ValueError, match="finite float32"):
+                cache.put_many({"hash-1": [1e300, 0.2, 0.3]})
 
 
 class TestLlamaIndexEmbeddingCacheAdapter:
