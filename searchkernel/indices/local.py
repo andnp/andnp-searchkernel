@@ -16,7 +16,7 @@ import math
 import re
 import sqlite3
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -625,6 +625,9 @@ class _VectorEngine:
         vector_storage_stats: dict[tuple[str, int], tuple[int, int, int]],
         vector_snapshot_max_rows: int,
         vector_snapshot_max_bytes: int,
+        matches: Callable[[sqlite3.Row, SearchFilters | None], bool],
+        status_values: Callable[[SearchFilters | None], set[str]],
+        filter_values: Callable[[Any], list[Any]],
     ) -> None:
         self._access = access
         self._snapshot_lock = snapshot_lock
@@ -632,6 +635,9 @@ class _VectorEngine:
         self._vector_storage_stats = vector_storage_stats
         self._vector_snapshot_max_rows = vector_snapshot_max_rows
         self._vector_snapshot_max_bytes = vector_snapshot_max_bytes
+        self._matches = matches
+        self._status_values = status_values
+        self._filter_values = filter_values
 
     def vector_count(self, model_name: str, dim: int) -> int:
         row_count, _ = self.vector_storage_stats(model_name, dim)
@@ -744,6 +750,209 @@ class _VectorEngine:
         )
         return [(index, int(positions[index])) for index in ordered[:k]]
 
+    def search_vector(
+        self,
+        query_vector: Vector,
+        k: int,
+        *,
+        model_name: str,
+        dim: int,
+        filters: SearchFilters | None = None,
+    ) -> list[RecordHit]:
+        if k < 1:
+            return []
+        if len(query_vector) != dim:
+            raise ValueError(
+                f"query vector dimension mismatch: expected {dim}, got {len(query_vector)}"
+            )
+        query = PackedVectorCodec.normalize(
+            query_vector, dim, context="query vector"
+        )
+        row_count, byte_count = self.vector_storage_stats(model_name, dim)
+        if (
+            row_count > self._vector_snapshot_max_rows
+            or byte_count > self._vector_snapshot_max_bytes
+        ):
+            return self._search_vector_blocks(
+                query,
+                k,
+                model_name=model_name,
+                dim=dim,
+                filters=filters,
+            )
+        snapshot = self._get_vector_snapshot(model_name, dim)
+        eligible = snapshot.filter_mask(
+            dict(filters) if filters is not None else None,
+            status_values=self._status_values(filters),
+            filter_values=self._filter_values,
+        )
+        positions = np.flatnonzero(eligible)
+        if not len(positions):
+            return []
+        scores = snapshot.matrix[positions] @ query
+        selected = self._select_top_positions(
+            positions,
+            scores,
+            snapshot.storage_keys,
+            k,
+        )
+        return [
+            RecordHit(
+                RecordIdentity.from_storage_key(snapshot.storage_keys[position]),
+                float(scores[index]),
+            )
+            for index, position in selected
+        ]
+
+    def _search_vector_blocks(
+        self,
+        query: np.ndarray,
+        k: int,
+        *,
+        model_name: str,
+        dim: int,
+        filters: SearchFilters | None,
+    ) -> list[RecordHit]:
+        best_keys: list[str] = []
+        best_scores: list[float] = []
+        last_storage_key: str | None = None
+        batch_limit = self._vector_batch_limit(dim)
+        while True:
+            with self._access.lock:
+                conn = self._access.connection()
+                if last_storage_key is None:
+                    rows = conn.execute(
+                        """
+                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
+                               v.normalization_policy
+                        FROM local_records r
+                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                        WHERE v.encoder_namespace = ? AND v.dim = ?
+                        ORDER BY r.storage_key
+                        LIMIT ?
+                        """,
+                        (model_name, dim, batch_limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
+                               v.normalization_policy
+                        FROM local_records r
+                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                        WHERE v.encoder_namespace = ? AND v.dim = ?
+                          AND r.storage_key > ?
+                        ORDER BY r.storage_key
+                        LIMIT ?
+                        """,
+                        (model_name, dim, last_storage_key, batch_limit),
+                    ).fetchall()
+            if not rows:
+                break
+            eligible_rows = [row for row in rows if self._matches(row, filters)]
+            if eligible_rows:
+                matrix = np.vstack(
+                    [
+                        PackedVectorCodec.decode(
+                            row["embedding"],
+                            dim,
+                            context=f"stored embedding for {row['storage_key']}",
+                        )
+                        for row in eligible_rows
+                    ]
+                )
+                scores = matrix @ query
+                best_keys.extend(row["storage_key"] for row in eligible_rows)
+                best_scores.extend(float(score) for score in scores)
+                if len(best_keys) > k:
+                    positions = np.arange(len(best_keys))
+                    selected = self._select_top_positions(
+                        positions,
+                        np.asarray(best_scores),
+                        tuple(best_keys),
+                        k,
+                    )
+                    best_keys = [best_keys[position] for _, position in selected]
+                    best_scores = [best_scores[position] for _, position in selected]
+            last_storage_key = rows[-1]["storage_key"]
+        ordered = sorted(
+            zip(best_keys, best_scores, strict=True),
+            key=lambda item: (-item[1], item[0]),
+        )
+        return [
+            RecordHit(RecordIdentity.from_storage_key(storage_key), score)
+            for storage_key, score in ordered[:k]
+        ]
+
+    def _iter_vector_batches(
+        self,
+        model_name: str,
+        dim: int,
+    ) -> Iterable[list[sqlite3.Row]]:
+        """Yield bounded vector rows for streamed optional-index builds."""
+        last_storage_key: str | None = None
+        batch_limit = self._vector_batch_limit(dim)
+        while True:
+            with self._access.lock:
+                conn = self._access.connection()
+                if last_storage_key is None:
+                    rows = conn.execute(
+                        """
+                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
+                               v.normalization_policy
+                        FROM local_records r
+                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                        WHERE v.encoder_namespace = ? AND v.dim = ?
+                        ORDER BY r.storage_key
+                        LIMIT ?
+                        """,
+                        (model_name, dim, batch_limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
+                               v.normalization_policy
+                        FROM local_records r
+                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                        WHERE v.encoder_namespace = ? AND v.dim = ?
+                          AND r.storage_key > ?
+                        ORDER BY r.storage_key
+                        LIMIT ?
+                        """,
+                        (model_name, dim, last_storage_key, batch_limit),
+                    ).fetchall()
+            if not rows:
+                return
+            yield rows
+            last_storage_key = rows[-1]["storage_key"]
+
+    def _vector_row_matches(
+        self,
+        storage_key: str,
+        model_name: str,
+        dim: int,
+        filters: SearchFilters | None,
+    ) -> bool:
+        with self._access.lock:
+            conn = self._access.connection()
+            row = conn.execute(
+                """
+                SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                       r.status, r.metadata, r.uri
+                FROM local_records r
+                JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                WHERE r.storage_key = ?
+                  AND v.encoder_namespace = ? AND v.dim = ?
+                """,
+                (storage_key, model_name, dim),
+            ).fetchone()
+        return row is not None and self._matches(row, filters)
+
 
 class LocalRecordBackend:
     """Shared durable state for the local vector, keyword, and graph stores."""
@@ -803,6 +1012,9 @@ class LocalRecordBackend:
             vector_storage_stats=self._vector_storage_stats,
             vector_snapshot_max_rows=self._vector_snapshot_max_rows,
             vector_snapshot_max_bytes=self._vector_snapshot_max_bytes,
+            matches=self._matches,
+            status_values=self._status_values,
+            filter_values=self._filter_values,
         )
         self._fts5_available = False
         self._keyword_search_diagnostic = (
@@ -2163,132 +2375,13 @@ class LocalRecordBackend:
         dim: int,
         filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
-        if k < 1:
-            return []
-        if len(query_vector) != dim:
-            raise ValueError(
-                f"query vector dimension mismatch: expected {dim}, got {len(query_vector)}"
-            )
-        query = PackedVectorCodec.normalize(
-            query_vector, dim, context="query vector"
-        )
-        row_count, byte_count = self.vector_storage_stats(model_name, dim)
-        if (
-            row_count > self._vector_snapshot_max_rows
-            or byte_count > self._vector_snapshot_max_bytes
-        ):
-            return self._search_vector_blocks(
-                query,
-                k,
-                model_name=model_name,
-                dim=dim,
-                filters=filters,
-            )
-        snapshot = self._vector_snapshot_engine._get_vector_snapshot(model_name, dim)
-        eligible = snapshot.filter_mask(
-            dict(filters) if filters is not None else None,
-            status_values=self._status_values(filters),
-            filter_values=self._filter_values,
-        )
-        positions = np.flatnonzero(eligible)
-        if not len(positions):
-            return []
-        scores = snapshot.matrix[positions] @ query
-        selected = self._vector_snapshot_engine._select_top_positions(
-            positions,
-            scores,
-            snapshot.storage_keys,
+        return self._vector_snapshot_engine.search_vector(
+            query_vector,
             k,
+            model_name=model_name,
+            dim=dim,
+            filters=filters,
         )
-        return [
-            RecordHit(
-                RecordIdentity.from_storage_key(snapshot.storage_keys[position]),
-                float(scores[index]),
-            )
-            for index, position in selected
-        ]
-
-    def _search_vector_blocks(
-        self,
-        query: np.ndarray,
-        k: int,
-        *,
-        model_name: str,
-        dim: int,
-        filters: SearchFilters | None,
-    ) -> list[RecordHit]:
-        best_keys: list[str] = []
-        best_scores: list[float] = []
-        last_storage_key: str | None = None
-        batch_limit = self._vector_snapshot_engine._vector_batch_limit(dim)
-        while True:
-            with self._lock:
-                conn = self._db.get_connection()
-                if last_storage_key is None:
-                    rows = conn.execute(
-                        """
-                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
-                               v.normalization_policy
-                        FROM local_records r
-                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
-                        WHERE v.encoder_namespace = ? AND v.dim = ?
-                        ORDER BY r.storage_key
-                        LIMIT ?
-                        """,
-                        (model_name, dim, batch_limit),
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        """
-                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
-                               v.normalization_policy
-                        FROM local_records r
-                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
-                        WHERE v.encoder_namespace = ? AND v.dim = ?
-                          AND r.storage_key > ?
-                        ORDER BY r.storage_key
-                        LIMIT ?
-                        """,
-                        (model_name, dim, last_storage_key, batch_limit),
-                    ).fetchall()
-            if not rows:
-                break
-            eligible_rows = [row for row in rows if self._matches(row, filters)]
-            if eligible_rows:
-                matrix = np.vstack(
-                    [
-                        PackedVectorCodec.decode(
-                            row["embedding"],
-                            dim,
-                            context=f"stored embedding for {row['storage_key']}",
-                        )
-                        for row in eligible_rows
-                    ]
-                )
-                scores = matrix @ query
-                best_keys.extend(row["storage_key"] for row in eligible_rows)
-                best_scores.extend(float(score) for score in scores)
-                if len(best_keys) > k:
-                    positions = np.arange(len(best_keys))
-                    selected = self._vector_snapshot_engine._select_top_positions(
-                        positions,
-                        np.asarray(best_scores),
-                        tuple(best_keys),
-                        k,
-                    )
-                    best_keys = [best_keys[position] for _, position in selected]
-                    best_scores = [best_scores[position] for _, position in selected]
-            last_storage_key = rows[-1]["storage_key"]
-        ordered = sorted(
-            zip(best_keys, best_scores, strict=True),
-            key=lambda item: (-item[1], item[0]),
-        )
-        return [
-            RecordHit(RecordIdentity.from_storage_key(storage_key), score)
-            for storage_key, score in ordered[:k]
-        ]
 
     @property
     def vector_engine(self) -> str:
@@ -2310,66 +2403,7 @@ class LocalRecordBackend:
         dim: int,
     ) -> Iterable[list[sqlite3.Row]]:
         """Yield bounded vector rows for streamed optional-index builds."""
-        last_storage_key: str | None = None
-        batch_limit = self._vector_snapshot_engine._vector_batch_limit(dim)
-        while True:
-            with self._lock:
-                conn = self._db.get_connection()
-                if last_storage_key is None:
-                    rows = conn.execute(
-                        """
-                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
-                               v.normalization_policy
-                        FROM local_records r
-                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
-                        WHERE v.encoder_namespace = ? AND v.dim = ?
-                        ORDER BY r.storage_key
-                        LIMIT ?
-                        """,
-                        (model_name, dim, batch_limit),
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        """
-                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
-                               v.normalization_policy
-                        FROM local_records r
-                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
-                        WHERE v.encoder_namespace = ? AND v.dim = ?
-                          AND r.storage_key > ?
-                        ORDER BY r.storage_key
-                        LIMIT ?
-                        """,
-                        (model_name, dim, last_storage_key, batch_limit),
-                    ).fetchall()
-            if not rows:
-                return
-            yield rows
-            last_storage_key = rows[-1]["storage_key"]
-
-    def _vector_row_matches(
-        self,
-        storage_key: str,
-        model_name: str,
-        dim: int,
-        filters: SearchFilters | None,
-    ) -> bool:
-        with self._lock:
-            conn = self._db.get_connection()
-            row = conn.execute(
-                """
-                SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                       r.status, r.metadata, r.uri
-                FROM local_records r
-                JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
-                WHERE r.storage_key = ?
-                  AND v.encoder_namespace = ? AND v.dim = ?
-                """,
-                (storage_key, model_name, dim),
-            ).fetchone()
-        return row is not None and self._matches(row, filters)
+        return self._vector_snapshot_engine._iter_vector_batches(model_name, dim)
 
     def hydrate_record(
         self,
