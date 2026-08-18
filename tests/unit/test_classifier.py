@@ -25,6 +25,19 @@ class TestClassifyQuery:
     def test_factual_quoted_phrase(self):
         assert classify_query('error "module not found"') == QueryType.FACTUAL
 
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "After a daemon restart, verify the non-degraded search path",
+            "read-only keyword-only vector-store failure",
+        ],
+    )
+    def test_prose_hyphenation_does_not_force_factual_routing(self, query):
+        assert classify_query(query) == QueryType.EXPLORATORY
+
+    def test_path_with_hyphen_remains_factual(self):
+        assert classify_query("src/search-kernel.py") == QueryType.FACTUAL
+
     def test_navigational_section_keyword(self):
         assert classify_query("installation section") == QueryType.NAVIGATIONAL
 

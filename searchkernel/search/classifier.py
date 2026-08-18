@@ -18,7 +18,7 @@ _BACKTICK_PATTERN = re.compile(r"`[^`]+`")
 _VERSION_PATTERN = re.compile(r"\b[vV]?\d+\.\d+(?:\.\d+)?(?:-\w+)?\b")
 _QUOTED_PHRASE_PATTERN = re.compile(r'"[^"]+"|\'[^\']+\'')
 _ARTIFACT_PATTERN = re.compile(
-    r"\b[A-Za-z0-9]+(?:[_:./\\-][A-Za-z0-9]+)+\b"
+    r"\b[A-Za-z0-9]+(?:[_:./\\][A-Za-z0-9]+)+\b"
 )
 _RELATIONSHIP_PATTERN = re.compile(
     r"\b(?:call(?:er|ee)?s?|depend(?:s|ency|encies)?|"
@@ -191,10 +191,7 @@ def _has_navigational_signals(query: str) -> bool:
     words = set(query.lower().split())
     if words & _NAVIGATIONAL_KEYWORDS:
         return True
-    for pattern in _NAVIGATIONAL_PHRASES:
-        if pattern.search(query):
-            return True
-    return False
+    return any(pattern.search(query) for pattern in _NAVIGATIONAL_PHRASES)
 
 
 def _has_exploratory_signals(query: str) -> bool:
