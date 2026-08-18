@@ -37,7 +37,6 @@ class TestSchemaAllTablesExist:
         tables = _table_names(conn)
         expected = {
             "kv_store",
-            "search_index",
             "graph_nodes",
             "graph_edges",
             "tasks",

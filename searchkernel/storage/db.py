@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Self
-
-logger = logging.getLogger(__name__)
 
 
 class SQLiteDatabase(Protocol):
@@ -262,24 +259,6 @@ class DatabaseManager:
                 value TEXT
             );
         """)
-        try:
-            conn.execute(
-                """
-                CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-                    chunk_id UNINDEXED,
-                    doc_id UNINDEXED,
-                    content,
-                    title,
-                    headers,
-                    tags,
-                    source_file UNINDEXED
-                )
-                """
-            )
-        except sqlite3.OperationalError as exc:
-            if "fts5" not in str(exc).lower():
-                raise
-            logger.info("SQLite FTS5 is unavailable; keyword index is disabled")
         conn.commit()
 
     def initialize_schema(self) -> None:
