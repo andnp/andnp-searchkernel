@@ -54,8 +54,28 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 import numpy as np
+from numpy.typing import NDArray
 
 from searchkernel.ports.search_results import RecordSearchResult
+
+
+def _relevance_of(results: Sequence[RecordSearchResult]) -> NDArray[np.float64]:
+    """Rescale the candidates' own scores onto [0, 1].
+
+    ``normalized_score`` cannot be used here: the pipeline assigns it after
+    ``post_process`` runs, so every result still carries the dataclass
+    default of 0.0 at this point and relevance would drop out of the
+    selection entirely, leaving pure diversity whatever lambda says.
+    Rescaling the raw scores here keeps relevance on the same [0, 1] scale
+    as the clamped similarity, and keeps this function independent of where
+    the pipeline chooses to normalise.
+    """
+    scores = np.array([result.score for result in results], dtype=np.float64)
+    lowest = float(scores.min())
+    highest = float(scores.max())
+    if highest == lowest:
+        return np.ones_like(scores)
+    return (scores - lowest) / (highest - lowest)
 
 
 def mmr_post_process(
@@ -105,11 +125,13 @@ def mmr_post_process(
         norms[norms == 0] = 1.0
         normalized = matrix / norms
         similarity = normalized @ normalized.T
-        similarity = np.clip(similarity, -1.0, 1.0)
+        # A negative cosine means unrelated, which must not become a
+        # diversity bonus, and a [-1, 1] span would be twice the span of
+        # relevance below, quietly doubling the penalty's weight.
+        similarity = np.clip(similarity, 0.0, 1.0)
 
-        relevance = np.array(
-            [results[position].normalized_score for position in embeddable],
-            dtype=np.float64,
+        relevance = _relevance_of(
+            [results[position] for position in embeddable]
         )
 
         remaining = set(range(len(embeddable)))
