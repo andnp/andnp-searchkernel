@@ -247,6 +247,14 @@ class _SearchExecution:
     candidate_key: CandidateCacheKey | None = None
     semantic_only: bool = False
 
+    @property
+    def routed_plan(self) -> QueryPlan:
+        """The plan for this search, once routing has produced one."""
+        plan = self.plan
+        if plan is None:
+            raise RuntimeError("search was not routed before use")
+        return plan
+
 
 class RecordSearchError(RuntimeError):
     """Raised when strict retrieval cannot complete a pipeline stage."""
@@ -527,7 +535,7 @@ class RecordSearchPipeline:
         ``acquisition_limit`` only shapes the cache key, so it stays local
         rather than joining the execution state.
         """
-        plan = execution.plan
+        plan = execution.routed_plan
         acquisition_limit = max(
             plan.keyword_candidate_budget,
             plan.vector_candidate_budget,
