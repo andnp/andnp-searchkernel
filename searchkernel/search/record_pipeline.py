@@ -255,6 +255,14 @@ class _SearchExecution:
             raise RuntimeError("search was not routed before use")
         return plan
 
+    @property
+    def acquired_candidates(self) -> list[RecordSearchCandidate]:
+        """The candidates for this search, once acquisition has produced them."""
+        candidates = self.candidates
+        if candidates is None:
+            raise RuntimeError("search has no acquired candidates yet")
+        return candidates
+
 
 class RecordSearchError(RuntimeError):
     """Raised when strict retrieval cannot complete a pipeline stage."""
@@ -963,6 +971,79 @@ class RecordSearchPipeline:
             execution.rankings, execution.failures
         )
 
+    async def _hydrate_results(self, execution: _SearchExecution) -> int:
+        """Hydrate acquired candidates into results, in two passes.
+
+        Returns ``result_limit`` (which may exceed the requested ``limit``
+        under adaptive mode) so the later refinement region can keep using
+        it, while the requested ``limit`` still governs the final
+        truncation elsewhere. The second pass re-scans candidates past
+        ``hydration_offset`` for chunk candidates specifically, so a chunk
+        beyond the first batch can still contribute; it appends to the
+        same ``execution.hydrated`` list, and the offset arithmetic is what
+        prevents double-hydrating.
+        """
+        candidates = execution.acquired_candidates
+        result_limit = resolve_adaptive_result_limit(
+            [candidate.score for candidate in candidates],
+            requested_limit=execution.limit,
+            adaptive_enabled=self._config.adaptive_enabled,
+            maximum_limit=self._config.maximum_limit,
+            score_ratio_floor=self._config.score_ratio_floor,
+            minimum_score=self._config.minimum_score,
+            maximum_score_gap=self._config.maximum_score_gap,
+        )
+
+        hydrated: list[RecordSearchResult] = []
+        hydration_offset = 0
+        while hydration_offset < len(candidates) and len(hydrated) < result_limit:
+            hydration_batch = candidates[
+                hydration_offset : hydration_offset + result_limit
+            ]
+            hydration_offset += len(hydration_batch)
+            batch_hydration = await self._hydrate_candidates(
+                hydration_batch,
+                execution.failures,
+                execution.cache_diagnostics,
+            )
+            for candidate, record in batch_hydration:
+                if record is None:
+                    execution.missing_record_ids.append(candidate.record_id)
+                    continue
+                result = RecordSearchResult(
+                    record=record,
+                    score=candidate.score,
+                    provenance=candidate.provenance,
+                )
+                if self._policy.result_filter is None or self._policy.result_filter(result):
+                    hydrated.append(result)
+
+        chunk_candidates = [
+            candidate
+            for candidate in candidates[hydration_offset:]
+            if _is_chunk_candidate(candidate)
+        ]
+        if chunk_candidates:
+            batch_hydration = await self._hydrate_candidates(
+                chunk_candidates,
+                execution.failures,
+                execution.cache_diagnostics,
+            )
+            for candidate, record in batch_hydration:
+                if record is None:
+                    execution.missing_record_ids.append(candidate.record_id)
+                    continue
+                result = RecordSearchResult(
+                    record=record,
+                    score=candidate.score,
+                    provenance=candidate.provenance,
+                )
+                if self._policy.result_filter is None or self._policy.result_filter(result):
+                    hydrated.append(result)
+
+        execution.hydrated = hydrated
+        return result_limit
+
     async def async_search(
         self,
         query: str,
@@ -1032,63 +1113,8 @@ class RecordSearchPipeline:
             candidates = execution.candidates
             raw_pre_fusion_overlap = execution.raw_pre_fusion_overlap
 
-        assert candidates is not None
-        result_limit = resolve_adaptive_result_limit(
-            [candidate.score for candidate in candidates],
-            requested_limit=limit,
-            adaptive_enabled=self._config.adaptive_enabled,
-            maximum_limit=self._config.maximum_limit,
-            score_ratio_floor=self._config.score_ratio_floor,
-            minimum_score=self._config.minimum_score,
-            maximum_score_gap=self._config.maximum_score_gap,
-        )
-
-        hydrated: list[RecordSearchResult] = []
-        hydration_offset = 0
-        while hydration_offset < len(candidates) and len(hydrated) < result_limit:
-            hydration_batch = candidates[
-                hydration_offset : hydration_offset + result_limit
-            ]
-            hydration_offset += len(hydration_batch)
-            batch_hydration = await self._hydrate_candidates(
-                hydration_batch,
-                failures,
-                cache_diagnostics,
-            )
-            for candidate, record in batch_hydration:
-                if record is None:
-                    missing_record_ids.append(candidate.record_id)
-                    continue
-                result = RecordSearchResult(
-                    record=record,
-                    score=candidate.score,
-                    provenance=candidate.provenance,
-                )
-                if self._policy.result_filter is None or self._policy.result_filter(result):
-                    hydrated.append(result)
-
-        chunk_candidates = [
-            candidate
-            for candidate in candidates[hydration_offset:]
-            if _is_chunk_candidate(candidate)
-        ]
-        if chunk_candidates:
-            batch_hydration = await self._hydrate_candidates(
-                chunk_candidates,
-                failures,
-                cache_diagnostics,
-            )
-            for candidate, record in batch_hydration:
-                if record is None:
-                    missing_record_ids.append(candidate.record_id)
-                    continue
-                result = RecordSearchResult(
-                    record=record,
-                    score=candidate.score,
-                    provenance=candidate.provenance,
-                )
-                if self._policy.result_filter is None or self._policy.result_filter(result):
-                    hydrated.append(result)
+        result_limit = await self._hydrate_results(execution)
+        hydrated = execution.hydrated
 
         hydrated = await self._rerank_results(
             query,
