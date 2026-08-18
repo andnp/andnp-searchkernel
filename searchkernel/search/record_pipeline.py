@@ -294,6 +294,11 @@ class RecordSearchConfig:
     base_keyword_weight: float = 1.0
     base_graph_weight: float = 1.0
     keyword_saturation_k: float = 10.0
+    # "max" takes the larger of a candidate's fused score and its raw graph
+    # contribution. Those are not the same unit: fused scores are on the RRF
+    # scale (a rank-1 hit is about 0.016 at the default rrf_k) while a graph
+    # contribution is a discounted seed score, so any graph hit outranks
+    # every lexical and vector hit. Prefer "rrf" unless that is what you want.
     graph_fusion: Literal["rrf", "max"] = "rrf"
     graph_depth: int = 1
     max_graph_seeds: int = 10
