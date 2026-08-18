@@ -613,6 +613,138 @@ class _GraphEngine:
                 raise
 
 
+class _VectorEngine:
+    """Own vector snapshot construction and storage statistics."""
+
+    def __init__(
+        self,
+        access: _SQLiteAccess,
+        *,
+        snapshot_lock: threading.RLock,
+        vector_snapshots: dict[tuple[str, int], VectorSnapshot],
+        vector_storage_stats: dict[tuple[str, int], tuple[int, int, int]],
+        vector_snapshot_max_rows: int,
+        vector_snapshot_max_bytes: int,
+    ) -> None:
+        self._access = access
+        self._snapshot_lock = snapshot_lock
+        self._vector_snapshots = vector_snapshots
+        self._vector_storage_stats = vector_storage_stats
+        self._vector_snapshot_max_rows = vector_snapshot_max_rows
+        self._vector_snapshot_max_bytes = vector_snapshot_max_bytes
+
+    def vector_count(self, model_name: str, dim: int) -> int:
+        row_count, _ = self.vector_storage_stats(model_name, dim)
+        return row_count
+
+    def vector_storage_stats(self, model_name: str, dim: int) -> tuple[int, int]:
+        key = (model_name, dim)
+        with self._access.lock:
+            conn = self._access.connection()
+            vector_epoch = _LocalEpochLane.read(
+                conn, _LocalEpochLane._LANE_KEYS["vector"]
+            )
+            cached = self._vector_storage_stats.get(key)
+            if cached is not None and cached[0] == vector_epoch:
+                return cached[1], cached[2]
+            row = conn.execute(
+                """
+                SELECT COUNT(*), COALESCE(SUM(length(embedding)), 0)
+                FROM local_vectors_v2
+                WHERE encoder_namespace = ? AND dim = ?
+                """,
+                (model_name, dim),
+            ).fetchone()
+            stats = (int(row[0]), int(row[1])) if row else (0, 0)
+            self._vector_storage_stats[key] = (vector_epoch, *stats)
+            return stats
+
+    def _vector_batch_limit(self, dim: int) -> int:
+        bytes_per_vector = dim * _VECTOR_EMBEDDING_BYTES
+        if bytes_per_vector < 1:
+            raise ValueError("vector dimension must be positive")
+        return max(
+            1,
+            min(
+                self._vector_snapshot_max_rows,
+                self._vector_snapshot_max_bytes // bytes_per_vector,
+            ),
+        )
+
+    def _get_vector_snapshot(self, model_name: str, dim: int) -> VectorSnapshot:
+        key = (model_name, dim)
+        with self._snapshot_lock:
+            with self._access.lock:
+                conn = self._access.connection()
+                current_epoch = _LocalEpochLane.read(
+                    conn, _LocalEpochLane._LANE_KEYS["vector"]
+                )
+                cached = self._vector_snapshots.get(key)
+                if cached is not None and cached.epoch == current_epoch:
+                    return cached
+                rows = conn.execute(
+                    """
+                    SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                           r.status, r.metadata, r.uri, v.embedding, v.format_version,
+                           v.normalization_policy
+                    FROM local_records r
+                    JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                    WHERE v.encoder_namespace = ? AND v.dim = ?
+                    ORDER BY r.storage_key
+                    """,
+                    (model_name, dim),
+                ).fetchall()
+                snapshot_epoch = _LocalEpochLane.read(
+                    conn, _LocalEpochLane._LANE_KEYS["vector"]
+                )
+            snapshot = VectorSnapshot.from_rows(
+                rows,
+                encoder_namespace=model_name,
+                dim=dim,
+                epoch=snapshot_epoch,
+            )
+            self._vector_snapshots[key] = snapshot
+            self._vector_storage_stats[key] = (
+                snapshot_epoch,
+                len(rows),
+                sum(len(row["embedding"]) for row in rows),
+            )
+            return snapshot
+
+    @staticmethod
+    def _select_top_positions(
+        positions: np.ndarray,
+        scores: np.ndarray,
+        storage_keys: tuple[str, ...],
+        k: int,
+    ) -> list[tuple[int, int]]:
+        if len(positions) <= k:
+            candidates = np.arange(len(positions))
+        else:
+            partition = np.argpartition(-scores, k - 1)[:k]
+            threshold = float(np.min(scores[partition]))
+            above = np.flatnonzero(scores > threshold)
+            ties = np.flatnonzero(scores == threshold)
+            ties = ties[
+                np.argsort(
+                    np.asarray(
+                        [storage_keys[int(positions[index])] for index in ties],
+                        dtype=str,
+                    ),
+                    kind="stable",
+                )
+            ]
+            candidates = np.concatenate((above, ties[: max(0, k - len(above))]))
+        ordered = sorted(
+            (int(index) for index in candidates),
+            key=lambda index: (
+                -float(scores[index]),
+                storage_keys[int(positions[index])],
+            ),
+        )
+        return [(index, int(positions[index])) for index in ordered[:k]]
+
+
 class LocalRecordBackend:
     """Shared durable state for the local vector, keyword, and graph stores."""
 
@@ -664,6 +796,14 @@ class LocalRecordBackend:
         self._faiss_threshold = faiss_threshold
         self._vector_snapshot_max_rows = vector_snapshot_max_rows
         self._vector_snapshot_max_bytes = vector_snapshot_max_bytes
+        self._vector_snapshot_engine = _VectorEngine(
+            self._access,
+            snapshot_lock=self._snapshot_lock,
+            vector_snapshots=self._vector_snapshots,
+            vector_storage_stats=self._vector_storage_stats,
+            vector_snapshot_max_rows=self._vector_snapshot_max_rows,
+            vector_snapshot_max_bytes=self._vector_snapshot_max_bytes,
+        )
         self._fts5_available = False
         self._keyword_search_diagnostic = (
             "FTS5 indexed lexical search has not been initialized"
@@ -2044,7 +2184,7 @@ class LocalRecordBackend:
                 dim=dim,
                 filters=filters,
             )
-        snapshot = self._get_vector_snapshot(model_name, dim)
+        snapshot = self._vector_snapshot_engine._get_vector_snapshot(model_name, dim)
         eligible = snapshot.filter_mask(
             dict(filters) if filters is not None else None,
             status_values=self._status_values(filters),
@@ -2054,7 +2194,7 @@ class LocalRecordBackend:
         if not len(positions):
             return []
         scores = snapshot.matrix[positions] @ query
-        selected = self._select_top_positions(
+        selected = self._vector_snapshot_engine._select_top_positions(
             positions,
             scores,
             snapshot.storage_keys,
@@ -2080,7 +2220,7 @@ class LocalRecordBackend:
         best_keys: list[str] = []
         best_scores: list[float] = []
         last_storage_key: str | None = None
-        batch_limit = self._vector_batch_limit(dim)
+        batch_limit = self._vector_snapshot_engine._vector_batch_limit(dim)
         while True:
             with self._lock:
                 conn = self._db.get_connection()
@@ -2132,7 +2272,7 @@ class LocalRecordBackend:
                 best_scores.extend(float(score) for score in scores)
                 if len(best_keys) > k:
                     positions = np.arange(len(best_keys))
-                    selected = self._select_top_positions(
+                    selected = self._vector_snapshot_engine._select_top_positions(
                         positions,
                         np.asarray(best_scores),
                         tuple(best_keys),
@@ -2159,42 +2299,10 @@ class LocalRecordBackend:
         return self._faiss_threshold
 
     def vector_count(self, model_name: str, dim: int) -> int:
-        row_count, _ = self.vector_storage_stats(model_name, dim)
-        return row_count
+        return self._vector_snapshot_engine.vector_count(model_name, dim)
 
     def vector_storage_stats(self, model_name: str, dim: int) -> tuple[int, int]:
-        key = (model_name, dim)
-        with self._lock:
-            conn = self._db.get_connection()
-            vector_epoch = self._epoch_lane.read(
-                conn, _LocalEpochLane._LANE_KEYS["vector"]
-            )
-            cached = self._vector_storage_stats.get(key)
-            if cached is not None and cached[0] == vector_epoch:
-                return cached[1], cached[2]
-            row = conn.execute(
-                """
-                SELECT COUNT(*), COALESCE(SUM(length(embedding)), 0)
-                FROM local_vectors_v2
-                WHERE encoder_namespace = ? AND dim = ?
-                """,
-                (model_name, dim),
-            ).fetchone()
-            stats = (int(row[0]), int(row[1])) if row else (0, 0)
-            self._vector_storage_stats[key] = (vector_epoch, *stats)
-            return stats
-
-    def _vector_batch_limit(self, dim: int) -> int:
-        bytes_per_vector = dim * _VECTOR_EMBEDDING_BYTES
-        if bytes_per_vector < 1:
-            raise ValueError("vector dimension must be positive")
-        return max(
-            1,
-            min(
-                self._vector_snapshot_max_rows,
-                self._vector_snapshot_max_bytes // bytes_per_vector,
-            ),
-        )
+        return self._vector_snapshot_engine.vector_storage_stats(model_name, dim)
 
     def _iter_vector_batches(
         self,
@@ -2203,7 +2311,7 @@ class LocalRecordBackend:
     ) -> Iterable[list[sqlite3.Row]]:
         """Yield bounded vector rows for streamed optional-index builds."""
         last_storage_key: str | None = None
-        batch_limit = self._vector_batch_limit(dim)
+        batch_limit = self._vector_snapshot_engine._vector_batch_limit(dim)
         while True:
             with self._lock:
                 conn = self._db.get_connection()
@@ -2262,79 +2370,6 @@ class LocalRecordBackend:
                 (storage_key, model_name, dim),
             ).fetchone()
         return row is not None and self._matches(row, filters)
-
-    def _get_vector_snapshot(self, model_name: str, dim: int) -> VectorSnapshot:
-        key = (model_name, dim)
-        with self._snapshot_lock:
-            with self._lock:
-                conn = self._db.get_connection()
-                current_epoch = self._epoch_lane.read(
-                    conn, _LocalEpochLane._LANE_KEYS["vector"]
-                )
-                cached = self._vector_snapshots.get(key)
-                if cached is not None and cached.epoch == current_epoch:
-                    return cached
-                rows = conn.execute(
-                    """
-                    SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                           r.status, r.metadata, r.uri, v.embedding, v.format_version,
-                           v.normalization_policy
-                    FROM local_records r
-                    JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
-                    WHERE v.encoder_namespace = ? AND v.dim = ?
-                    ORDER BY r.storage_key
-                    """,
-                    (model_name, dim),
-                ).fetchall()
-                snapshot_epoch = self._epoch_lane.read(
-                    conn, _LocalEpochLane._LANE_KEYS["vector"]
-                )
-            snapshot = VectorSnapshot.from_rows(
-                rows,
-                encoder_namespace=model_name,
-                dim=dim,
-                epoch=snapshot_epoch,
-            )
-            self._vector_snapshots[key] = snapshot
-            self._vector_storage_stats[key] = (
-                snapshot_epoch,
-                len(rows),
-                sum(len(row["embedding"]) for row in rows),
-            )
-            return snapshot
-
-    @staticmethod
-    def _select_top_positions(
-        positions: np.ndarray,
-        scores: np.ndarray,
-        storage_keys: tuple[str, ...],
-        k: int,
-    ) -> list[tuple[int, int]]:
-        if len(positions) <= k:
-            candidates = np.arange(len(positions))
-        else:
-            partition = np.argpartition(-scores, k - 1)[:k]
-            threshold = float(np.min(scores[partition]))
-            above = np.flatnonzero(scores > threshold)
-            ties = np.flatnonzero(scores == threshold)
-            ties = ties[
-                np.argsort(
-                    np.asarray(
-                        [storage_keys[int(positions[index])] for index in ties],
-                        dtype=str,
-                    ),
-                    kind="stable",
-                )
-            ]
-            candidates = np.concatenate((above, ties[: max(0, k - len(above))]))
-        ordered = sorted(
-            (int(index) for index in candidates),
-            key=lambda index: (
-                -float(scores[index]),
-                storage_keys[int(positions[index])],
-            ),
-        )
-        return [(index, int(positions[index])) for index in ordered[:k]]
 
     def hydrate_record(
         self,
