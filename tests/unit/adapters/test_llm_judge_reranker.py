@@ -51,3 +51,23 @@ def test_empty_response_raises() -> None:
     reranker, _ = _judge([""])
     with pytest.raises(ValueError, match="unparseable"):
         reranker.rerank("query", ["doc"])
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ("Yes.", 1.0),
+        ("Yes,", 1.0),
+        ("Yes, this is relevant.", 1.0),
+        ("**Yes**", 1.0),
+        ("No.", 0.0),
+        ("no!", 0.0),
+    ],
+)
+def test_judge_reranker_tolerates_punctuated_answers(
+    response: str, expected: float
+) -> None:
+    """Models punctuate however plainly the prompt asks for one word."""
+    reranker = LLMJudgeReranker(lambda _prompt: response, model_name="test")
+
+    assert reranker.rerank("query", ["document"]) == [expected]
