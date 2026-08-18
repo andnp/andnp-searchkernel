@@ -347,3 +347,29 @@ def test_compute_doc_id_multi_root_reports_stray_path_once(tmp_path, caplog):
     warnings = [record for record in caplog.records if "outside" in record.getMessage()]
     assert len(warnings) == 1
     assert str(project_a) not in warnings[0].getMessage()
+
+
+def test_compute_doc_id_multi_root_root_is_filesystem_root(caplog):
+    """A docs root at the filesystem root must not spuriously warn."""
+    file_path = Path("/very-unlikely-searchkernel-test-dir/bar.md")
+
+    with caplog.at_level(logging.WARNING, logger="searchkernel.search.path_utils"):
+        result = compute_doc_id_multi_root(file_path, [Path("/")])
+
+    assert result == "very-unlikely-searchkernel-test-dir/bar"
+    warnings = [r for r in caplog.records if "configured document roots" in r.getMessage()]
+    assert warnings == []
+
+
+def test_compute_doc_id_multi_root_rejects_sibling_prefix_root(tmp_path, caplog):
+    """A root whose name is a string-prefix of a sibling dir must not match it."""
+    root = tmp_path / "project"
+    sibling_root = tmp_path / "project-shared"
+    file_path = tmp_path / "project-extra" / "x.md"
+
+    with caplog.at_level(logging.WARNING, logger="searchkernel.search.path_utils"):
+        result = compute_doc_id_multi_root(file_path, [root, sibling_root])
+
+    assert result == "project-extra/x"
+    warnings = [r for r in caplog.records if "configured document roots" in r.getMessage()]
+    assert len(warnings) == 1

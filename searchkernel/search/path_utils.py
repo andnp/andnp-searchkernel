@@ -65,12 +65,12 @@ def compute_doc_id_multi_root(file_path: Path, docs_roots: list[Path]) -> str:
     if common_root is None:
         return str(resolved_path.with_suffix("")).replace("\\", "/")
 
+    resolved_str = str(resolved_path)
     for docs_root in _resolved_docs_roots(tuple(str(root) for root in docs_roots)):
-        try:
-            resolved_path.relative_to(docs_root)
+        root_str = str(docs_root)
+        prefix = root_str if root_str.endswith(os.sep) else root_str + os.sep
+        if resolved_str == root_str or resolved_str.startswith(prefix):
             return compute_doc_id(resolved_path, common_root)
-        except ValueError:
-            continue
 
     _warn_outside_docs_roots(str(file_path), len(docs_roots))
     return compute_doc_id(resolved_path, common_root)
