@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 import sqlite3
 import threading
@@ -113,13 +112,7 @@ class SQLiteEmbeddingCache:
             return
         prepared = []
         for content_hash, vector in vectors.items():
-            normalized = self._validated_vector(vector)
-            with np.errstate(over="ignore"):
-                packed = np.asarray(normalized, dtype="<f4")
-            if not np.isfinite(packed).all():
-                raise ValueError(
-                    "embedding vector cannot be represented as finite float32 values"
-                )
+            packed = self._validated_vector(vector)
             prepared.append(
                 (
                     self.encoder_namespace,
@@ -258,16 +251,22 @@ class SQLiteEmbeddingCache:
             raise ValueError("embedding vector has unexpected dimension")
         return packed.tolist()
 
-    def _validated_vector(self, vector: Sequence[float]) -> tuple[float, ...]:
+    def _validated_vector(self, vector: Sequence[float]) -> np.ndarray:
         try:
-            normalized = tuple(float(value) for value in vector)
+            values = np.asarray(vector, dtype=np.float64)
         except (TypeError, ValueError) as error:
             raise ValueError("embedding vector must contain finite values") from error
-        if not normalized or any(not math.isfinite(value) for value in normalized):
+        if values.ndim != 1 or not values.size or not np.isfinite(values).all():
             raise ValueError("embedding vector must contain finite values")
-        if self.dimension and len(normalized) != self.dimension:
+        if self.dimension and values.size != self.dimension:
             raise ValueError("embedding vector has unexpected dimension")
-        return normalized
+        with np.errstate(over="ignore"):
+            packed = values.astype("<f4")
+        if not np.isfinite(packed).all():
+            raise ValueError(
+                "embedding vector cannot be represented as finite float32 values"
+            )
+        return packed
 
     def _add_metrics(self, **increments: int) -> None:
         values = {
