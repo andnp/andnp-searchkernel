@@ -47,18 +47,14 @@ class HeaderBasedChunker(ChunkingStrategy):
         initial_chunks = self._create_initial_chunks(record, headers)
         merged_chunks = self._merge_small_chunks(initial_chunks)
         split_chunks = self._split_large_chunks(merged_chunks)
-        final_chunks = self._apply_overlap(split_chunks)
-
-        final_chunks = self._create_parent_child_chunks(record, final_chunks)
-
-        return final_chunks
+        return self._apply_overlap(split_chunks)
 
     # ------------------------------------------------------------------
     # Chunk construction / field access helpers
     #
     # `domain.Chunk` is source-agnostic: markdown-specific fields
-    # (header_path, start_pos, end_pos, file_path, modified_time,
-    # parent_chunk_id) live in `metadata` rather than as first-class
+    # (header_path, start_pos, end_pos, file_path, modified_time) live in
+    # `metadata` rather than as first-class
     # dataclass fields. These helpers centralize construction (so
     # `content_hash` is always computed) and reads.
     # ------------------------------------------------------------------
@@ -76,7 +72,6 @@ class HeaderBasedChunker(ChunkingStrategy):
         end_pos: int,
         file_path: str,
         modified_time,
-        parent_chunk_id: str | None = None,
     ) -> Chunk:
         full_metadata = dict(metadata)
         full_metadata["header_path"] = header_path
@@ -91,9 +86,6 @@ class HeaderBasedChunker(ChunkingStrategy):
             if hasattr(modified_time, "isoformat")
             else modified_time
         )
-        if parent_chunk_id is not None:
-            full_metadata["parent_chunk_id"] = parent_chunk_id
-
         chunk = Chunk(
             chunk_id=chunk_id,
             record_id=record_id,
@@ -368,21 +360,6 @@ class HeaderBasedChunker(ChunkingStrategy):
 
         return "\n".join(lines[index:]).lstrip()
 
-    def _select_parent_header_path(self, chunks: list[Chunk]) -> str:
-        header_paths = [
-            self._chunk_header_path(chunk)
-            for chunk in chunks
-            if self._chunk_header_path(chunk)
-        ]
-        if not header_paths:
-            return ""
-
-        shared_prefix = self._shared_header_prefix(header_paths)
-        if shared_prefix:
-            return " > ".join(shared_prefix)
-
-        return header_paths[0]
-
     def _merge_small_chunks(self, chunks: list[Chunk]) -> list[Chunk]:
         if not chunks:
             return chunks
@@ -591,105 +568,3 @@ class HeaderBasedChunker(ChunkingStrategy):
             )
 
         return chunks
-
-    def _create_parent_child_chunks(
-        self, record: Record, chunks: list[Chunk]
-    ) -> list[Chunk]:
-        if not chunks:
-            return chunks
-
-        parent_min = self.config.parent_chunk_min_chars
-        parent_max = self.config.parent_chunk_max_chars
-
-        parents: list[Chunk] = []
-        children: list[Chunk] = []
-
-        current_parent_chunks: list[Chunk] = []
-        current_parent_content = ""
-        parent_index = 0
-
-        for chunk in chunks:
-            if not current_parent_content:
-                current_parent_chunks = [chunk]
-                current_parent_content = chunk.content
-            elif len(current_parent_content) + len(chunk.content) + 2 <= parent_max:
-                current_parent_chunks.append(chunk)
-                current_parent_content += "\n\n" + chunk.content
-            else:
-                if len(current_parent_content) >= parent_min:
-                    parent_chunk_id = f"{record.source_id}_parent_{parent_index}"
-                    parent = self._build_chunk(
-                        chunk_id=parent_chunk_id,
-                        record_id=record.source_id,
-                        content=current_parent_content,
-                        metadata=current_parent_chunks[0].metadata,
-                        chunk_index=parent_index,
-                        header_path=self._select_parent_header_path(
-                            current_parent_chunks
-                        ),
-                        start_pos=self._chunk_start_pos(current_parent_chunks[0]),
-                        end_pos=self._chunk_end_pos(current_parent_chunks[-1]),
-                        file_path=record.metadata.get("file_path", ""),
-                        modified_time=record.updated_at,
-                    )
-                    parents.append(parent)
-
-                    for child_chunk in current_parent_chunks:
-                        child = self._build_chunk(
-                            chunk_id=child_chunk.chunk_id,
-                            record_id=child_chunk.record_id,
-                            content=child_chunk.content,
-                            metadata=child_chunk.metadata,
-                            chunk_index=child_chunk.chunk_index,
-                            header_path=self._chunk_header_path(child_chunk),
-                            start_pos=self._chunk_start_pos(child_chunk),
-                            end_pos=self._chunk_end_pos(child_chunk),
-                            file_path=self._chunk_file_path(child_chunk),
-                            modified_time=self._chunk_modified_time(child_chunk),
-                            parent_chunk_id=parent_chunk_id,
-                        )
-                        children.append(child)
-
-                    parent_index += 1
-                else:
-                    children.extend(current_parent_chunks)
-
-                current_parent_chunks = [chunk]
-                current_parent_content = chunk.content
-
-        if current_parent_chunks:
-            if len(current_parent_content) >= parent_min:
-                parent_chunk_id = f"{record.source_id}_parent_{parent_index}"
-                parent = self._build_chunk(
-                    chunk_id=parent_chunk_id,
-                    record_id=record.source_id,
-                    content=current_parent_content,
-                    metadata=current_parent_chunks[0].metadata,
-                    chunk_index=parent_index,
-                    header_path=self._select_parent_header_path(current_parent_chunks),
-                    start_pos=self._chunk_start_pos(current_parent_chunks[0]),
-                    end_pos=self._chunk_end_pos(current_parent_chunks[-1]),
-                    file_path=record.metadata.get("file_path", ""),
-                    modified_time=record.updated_at,
-                )
-                parents.append(parent)
-
-                for child_chunk in current_parent_chunks:
-                    child = self._build_chunk(
-                        chunk_id=child_chunk.chunk_id,
-                        record_id=child_chunk.record_id,
-                        content=child_chunk.content,
-                        metadata=child_chunk.metadata,
-                        chunk_index=child_chunk.chunk_index,
-                        header_path=self._chunk_header_path(child_chunk),
-                        start_pos=self._chunk_start_pos(child_chunk),
-                        end_pos=self._chunk_end_pos(child_chunk),
-                        file_path=self._chunk_file_path(child_chunk),
-                        modified_time=self._chunk_modified_time(child_chunk),
-                        parent_chunk_id=parent_chunk_id,
-                    )
-                    children.append(child)
-            else:
-                children.extend(current_parent_chunks)
-
-        return parents + children

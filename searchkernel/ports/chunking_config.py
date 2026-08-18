@@ -16,5 +16,3 @@ class ChunkTuningConfig(Protocol):
     min_chunk_chars: int
     max_chunk_chars: int
     overlap_chars: int
-    parent_chunk_min_chars: int
-    parent_chunk_max_chars: int

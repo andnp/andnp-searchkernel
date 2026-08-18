@@ -16,8 +16,6 @@ class Config:
     min_chunk_chars: int = 1
     max_chunk_chars: int = 1_000
     overlap_chars: int = 0
-    parent_chunk_min_chars: int = 10_000
-    parent_chunk_max_chars: int = 10_000
 
 
 def make_record(body: str, *, source_id: str = "note:1") -> Record:
@@ -220,54 +218,6 @@ def test_zero_overlap_does_not_change_split_content():
     assert all("[..." not in chunk.content for chunk in chunks)
 
 
-def test_parent_chunks_are_created_and_children_reference_them():
-    record = make_record("# One\nfirst\n# Two\nsecond")
-
-    chunks = chunker(
-        parent_chunk_min_chars=10,
-        parent_chunk_max_chars=40,
-    ).chunk_record(record)
-
-    parents = [chunk for chunk in chunks if "_parent_" in chunk.chunk_id]
-    children = [chunk for chunk in chunks if "_parent_" not in chunk.chunk_id]
-    assert len(parents) == 1
-    assert len(children) == 2
-    assert parents[0].content == "One\n\nfirst\n\nTwo\n\nsecond"
-    assert all(
-        child.metadata["parent_chunk_id"] == parents[0].chunk_id for child in children
-    )
-    assert parents[0].metadata["header_path"] == "One"
-
-
-def test_parent_minimum_can_leave_chunks_without_parents():
-    record = make_record("# One\nfirst")
-
-    chunks = chunker(parent_chunk_min_chars=100).chunk_record(record)
-
-    assert len(chunks) == 1
-    assert "_parent_" not in chunks[0].chunk_id
-    assert "parent_chunk_id" not in chunks[0].metadata
-
-
-def test_parent_maximum_flushes_multiple_parent_groups():
-    record = make_record("# One\naaa\n# Two\nbbb\n# Three\nccc")
-
-    chunks = chunker(parent_chunk_min_chars=1, parent_chunk_max_chars=15).chunk_record(
-        record
-    )
-
-    parents = [chunk for chunk in chunks if "_parent_" in chunk.chunk_id]
-    children = [chunk for chunk in chunks if "_parent_" not in chunk.chunk_id]
-    assert [parent.content for parent in parents] == [
-        "One\n\naaa",
-        "Two\n\nbbb",
-        "Three\n\nccc",
-    ]
-    assert [child.metadata["parent_chunk_id"] for child in children] == [
-        parent.chunk_id for parent in parents
-    ]
-
-
 def test_header_path_helpers_handle_shared_and_empty_paths():
     strategy = chunker()
 
@@ -293,7 +243,6 @@ def test_chunk_metadata_preserves_input_values_while_normalizing_datetime():
         end_pos=6,
         file_path="notes/test.md",
         modified_time=record.updated_at,
-        parent_chunk_id="parent",
     )
 
     assert chunk.metadata == {
@@ -303,5 +252,4 @@ def test_chunk_metadata_preserves_input_values_while_normalizing_datetime():
         "end_pos": 6,
         "file_path": "notes/test.md",
         "modified_time": "2026-01-01T00:00:00+00:00",
-        "parent_chunk_id": "parent",
     }
