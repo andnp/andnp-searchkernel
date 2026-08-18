@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+import numpy as np
+
 from searchkernel.domain import Record, Vector
 from searchkernel.ports.embedding import EmbeddingProvider
-from searchkernel.utils.similarity import cosine_similarity_lists
 
 
 @runtime_checkable
@@ -26,6 +27,23 @@ class StoredVectorLookup(Protocol):
 
 def _record_text(record: Record) -> str:
     return f"{record.title}\n{record.indexed_text or record.body}".strip()
+
+
+def _batched_cosine_scores(query_vector: Vector, vectors: list[Vector]) -> list[float]:
+    query_array = np.asarray(query_vector, dtype=np.float64)
+    vectors_array = np.asarray(vectors, dtype=np.float64)
+
+    query_norm = np.linalg.norm(query_array)
+    vector_norms = np.linalg.norm(vectors_array, axis=1)
+
+    dot_products = vectors_array @ query_array
+    denominators = vector_norms * query_norm
+    valid = denominators != 0
+
+    cosine = np.zeros_like(dot_products)
+    cosine[valid] = dot_products[valid] / denominators[valid]
+
+    return [float(score) for score in (cosine + 1.0) / 2.0]
 
 
 class EmbeddingCosineReranker:
@@ -46,20 +64,14 @@ class EmbeddingCosineReranker:
             return []
         query_vector = self._embedding_provider.embed_query(query)
         document_vectors = self._embedding_provider.embed(documents)
-        return [
-            (cosine_similarity_lists(query_vector, vector) + 1.0) / 2.0
-            for vector in document_vectors
-        ]
+        return _batched_cosine_scores(query_vector, document_vectors)
 
     def rerank_records(self, query: str, records: list[Record]) -> list[float]:
         if not records:
             return []
         query_vector = self._embedding_provider.embed_query(query)
         vectors = self._vectors_for(records)
-        return [
-            (cosine_similarity_lists(query_vector, vector) + 1.0) / 2.0
-            for vector in vectors
-        ]
+        return _batched_cosine_scores(query_vector, vectors)
 
     def _vectors_for(self, records: list[Record]) -> list[Vector]:
         stored: dict[str, Vector] = {}

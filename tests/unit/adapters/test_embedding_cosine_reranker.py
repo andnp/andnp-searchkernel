@@ -1,8 +1,12 @@
+import random
 from datetime import UTC, datetime
+
+import pytest
 
 from searchkernel.adapters.rerank.embedding_cosine import EmbeddingCosineReranker
 from searchkernel.domain import Record
 from searchkernel.ports.rerank import RecordReranker, Reranker
+from searchkernel.utils.similarity import cosine_similarity_lists
 
 
 def _record(source_id: str) -> Record:
@@ -131,3 +135,23 @@ def test_rerank_records_empty_returns_empty_without_any_lookup_or_embed() -> Non
     assert reranker.rerank_records("query", []) == []
     assert lookup.calls == []
     assert provider.embed_calls == []
+
+
+def test_rerank_matches_scalar_cosine_similarity_lists_for_random_vectors() -> None:
+    rng = random.Random(42)
+    dim = 16
+    query_vector = [rng.uniform(-1.0, 1.0) for _ in range(dim)]
+    document_vectors = [[rng.uniform(-1.0, 1.0) for _ in range(dim)] for _ in range(20)]
+    # Include a zero vector to exercise the zero-norm branch.
+    document_vectors.append([0.0] * dim)
+
+    provider = _FakeEmbeddingProvider(query_vector, document_vectors)
+    reranker = EmbeddingCosineReranker(provider)
+
+    scores = reranker.rerank("query", [f"doc-{i}" for i in range(len(document_vectors))])
+
+    expected = [
+        (cosine_similarity_lists(query_vector, vector) + 1.0) / 2.0 for vector in document_vectors
+    ]
+    for actual_score, expected_score in zip(scores, expected, strict=True):
+        assert actual_score == pytest.approx(expected_score, abs=1e-9)
