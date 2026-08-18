@@ -16,7 +16,7 @@ import math
 import re
 import sqlite3
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -210,6 +210,148 @@ class _SQLiteAccess:
         return self.db.get_connection()
 
 
+class _GraphEngine:
+    """Own graph edge schema and mutation for the local backend."""
+
+    def __init__(
+        self,
+        access: _SQLiteAccess,
+        *,
+        canonicalize_storage_key: Callable[[str], str],
+    ) -> None:
+        self._access = access
+        self._canonicalize_storage_key = canonicalize_storage_key
+
+    @staticmethod
+    def initialize_schema(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_local_graph_source "
+            "ON local_graph_edges (source_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_local_graph_target "
+            "ON local_graph_edges (target_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_local_graph_source_type "
+            "ON local_graph_edges (source_id, edge_type)"
+        )
+
+    def upsert_edges(
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+    ) -> None:
+        rows: list[tuple[str, str, str, float]] = []
+        for edge in edges:
+            if isinstance(edge, GraphEdge):
+                row = (
+                    edge.source.storage_key,
+                    edge.target.storage_key,
+                    edge.edge_type,
+                    edge.weight,
+                )
+            else:
+                if len(edge) != 4:
+                    raise ValueError("graph edges require four values")
+                row = (edge[0], edge[1], edge[2], float(edge[3]))
+            source_id = self._canonicalize_storage_key(row[0])
+            target_id = self._canonicalize_storage_key(row[1])
+            if not isinstance(row[2], str) or not row[2] or not math.isfinite(row[3]):
+                raise ValueError("graph edges require a finite weight and edge type")
+            rows.append((source_id, target_id, row[2], row[3]))
+        if not rows:
+            return
+        with self._access.lock:
+            conn = self._access.connection()
+            try:
+                endpoint_keys = sorted(
+                    {source_id for source_id, _, _, _ in rows}
+                    | {target_id for _, target_id, _, _ in rows}
+                )
+                existing_keys: set[str] = set()
+                for key_chunk in LocalRecordBackend._key_chunks(endpoint_keys):
+                    placeholders = ",".join("?" for _ in key_chunk)
+                    existing_keys.update(
+                        row[0]
+                        for row in conn.execute(
+                            f"""
+                            SELECT storage_key
+                            FROM local_records
+                            WHERE storage_key IN ({placeholders})
+                            """,
+                            key_chunk,
+                        ).fetchall()
+                    )
+                missing_keys = set(endpoint_keys) - existing_keys
+                if missing_keys:
+                    raise ValueError(
+                        "graph edge endpoints are not indexed: "
+                        + ", ".join(sorted(missing_keys))
+                    )
+                changes_before = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT INTO local_graph_edges (source_id, target_id, edge_type, weight)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(source_id, target_id, edge_type) DO UPDATE SET
+                        weight = excluded.weight
+                    WHERE local_graph_edges.weight IS NOT excluded.weight
+                    """,
+                    rows,
+                )
+                if conn.total_changes > changes_before:
+                    _LocalEpochLane.bump(conn, graph=True)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+    def delete_edges(
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+    ) -> None:
+        rows: list[tuple[str, str, str]] = []
+        for edge in edges:
+            if isinstance(edge, GraphEdge):
+                row = (
+                    edge.source.storage_key,
+                    edge.target.storage_key,
+                    edge.edge_type,
+                )
+            else:
+                if len(edge) < 3:
+                    raise ValueError("graph edges require at least three values")
+                row = (edge[0], edge[1], edge[2])
+            if not isinstance(row[2], str) or not row[2]:
+                raise ValueError("graph edges require a non-empty edge type")
+            rows.append(
+                (
+                    self._canonicalize_storage_key(row[0]),
+                    self._canonicalize_storage_key(row[1]),
+                    row[2],
+                )
+            )
+        if not rows:
+            return
+        with self._access.lock:
+            conn = self._access.connection()
+            try:
+                changes_before = conn.total_changes
+                conn.executemany(
+                    """
+                    DELETE FROM local_graph_edges
+                    WHERE source_id = ? AND target_id = ? AND edge_type = ?
+                    """,
+                    rows,
+                )
+                if conn.total_changes > changes_before:
+                    _LocalEpochLane.bump(conn, graph=True)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+
 class LocalRecordBackend:
     """Shared durable state for the local vector, keyword, and graph stores."""
 
@@ -249,6 +391,10 @@ class LocalRecordBackend:
         )
         self._lock = threading.RLock()
         self._access = _SQLiteAccess(db=self._db, lock=self._lock)
+        self._graph_engine = _GraphEngine(
+            self._access,
+            canonicalize_storage_key=self._canonical_graph_storage_key,
+        )
         self._snapshot_lock = threading.RLock()
         self._vector_storage_stats: dict[tuple[str, int], tuple[int, int, int]] = {}
         self._vector_snapshots: dict[tuple[str, int], VectorSnapshot] = (
@@ -364,7 +510,7 @@ class LocalRecordBackend:
         self._ensure_local_record_column(conn, "keywords", "TEXT NOT NULL DEFAULT ''")
         self._ensure_local_record_column(conn, "indexed_text", "TEXT")
         self._initialize_keyword_schema(conn)
-        self._initialize_graph_schema(conn)
+        self._graph_engine.initialize_schema(conn)
         self._record_identity_stale = self._resolve_record_identity_staleness(conn)
         conn.commit()
 
@@ -426,21 +572,6 @@ class LocalRecordBackend:
         if identity.storage_key != storage_key:
             raise ValueError(f"non-canonical graph storage key: {storage_key!r}")
         return storage_key
-
-    @staticmethod
-    def _initialize_graph_schema(conn: sqlite3.Connection) -> None:
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_local_graph_source "
-            "ON local_graph_edges (source_id)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_local_graph_target "
-            "ON local_graph_edges (target_id)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_local_graph_source_type "
-            "ON local_graph_edges (source_id, edge_type)"
-        )
 
     @staticmethod
     def _ensure_local_record_column(
@@ -2352,115 +2483,13 @@ class LocalRecordBackend:
         self,
         edges: Sequence[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
-        rows: list[tuple[str, str, str, float]] = []
-        for edge in edges:
-            if isinstance(edge, GraphEdge):
-                row = (
-                    edge.source.storage_key,
-                    edge.target.storage_key,
-                    edge.edge_type,
-                    edge.weight,
-                )
-            else:
-                if len(edge) != 4:
-                    raise ValueError("graph edges require four values")
-                row = (edge[0], edge[1], edge[2], float(edge[3]))
-            source_id = self._canonical_graph_storage_key(row[0])
-            target_id = self._canonical_graph_storage_key(row[1])
-            if not isinstance(row[2], str) or not row[2] or not math.isfinite(row[3]):
-                raise ValueError("graph edges require a finite weight and edge type")
-            rows.append((source_id, target_id, row[2], row[3]))
-        if not rows:
-            return
-        with self._lock:
-            conn = self._db.get_connection()
-            try:
-                endpoint_keys = sorted(
-                    {source_id for source_id, _, _, _ in rows}
-                    | {target_id for _, target_id, _, _ in rows}
-                )
-                existing_keys: set[str] = set()
-                for key_chunk in LocalRecordBackend._key_chunks(endpoint_keys):
-                    placeholders = ",".join("?" for _ in key_chunk)
-                    existing_keys.update(
-                        row[0]
-                        for row in conn.execute(
-                            f"""
-                            SELECT storage_key
-                            FROM local_records
-                            WHERE storage_key IN ({placeholders})
-                            """,
-                            key_chunk,
-                        ).fetchall()
-                    )
-                missing_keys = set(endpoint_keys) - existing_keys
-                if missing_keys:
-                    raise ValueError(
-                        "graph edge endpoints are not indexed: "
-                        + ", ".join(sorted(missing_keys))
-                    )
-                changes_before = conn.total_changes
-                conn.executemany(
-                    """
-                    INSERT INTO local_graph_edges (source_id, target_id, edge_type, weight)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(source_id, target_id, edge_type) DO UPDATE SET
-                        weight = excluded.weight
-                    WHERE local_graph_edges.weight IS NOT excluded.weight
-                    """,
-                    rows,
-                )
-                if conn.total_changes > changes_before:
-                    self._epoch_lane.bump(conn, graph=True)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        self._graph_engine.upsert_edges(edges)
 
     def delete_edges(
         self,
         edges: Sequence[GraphEdge | tuple[str, str, str, float]],
     ) -> None:
-        rows: list[tuple[str, str, str]] = []
-        for edge in edges:
-            if isinstance(edge, GraphEdge):
-                row = (
-                    edge.source.storage_key,
-                    edge.target.storage_key,
-                    edge.edge_type,
-                )
-            else:
-                if len(edge) < 3:
-                    raise ValueError("graph edges require at least three values")
-                row = (edge[0], edge[1], edge[2])
-            if not isinstance(row[2], str) or not row[2]:
-                raise ValueError("graph edges require a non-empty edge type")
-            rows.append(
-                (
-                    self._canonical_graph_storage_key(row[0]),
-                    self._canonical_graph_storage_key(row[1]),
-                    row[2],
-                )
-            )
-        if not rows:
-            return
-        with self._lock:
-            conn = self._db.get_connection()
-            try:
-                changes_before = conn.total_changes
-                conn.executemany(
-                    """
-                    DELETE FROM local_graph_edges
-                    WHERE source_id = ? AND target_id = ? AND edge_type = ?
-                    """,
-                    rows,
-                )
-                if conn.total_changes > changes_before:
-                    self._epoch_lane.bump(conn, graph=True)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        self._graph_engine.delete_edges(edges)
 
     def graph_integrity_errors(self) -> list[str]:
         with self._lock:
