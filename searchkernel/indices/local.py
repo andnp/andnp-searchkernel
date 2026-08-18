@@ -1922,46 +1922,6 @@ class _RecordWriter:
             chunk_rows,
         )
 
-    @staticmethod
-    def _delete_fts_row(
-        conn: sqlite3.Connection,
-        row: sqlite3.Row,
-    ) -> None:
-        conn.execute(
-            f"""
-            INSERT INTO {_LOCAL_FTS_TABLE}
-                ({_LOCAL_FTS_TABLE}, rowid, title, body, uri, keywords)
-            VALUES ('delete', ?, ?, ?, ?, ?)
-            """,
-            (
-                row["rowid"],
-                row["title"],
-                row["indexed_text"] or row["body"],
-                row["uri"],
-                row["keywords"],
-            ),
-        )
-
-    @staticmethod
-    def _insert_fts_row(
-        conn: sqlite3.Connection,
-        row: sqlite3.Row,
-    ) -> None:
-        conn.execute(
-            f"""
-            INSERT INTO {_LOCAL_FTS_TABLE}
-                (rowid, title, body, uri, keywords)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                row["rowid"],
-                row["title"],
-                row["indexed_text"] or row["body"],
-                row["uri"],
-                row["keywords"],
-            ),
-        )
-
     def _write_records(
         self,
         conn: sqlite3.Connection,
