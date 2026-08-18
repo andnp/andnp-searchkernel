@@ -74,7 +74,14 @@ async def test_chunk_ingestion_search_returns_one_parent_with_excerpts(tmp_path)
     receipt = await ingestor.index_records([parent])
 
     assert receipt.committed == 1
-    assert len(backend.chunk_records(parent.identity)) == 2
+    chunks = backend.chunk_records(parent.identity)
+    assert len(chunks) == 2
+    # A chunk is identified relative to its parent record, not by re-nesting
+    # the parent's whole storage key inside its own.
+    assert [chunk.source_id for chunk in chunks.values()] == [
+        f"{parent.source_id}#chunk:{parent.source_id}-0",
+        f"{parent.source_id}#chunk:{parent.source_id}-1",
+    ]
     outcome = await RecordSearchPipeline(
         hydrator=backend,
         keyword_store=keyword,

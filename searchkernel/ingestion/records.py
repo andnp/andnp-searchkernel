@@ -487,7 +487,7 @@ def _chunk_record(record: Record, chunk: Chunk) -> Record:
     return Record(
         workspace_id=record.workspace_id,
         source_kind=record.source_kind,
-        source_id=f"{record.storage_key}#chunk:{chunk.chunk_id}",
+        source_id=f"{record.source_id}#chunk:{chunk.chunk_id}",
         title=record.title,
         body=chunk.content,
         indexed_text=chunk.content,
