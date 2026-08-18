@@ -8,7 +8,7 @@ import inspect
 import logging
 import math
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, cast
@@ -67,7 +67,10 @@ from searchkernel.search.pipeline_candidate_acquisition import (
     CandidateAcquirer,
     _is_async_callable,
 )
-from searchkernel.search.pipeline_candidate_cache import CandidateCachePolicy
+from searchkernel.search.pipeline_candidate_cache import (
+    CandidateCacheKey,
+    CandidateCachePolicy,
+)
 from searchkernel.search.query_plan import (
     QueryPlan,
     QueryRouter,
@@ -213,6 +216,36 @@ class RecordSearchCandidate:
         )
         memo[id(self)] = clone
         return clone
+
+
+@dataclass
+class _SearchExecution:
+    """Mutable working state threaded through one ``async_search`` call.
+
+    Deliberately not frozen: the fields below are reassigned and mutated
+    in place as the pipeline routes, fuses, re-fuses, and hydrates a single
+    request. Do not make this immutable.
+    """
+
+    query: str = ""
+    limit: int = 0
+    filters: dict[str, object] = field(default_factory=dict)
+    query_context: RecordSearchQueryContext | None = None
+    plan: QueryPlan | None = None
+    rankings: dict[str, list[RecordHit]] = field(default_factory=dict)
+    fused_scores: dict[str, float] = field(default_factory=dict)
+    candidates: list[RecordSearchCandidate] | None = None
+    base_candidates: list[RecordSearchCandidate] = field(default_factory=list)
+    hydrated: list[RecordSearchResult] = field(default_factory=list)
+    failures: list[RecordSearchFailure] = field(default_factory=list)
+    missing_record_ids: list[str] = field(default_factory=list)
+    cache_diagnostics: list[str] = field(default_factory=list)
+    diagnostics: list[str] = field(default_factory=list)
+    candidate_counts: dict[str, int] = field(default_factory=dict)
+    raw_pre_fusion_overlap: DiagnosticCapability | None = None
+    trace: QueryTrace | None = None
+    candidate_key: CandidateCacheKey | None = None
+    semantic_only: bool = False
 
 
 class RecordSearchError(RuntimeError):
