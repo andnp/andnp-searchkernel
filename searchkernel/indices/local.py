@@ -2090,6 +2090,163 @@ class _RecordWriter:
                 raise
 
 
+class _SchemaManager:
+    """Own table creation, column migration, and identity versioning."""
+
+    def __init__(
+        self,
+        access: _SQLiteAccess,
+        *,
+        initialize_keyword_schema: Callable[[sqlite3.Connection], None],
+        initialize_graph_schema: Callable[[sqlite3.Connection], None],
+    ) -> None:
+        self._access = access
+        self._initialize_keyword_schema = initialize_keyword_schema
+        self._initialize_graph_schema = initialize_graph_schema
+        self._record_identity_stale = False
+
+    def initialize_schema(self) -> None:
+        conn = self._access.connection()
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS local_records (
+                storage_key TEXT PRIMARY KEY,
+                workspace_id TEXT,
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                indexed_text TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                metadata TEXT NOT NULL,
+                uri TEXT,
+                keywords TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_local_records_identity
+                ON local_records (workspace_id, source_kind, source_id);
+            CREATE INDEX IF NOT EXISTS idx_local_records_status
+                ON local_records (status);
+            CREATE INDEX IF NOT EXISTS idx_local_records_workspace
+                ON local_records (workspace_id);
+            CREATE TABLE IF NOT EXISTS local_chunk_state (
+                chunk_storage_key TEXT PRIMARY KEY,
+                parent_storage_key TEXT NOT NULL,
+                chunk_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                metadata TEXT NOT NULL,
+                FOREIGN KEY (chunk_storage_key) REFERENCES local_records(storage_key)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_local_chunk_parent
+                ON local_chunk_state (parent_storage_key, chunk_index, chunk_id);
+            CREATE TABLE IF NOT EXISTS local_vectors_v2 (
+                storage_key TEXT NOT NULL,
+                encoder_namespace TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                embedding BLOB NOT NULL,
+                revision TEXT,
+                format_version INTEGER NOT NULL,
+                normalization_policy TEXT NOT NULL,
+                PRIMARY KEY (storage_key, encoder_namespace, dim),
+                FOREIGN KEY (storage_key) REFERENCES local_records(storage_key)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_local_vectors_v2_namespace
+                ON local_vectors_v2 (encoder_namespace, dim);
+            CREATE TABLE IF NOT EXISTS local_graph_edges (
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                edge_type TEXT NOT NULL,
+                weight REAL NOT NULL,
+                PRIMARY KEY (source_id, target_id, edge_type),
+                FOREIGN KEY (source_id) REFERENCES local_records(storage_key)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (target_id) REFERENCES local_records(storage_key)
+                    ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS system_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+            """
+        )
+        self._ensure_local_vector_column(conn, "revision", "TEXT")
+        self._ensure_local_record_column(conn, "keywords", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_local_record_column(conn, "indexed_text", "TEXT")
+        self._initialize_keyword_schema(conn)
+        self._initialize_graph_schema(conn)
+        self._record_identity_stale = self._resolve_record_identity_staleness(conn)
+        conn.commit()
+
+    def _resolve_record_identity_staleness(self, conn: sqlite3.Connection) -> bool:
+        version_row = conn.execute(
+            "SELECT value FROM system_state WHERE key = ?",
+            (_RECORD_IDENTITY_VERSION_KEY,),
+        ).fetchone()
+        if version_row is not None:
+            # An unreadable marker cannot prove the store is current, and
+            # refusing to open it would be worse than reporting it stale.
+            try:
+                return int(version_row[0]) != _LOCAL_RECORD_IDENTITY_VERSION
+            except (TypeError, ValueError):
+                return True
+        has_records = (
+            conn.execute("SELECT 1 FROM local_records LIMIT 1").fetchone() is not None
+        )
+        if has_records:
+            return True
+        self._write_record_identity_version(conn)
+        return False
+
+    @staticmethod
+    def _write_record_identity_version(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "INSERT INTO system_state (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (_RECORD_IDENTITY_VERSION_KEY, str(_LOCAL_RECORD_IDENTITY_VERSION)),
+        )
+
+    @property
+    def record_identity_stale(self) -> bool:
+        """Whether stored records were written under an older identity scheme."""
+        return self._record_identity_stale
+
+    def mark_record_identity_current(self) -> None:
+        """Record that the store has been rebuilt under the current identity scheme."""
+        with self._access.lock:
+            conn = self._access.connection()
+            self._write_record_identity_version(conn)
+            conn.commit()
+        self._record_identity_stale = False
+
+    @staticmethod
+    def _ensure_local_record_column(
+        conn: sqlite3.Connection,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(local_records)")
+        }
+        if column not in columns:
+            conn.execute(f"ALTER TABLE local_records ADD COLUMN {column} {definition}")
+
+    @staticmethod
+    def _ensure_local_vector_column(
+        conn: sqlite3.Connection,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(local_vectors_v2)")
+        }
+        if column not in columns:
+            conn.execute(f"ALTER TABLE local_vectors_v2 ADD COLUMN {column} {definition}")
+
+
 class LocalRecordBackend:
     """Shared durable state for the local vector, keyword, and graph stores."""
 
@@ -2167,7 +2324,12 @@ class LocalRecordBackend:
             metadata_uri=self._metadata_uri,
             fts5_available=lambda: self._keyword_engine._fts5_available,
         )
-        self._initialize_schema()
+        self._schema_manager = _SchemaManager(
+            self._access,
+            initialize_keyword_schema=self._keyword_engine.initialize_schema,
+            initialize_graph_schema=self._graph_engine.initialize_schema,
+        )
+        self._schema_manager.initialize_schema()
 
     @property
     def db_manager(self) -> SQLiteDatabase:
@@ -2184,146 +2346,14 @@ class LocalRecordBackend:
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         self.close()
 
-    def _initialize_schema(self) -> None:
-        conn = self._db.get_connection()
-        conn.row_factory = sqlite3.Row
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS local_records (
-                storage_key TEXT PRIMARY KEY,
-                workspace_id TEXT,
-                source_kind TEXT NOT NULL,
-                source_id TEXT NOT NULL,
-                title TEXT NOT NULL,
-                body TEXT NOT NULL,
-                indexed_text TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                metadata TEXT NOT NULL,
-                uri TEXT,
-                keywords TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_local_records_identity
-                ON local_records (workspace_id, source_kind, source_id);
-            CREATE INDEX IF NOT EXISTS idx_local_records_status
-                ON local_records (status);
-            CREATE INDEX IF NOT EXISTS idx_local_records_workspace
-                ON local_records (workspace_id);
-            CREATE TABLE IF NOT EXISTS local_chunk_state (
-                chunk_storage_key TEXT PRIMARY KEY,
-                parent_storage_key TEXT NOT NULL,
-                chunk_id TEXT NOT NULL,
-                chunk_index INTEGER NOT NULL,
-                metadata TEXT NOT NULL,
-                FOREIGN KEY (chunk_storage_key) REFERENCES local_records(storage_key)
-                    ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_local_chunk_parent
-                ON local_chunk_state (parent_storage_key, chunk_index, chunk_id);
-            CREATE TABLE IF NOT EXISTS local_vectors_v2 (
-                storage_key TEXT NOT NULL,
-                encoder_namespace TEXT NOT NULL,
-                dim INTEGER NOT NULL,
-                embedding BLOB NOT NULL,
-                revision TEXT,
-                format_version INTEGER NOT NULL,
-                normalization_policy TEXT NOT NULL,
-                PRIMARY KEY (storage_key, encoder_namespace, dim),
-                FOREIGN KEY (storage_key) REFERENCES local_records(storage_key)
-                    ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_local_vectors_v2_namespace
-                ON local_vectors_v2 (encoder_namespace, dim);
-            CREATE TABLE IF NOT EXISTS local_graph_edges (
-                source_id TEXT NOT NULL,
-                target_id TEXT NOT NULL,
-                edge_type TEXT NOT NULL,
-                weight REAL NOT NULL,
-                PRIMARY KEY (source_id, target_id, edge_type),
-                FOREIGN KEY (source_id) REFERENCES local_records(storage_key)
-                    ON DELETE CASCADE,
-                FOREIGN KEY (target_id) REFERENCES local_records(storage_key)
-                    ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS system_state (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-            """
-        )
-        self._ensure_local_vector_column(conn, "revision", "TEXT")
-        self._ensure_local_record_column(conn, "keywords", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_local_record_column(conn, "indexed_text", "TEXT")
-        self._keyword_engine.initialize_schema(conn)
-        self._graph_engine.initialize_schema(conn)
-        self._record_identity_stale = self._resolve_record_identity_staleness(conn)
-        conn.commit()
-
-    def _resolve_record_identity_staleness(self, conn: sqlite3.Connection) -> bool:
-        version_row = conn.execute(
-            "SELECT value FROM system_state WHERE key = ?",
-            (_RECORD_IDENTITY_VERSION_KEY,),
-        ).fetchone()
-        if version_row is not None:
-            # An unreadable marker cannot prove the store is current, and
-            # refusing to open it would be worse than reporting it stale.
-            try:
-                return int(version_row[0]) != _LOCAL_RECORD_IDENTITY_VERSION
-            except (TypeError, ValueError):
-                return True
-        has_records = (
-            conn.execute("SELECT 1 FROM local_records LIMIT 1").fetchone() is not None
-        )
-        if has_records:
-            return True
-        self._write_record_identity_version(conn)
-        return False
-
-    @staticmethod
-    def _write_record_identity_version(conn: sqlite3.Connection) -> None:
-        conn.execute(
-            "INSERT INTO system_state (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (_RECORD_IDENTITY_VERSION_KEY, str(_LOCAL_RECORD_IDENTITY_VERSION)),
-        )
-
     @property
     def record_identity_stale(self) -> bool:
         """Whether stored records were written under an older identity scheme."""
-        return self._record_identity_stale
+        return self._schema_manager.record_identity_stale
 
     def mark_record_identity_current(self) -> None:
         """Record that the store has been rebuilt under the current identity scheme."""
-        with self._lock:
-            conn = self._db.get_connection()
-            self._write_record_identity_version(conn)
-            conn.commit()
-        self._record_identity_stale = False
-
-    @staticmethod
-    def _ensure_local_record_column(
-        conn: sqlite3.Connection,
-        column: str,
-        definition: str,
-    ) -> None:
-        columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(local_records)")
-        }
-        if column not in columns:
-            conn.execute(f"ALTER TABLE local_records ADD COLUMN {column} {definition}")
-
-    @staticmethod
-    def _ensure_local_vector_column(
-        conn: sqlite3.Connection,
-        column: str,
-        definition: str,
-    ) -> None:
-        columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(local_vectors_v2)")
-        }
-        if column not in columns:
-            conn.execute(f"ALTER TABLE local_vectors_v2 ADD COLUMN {column} {definition}")
+        self._schema_manager.mark_record_identity_current()
 
     @staticmethod
     def _metadata_keyword_text(metadata: dict[str, Any]) -> str:
