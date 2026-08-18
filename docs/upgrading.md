@@ -2,7 +2,7 @@
 
 Breaking changes by release, and what each one requires of a consumer.
 
-## 0.25.0 to 0.26.0
+## 0.25.0 to 1.0.0
 
 Four contract changes. Two of them invalidate data already on disk; the kernel
 detects that itself, but it cannot rebuild for you.

@@ -7,8 +7,9 @@ need, and keep source-specific lifecycle logic outside the kernel.
 
 It supports canonical record search,
 checkpointed record ingestion, optional local/Postgres/FAISS/provider
-integrations, and bounded federation across compatible search sources. The
-API is still evolving before the first stable major release.
+integrations, and bounded federation across compatible search sources.
+Breaking changes are documented per release in
+[docs/upgrading.md](docs/upgrading.md).
 
 ## Install
 
