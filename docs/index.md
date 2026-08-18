@@ -26,6 +26,9 @@ short.
 - [SearchKernel improvement design](searchkernel-improvement-design.md) —
   dependency-ordered design for indexing correctness, retrieval quality,
   backend parity, evaluation, and scale.
+- [Retrieval algorithm design notes](retrieval-algorithm-design.md) — proposed
+  ranking, vector, graph, and chunking algorithms, where each plugs into the
+  existing extension points, and which should be opinionated or pluggable.
 
 ## Version scope
 
