@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+_ANSWER_PUNCTUATION = ".,;:!?\"'*`)]}"
+
 
 class LLMJudgeReranker:
     """Scores documents by asking an LLM whether each is relevant to the query."""
@@ -36,8 +38,12 @@ class LLMJudgeReranker:
 
     @staticmethod
     def _parse_score(response: str) -> float:
+        # Models answer "Yes." or "Yes, this is relevant" however plainly the
+        # prompt asks for one word, and one stray comma would otherwise abort
+        # the whole rerank, since every document is judged separately.
         stripped = response.strip()
-        answer = stripped.split()[0].casefold() if stripped else ""
+        first_word = stripped.split()[0] if stripped else ""
+        answer = first_word.strip(_ANSWER_PUNCTUATION).casefold()
         if answer == "yes":
             return 1.0
         if answer == "no":
