@@ -148,11 +148,14 @@ class CascadingReranker:
         if n <= 1:
             return False, [], []
 
-        gaps = (
-            fast_scores[ranked_indices[k]] - fast_scores[ranked_indices[k + 1]]
-            for k in range(n - 1)
+        # Only the leading gap decides. Reading the smallest gap anywhere in
+        # the list means ordinary tail clustering — 0.09 against 0.08 among
+        # results nobody reads — escalates a set whose top the fast model
+        # separated cleanly, which is every real score distribution.
+        leading_gap = (
+            fast_scores[ranked_indices[0]] - fast_scores[ranked_indices[1]]
         )
-        if min(gaps) >= self._confidence_gap:
+        if leading_gap >= self._confidence_gap:
             return False, [], []
         return True, ranked_indices, []
 

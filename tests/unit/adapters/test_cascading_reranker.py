@@ -182,10 +182,11 @@ def test_small_set_undifferentiated_fast_model_escalates() -> None:
     assert all(scores[i] < scores[i + 1] for i in range(9))
 
 
-def test_small_set_single_close_adjacent_pair_escalates() -> None:
-    # Every adjacent gap clears 0.05 except one (0.5 -> 0.48 = 0.02).
+def test_small_set_close_leading_pair_escalates() -> None:
+    """The leading pair is what the caller reads first, so a fast model that
+    cannot separate it has left the ordering genuinely in doubt."""
     docs = ["a", "b", "c", "d"]
-    fast_scores = [0.9, 0.5, 0.48, 0.1]
+    fast_scores = [0.52, 0.50, 0.20, 0.05]
     cascade, _, slow = _cascade(
         fast_scores, [0.2, 0.9, 0.1, 0.4], escalate_top_n=5, confidence_gap=0.05
     )
@@ -193,6 +194,22 @@ def test_small_set_single_close_adjacent_pair_escalates() -> None:
     cascade.rerank("q", docs)
 
     assert slow.calls == [docs]
+
+
+def test_small_set_close_tail_pair_does_not_escalate() -> None:
+    """Results nobody reads cluster together in every real score
+    distribution; letting that spend the expensive model would make the
+    cheap one pointless."""
+    docs = ["a", "b", "c", "d"]
+    fast_scores = [0.90, 0.50, 0.12, 0.10]
+    cascade, _, slow = _cascade(
+        fast_scores, [0.2, 0.9, 0.1, 0.4], escalate_top_n=5, confidence_gap=0.05
+    )
+
+    scores = cascade.rerank("q", docs)
+
+    assert scores == fast_scores
+    assert slow.calls == []
 
 
 def test_small_set_single_document_never_escalates() -> None:
