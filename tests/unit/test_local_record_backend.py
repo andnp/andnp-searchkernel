@@ -1131,13 +1131,13 @@ def test_keyword_skips_metadata_backfill_for_current_schema(
     db_path = tmp_path / "current.db"
     LocalRecordBackend(db_path)
 
-    def fail_backfill(cls, conn) -> None:
+    def fail_backfill(self, conn) -> None:
         raise AssertionError("current schemas must skip metadata backfill")
 
     monkeypatch.setattr(
-        LocalRecordBackend,
+        local_indices._KeywordEngine,
         "_migrate_keyword_columns",
-        classmethod(fail_backfill),
+        fail_backfill,
     )
 
     LocalRecordBackend(db_path)

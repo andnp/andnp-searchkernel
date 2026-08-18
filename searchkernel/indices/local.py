@@ -942,15 +942,21 @@ class _KeywordEngine:
         status_values: Callable[[SearchFilters | None], set[str]],
         filter_values: Callable[[Any], list[Any]],
         matches: Callable[[sqlite3.Row, SearchFilters | None], bool],
-        fts5_available: Callable[[], bool],
+        metadata_keyword_text: Callable[[dict[str, Any]], str],
+        metadata_uri: Callable[[dict[str, Any]], str],
         keyword_overfetch_multiplier: float,
     ) -> None:
         self._access = access
         self._status_values = status_values
         self._filter_values = filter_values
         self._matches = matches
-        self._fts5_available = fts5_available
+        self._metadata_keyword_text = metadata_keyword_text
+        self._metadata_uri = metadata_uri
         self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
+        self._fts5_available = False
+        self._keyword_search_diagnostic = (
+            "FTS5 indexed lexical search has not been initialized"
+        )
         self._last_keyword_search_diagnostics: Mapping[str, int | bool] = (
             MappingProxyType(
                 {
@@ -1233,7 +1239,7 @@ class _KeywordEngine:
                 }
             )
             return []
-        if self._fts5_available():
+        if self._fts5_available:
             hits = self._search_keyword_fts(query, k, filters)
             self._last_keyword_search_diagnostics = MappingProxyType(
                 {
@@ -1508,6 +1514,289 @@ class _KeywordEngine:
         )
         return hits
 
+    def _migrate_keyword_columns(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            "SELECT rowid, metadata, uri, keywords FROM local_records"
+        ).fetchall()
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"])
+            except (TypeError, ValueError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            keywords = self._metadata_keyword_text(metadata)
+            uri = row["uri"] or self._metadata_uri(metadata)
+            if row["keywords"] != keywords or row["uri"] != uri:
+                conn.execute(
+                    "UPDATE local_records SET uri = ?, keywords = ? WHERE rowid = ?",
+                    (uri, keywords, row["rowid"]),
+                )
+
+    @staticmethod
+    def _fts_table_columns(conn: sqlite3.Connection) -> tuple[str, ...] | None:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (_LOCAL_FTS_TABLE,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return tuple(
+                column[1]
+                for column in conn.execute(f"PRAGMA table_info({_LOCAL_FTS_TABLE})")
+            )
+        except sqlite3.DatabaseError:
+            return None
+
+    def initialize_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS local_keyword_schema (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL
+            )
+            """
+        )
+        version_row = conn.execute(
+            "SELECT version FROM local_keyword_schema WHERE name = ?",
+            (_LOCAL_KEYWORD_SCHEMA,),
+        ).fetchone()
+        needs_keyword_migration = (
+            version_row is None
+            or version_row[0] != _LOCAL_KEYWORD_SCHEMA_VERSION
+        )
+        if needs_keyword_migration:
+            self._migrate_keyword_columns(conn)
+
+        table_columns = self._fts_table_columns(conn)
+        needs_rebuild = table_columns != _LOCAL_FTS_COLUMNS
+        if table_columns is not None and needs_rebuild:
+            conn.execute(f"DROP TABLE IF EXISTS {_LOCAL_FTS_TABLE}")
+
+        if table_columns != _LOCAL_FTS_COLUMNS:
+            try:
+                conn.execute(
+                    f"""
+                    CREATE VIRTUAL TABLE {_LOCAL_FTS_TABLE} USING fts5(
+                        title,
+                        body,
+                        uri,
+                        keywords,
+                        content='local_records',
+                        content_rowid='rowid',
+                        tokenize='unicode61'
+                    )
+                    """
+                )
+            except sqlite3.OperationalError as exc:
+                if "fts5" not in str(exc).lower():
+                    raise
+                self._fts5_available = False
+                self._keyword_search_diagnostic = (
+                    "FTS5 indexed lexical search is unavailable; "
+                    "using the bounded SQLite scan fallback"
+                )
+            else:
+                self._fts5_available = True
+                needs_rebuild = True
+        else:
+            self._fts5_available = True
+
+        if self._fts5_available and (
+            needs_rebuild
+            or version_row is None
+            or version_row[0] != _LOCAL_KEYWORD_SCHEMA_VERSION
+        ):
+            try:
+                conn.execute(f"DELETE FROM {_LOCAL_FTS_TABLE}")
+            except sqlite3.DatabaseError:
+                conn.execute(f"DROP TABLE IF EXISTS {_LOCAL_FTS_TABLE}")
+                conn.execute(
+                    f"""
+                    CREATE VIRTUAL TABLE {_LOCAL_FTS_TABLE} USING fts5(
+                        title,
+                        body,
+                        uri,
+                        keywords,
+                        content='local_records',
+                        content_rowid='rowid',
+                        tokenize='unicode61'
+                    )
+                    """
+                )
+            rows = conn.execute(
+                """
+                SELECT rowid, title, body, indexed_text, uri, keywords
+                FROM local_records
+                """
+            ).fetchall()
+            conn.executemany(
+                f"""
+                INSERT INTO {_LOCAL_FTS_TABLE}
+                    (rowid, title, body, uri, keywords)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        row["rowid"],
+                        row["title"],
+                        row["indexed_text"] or row["body"],
+                        row["uri"],
+                        row["keywords"],
+                    )
+                    for row in rows
+                ),
+            )
+
+        conn.execute(
+            """
+            INSERT INTO local_keyword_schema (name, version)
+            VALUES (?, ?)
+            ON CONFLICT(name) DO UPDATE SET version = excluded.version
+            """,
+            (_LOCAL_KEYWORD_SCHEMA, _LOCAL_KEYWORD_SCHEMA_VERSION),
+        )
+        if self._fts5_available:
+            self._keyword_search_diagnostic = "FTS5 indexed lexical search is active"
+
+    @property
+    def keyword_index_available(self) -> bool:
+        return self._fts5_available
+
+    @property
+    def keyword_search_diagnostic(self) -> str:
+        return self._keyword_search_diagnostic
+
+    def check_keyword_index(self) -> bool:
+        """Return whether the external-content keyword index matches records."""
+        if not self._fts5_available:
+            return False
+        with self._access.lock:
+            conn = self._access.connection()
+            try:
+                conn.execute(
+                    f"INSERT INTO {_LOCAL_FTS_TABLE}({_LOCAL_FTS_TABLE}) "
+                    "VALUES ('integrity-check')"
+                )
+                conn.execute("DROP TABLE IF EXISTS local_records_fts_vocab")
+                conn.execute(
+                    """
+                    CREATE VIRTUAL TABLE local_records_fts_vocab
+                    USING fts5vocab('local_records_fts', 'instance')
+                    """
+                )
+                missing = conn.execute(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM local_records r
+                        WHERE (
+                            r.title != ''
+                            OR r.body != ''
+                            OR COALESCE(r.uri, '') != ''
+                            OR r.keywords != ''
+                        )
+                        AND NOT EXISTS(
+                            SELECT 1
+                            FROM local_records_fts_vocab v
+                            WHERE CAST(v.doc AS INTEGER) = r.rowid
+                        )
+                    )
+                    OR EXISTS(
+                        SELECT 1
+                        FROM local_records_fts_vocab v
+                        WHERE NOT EXISTS(
+                            SELECT 1
+                            FROM local_records r
+                            WHERE r.rowid = CAST(v.doc AS INTEGER)
+                        )
+                    )
+                    """
+                ).fetchone()[0]
+            except sqlite3.DatabaseError:
+                return False
+            finally:
+                conn.execute("DROP TABLE IF EXISTS local_records_fts_vocab")
+            return not bool(missing)
+
+    def rebuild_keyword_index(self) -> None:
+        """Rebuild the keyword index from effective indexed text."""
+        with self._access.lock:
+            conn = self._access.connection()
+            if not self._fts5_available:
+                self._keyword_search_diagnostic = (
+                    "FTS5 indexed lexical search is unavailable; "
+                    "the keyword index cannot be rebuilt"
+                )
+                return
+            try:
+                conn.execute(f"DELETE FROM {_LOCAL_FTS_TABLE}")
+                rows = conn.execute(
+                    """
+                    SELECT rowid, title, body, indexed_text, uri, keywords
+                    FROM local_records
+                    """
+                ).fetchall()
+                conn.executemany(
+                    f"""
+                    INSERT INTO {_LOCAL_FTS_TABLE}
+                        (rowid, title, body, uri, keywords)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        (
+                            row["rowid"],
+                            row["title"],
+                            row["indexed_text"] or row["body"],
+                            row["uri"],
+                            row["keywords"],
+                        )
+                        for row in rows
+                    ),
+                )
+                conn.commit()
+            except sqlite3.DatabaseError:
+                conn.rollback()
+                conn.execute(f"DROP TABLE IF EXISTS {_LOCAL_FTS_TABLE}")
+                conn.execute(
+                    f"""
+                    CREATE VIRTUAL TABLE {_LOCAL_FTS_TABLE} USING fts5(
+                        title,
+                        body,
+                        uri,
+                        keywords,
+                        content='local_records',
+                        content_rowid='rowid',
+                        tokenize='unicode61'
+                    )
+                    """
+                )
+                rows = conn.execute(
+                    """
+                    SELECT rowid, title, body, indexed_text, uri, keywords
+                    FROM local_records
+                    """
+                ).fetchall()
+                conn.executemany(
+                    f"""
+                    INSERT INTO {_LOCAL_FTS_TABLE}
+                        (rowid, title, body, uri, keywords)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        (
+                            row["rowid"],
+                            row["title"],
+                            row["indexed_text"] or row["body"],
+                            row["uri"],
+                            row["keywords"],
+                        )
+                        for row in rows
+                    ),
+                )
+                conn.commit()
+
 
 class LocalRecordBackend:
     """Shared durable state for the local vector, keyword, and graph stores."""
@@ -1571,17 +1860,14 @@ class LocalRecordBackend:
             status_values=self._status_values,
             filter_values=self._filter_values,
         )
-        self._fts5_available = False
         self._keyword_engine = _KeywordEngine(
             self._access,
             status_values=self._status_values,
             filter_values=self._filter_values,
             matches=self._matches,
-            fts5_available=lambda: self._fts5_available,
+            metadata_keyword_text=self._metadata_keyword_text,
+            metadata_uri=self._metadata_uri,
             keyword_overfetch_multiplier=self._keyword_overfetch_multiplier,
-        )
-        self._keyword_search_diagnostic = (
-            "FTS5 indexed lexical search has not been initialized"
         )
         self._initialize_schema()
 
@@ -1671,7 +1957,7 @@ class LocalRecordBackend:
         self._ensure_local_vector_column(conn, "revision", "TEXT")
         self._ensure_local_record_column(conn, "keywords", "TEXT NOT NULL DEFAULT ''")
         self._ensure_local_record_column(conn, "indexed_text", "TEXT")
-        self._initialize_keyword_schema(conn)
+        self._keyword_engine.initialize_schema(conn)
         self._graph_engine.initialize_schema(conn)
         self._record_identity_stale = self._resolve_record_identity_staleness(conn)
         conn.commit()
@@ -1811,153 +2097,6 @@ class LocalRecordBackend:
     @classmethod
     def _record_uri(cls, record: Record) -> str:
         return record.uri or cls._metadata_uri(record.metadata)
-
-    @classmethod
-    def _migrate_keyword_columns(cls, conn: sqlite3.Connection) -> None:
-        rows = conn.execute(
-            "SELECT rowid, metadata, uri, keywords FROM local_records"
-        ).fetchall()
-        for row in rows:
-            try:
-                metadata = json.loads(row["metadata"])
-            except (TypeError, ValueError):
-                metadata = {}
-            if not isinstance(metadata, dict):
-                metadata = {}
-            keywords = cls._metadata_keyword_text(metadata)
-            uri = row["uri"] or cls._metadata_uri(metadata)
-            if row["keywords"] != keywords or row["uri"] != uri:
-                conn.execute(
-                    "UPDATE local_records SET uri = ?, keywords = ? WHERE rowid = ?",
-                    (uri, keywords, row["rowid"]),
-                )
-
-    @staticmethod
-    def _fts_table_columns(conn: sqlite3.Connection) -> tuple[str, ...] | None:
-        row = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-            (_LOCAL_FTS_TABLE,),
-        ).fetchone()
-        if row is None:
-            return None
-        try:
-            return tuple(
-                column[1]
-                for column in conn.execute(f"PRAGMA table_info({_LOCAL_FTS_TABLE})")
-            )
-        except sqlite3.DatabaseError:
-            return None
-
-    def _initialize_keyword_schema(self, conn: sqlite3.Connection) -> None:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS local_keyword_schema (
-                name TEXT PRIMARY KEY,
-                version INTEGER NOT NULL
-            )
-            """
-        )
-        version_row = conn.execute(
-            "SELECT version FROM local_keyword_schema WHERE name = ?",
-            (_LOCAL_KEYWORD_SCHEMA,),
-        ).fetchone()
-        needs_keyword_migration = (
-            version_row is None
-            or version_row[0] != _LOCAL_KEYWORD_SCHEMA_VERSION
-        )
-        if needs_keyword_migration:
-            self._migrate_keyword_columns(conn)
-
-        table_columns = self._fts_table_columns(conn)
-        needs_rebuild = table_columns != _LOCAL_FTS_COLUMNS
-        if table_columns is not None and needs_rebuild:
-            conn.execute(f"DROP TABLE IF EXISTS {_LOCAL_FTS_TABLE}")
-
-        if table_columns != _LOCAL_FTS_COLUMNS:
-            try:
-                conn.execute(
-                    f"""
-                    CREATE VIRTUAL TABLE {_LOCAL_FTS_TABLE} USING fts5(
-                        title,
-                        body,
-                        uri,
-                        keywords,
-                        content='local_records',
-                        content_rowid='rowid',
-                        tokenize='unicode61'
-                    )
-                    """
-                )
-            except sqlite3.OperationalError as exc:
-                if "fts5" not in str(exc).lower():
-                    raise
-                self._fts5_available = False
-                self._keyword_search_diagnostic = (
-                    "FTS5 indexed lexical search is unavailable; "
-                    "using the bounded SQLite scan fallback"
-                )
-            else:
-                self._fts5_available = True
-                needs_rebuild = True
-        else:
-            self._fts5_available = True
-
-        if self._fts5_available and (
-            needs_rebuild
-            or version_row is None
-            or version_row[0] != _LOCAL_KEYWORD_SCHEMA_VERSION
-        ):
-            try:
-                conn.execute(f"DELETE FROM {_LOCAL_FTS_TABLE}")
-            except sqlite3.DatabaseError:
-                conn.execute(f"DROP TABLE IF EXISTS {_LOCAL_FTS_TABLE}")
-                conn.execute(
-                    f"""
-                    CREATE VIRTUAL TABLE {_LOCAL_FTS_TABLE} USING fts5(
-                        title,
-                        body,
-                        uri,
-                        keywords,
-                        content='local_records',
-                        content_rowid='rowid',
-                        tokenize='unicode61'
-                    )
-                    """
-                )
-            rows = conn.execute(
-                """
-                SELECT rowid, title, body, indexed_text, uri, keywords
-                FROM local_records
-                """
-            ).fetchall()
-            conn.executemany(
-                f"""
-                INSERT INTO {_LOCAL_FTS_TABLE}
-                    (rowid, title, body, uri, keywords)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    (
-                        row["rowid"],
-                        row["title"],
-                        row["indexed_text"] or row["body"],
-                        row["uri"],
-                        row["keywords"],
-                    )
-                    for row in rows
-                ),
-            )
-
-        conn.execute(
-            """
-            INSERT INTO local_keyword_schema (name, version)
-            VALUES (?, ?)
-            ON CONFLICT(name) DO UPDATE SET version = excluded.version
-            """,
-            (_LOCAL_KEYWORD_SCHEMA, _LOCAL_KEYWORD_SCHEMA_VERSION),
-        )
-        if self._fts5_available:
-            self._keyword_search_diagnostic = "FTS5 indexed lexical search is active"
 
     @staticmethod
     def _record_values(record: Record) -> tuple[Any, ...]:
@@ -2639,12 +2778,20 @@ class LocalRecordBackend:
                 raise
 
     @property
+    def _fts5_available(self) -> bool:
+        return self._keyword_engine._fts5_available
+
+    @_fts5_available.setter
+    def _fts5_available(self, value: bool) -> None:
+        self._keyword_engine._fts5_available = value
+
+    @property
     def keyword_index_available(self) -> bool:
-        return self._fts5_available
+        return self._keyword_engine.keyword_index_available
 
     @property
     def keyword_search_diagnostic(self) -> str:
-        return self._keyword_search_diagnostic
+        return self._keyword_engine.keyword_search_diagnostic
 
     @property
     def last_keyword_search_diagnostics(self) -> Mapping[str, int | bool]:
@@ -2652,132 +2799,11 @@ class LocalRecordBackend:
 
     def check_keyword_index(self) -> bool:
         """Return whether the external-content keyword index matches records."""
-        if not self._fts5_available:
-            return False
-        with self._lock:
-            conn = self._db.get_connection()
-            try:
-                conn.execute(
-                    f"INSERT INTO {_LOCAL_FTS_TABLE}({_LOCAL_FTS_TABLE}) "
-                    "VALUES ('integrity-check')"
-                )
-                conn.execute("DROP TABLE IF EXISTS local_records_fts_vocab")
-                conn.execute(
-                    """
-                    CREATE VIRTUAL TABLE local_records_fts_vocab
-                    USING fts5vocab('local_records_fts', 'instance')
-                    """
-                )
-                missing = conn.execute(
-                    """
-                    SELECT EXISTS(
-                        SELECT 1
-                        FROM local_records r
-                        WHERE (
-                            r.title != ''
-                            OR r.body != ''
-                            OR COALESCE(r.uri, '') != ''
-                            OR r.keywords != ''
-                        )
-                        AND NOT EXISTS(
-                            SELECT 1
-                            FROM local_records_fts_vocab v
-                            WHERE CAST(v.doc AS INTEGER) = r.rowid
-                        )
-                    )
-                    OR EXISTS(
-                        SELECT 1
-                        FROM local_records_fts_vocab v
-                        WHERE NOT EXISTS(
-                            SELECT 1
-                            FROM local_records r
-                            WHERE r.rowid = CAST(v.doc AS INTEGER)
-                        )
-                    )
-                    """
-                ).fetchone()[0]
-            except sqlite3.DatabaseError:
-                return False
-            finally:
-                conn.execute("DROP TABLE IF EXISTS local_records_fts_vocab")
-            return not bool(missing)
+        return self._keyword_engine.check_keyword_index()
 
     def rebuild_keyword_index(self) -> None:
         """Rebuild the keyword index from effective indexed text."""
-        with self._lock:
-            conn = self._db.get_connection()
-            if not self._fts5_available:
-                self._keyword_search_diagnostic = (
-                    "FTS5 indexed lexical search is unavailable; "
-                    "the keyword index cannot be rebuilt"
-                )
-                return
-            try:
-                conn.execute(f"DELETE FROM {_LOCAL_FTS_TABLE}")
-                rows = conn.execute(
-                    """
-                    SELECT rowid, title, body, indexed_text, uri, keywords
-                    FROM local_records
-                    """
-                ).fetchall()
-                conn.executemany(
-                    f"""
-                    INSERT INTO {_LOCAL_FTS_TABLE}
-                        (rowid, title, body, uri, keywords)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        (
-                            row["rowid"],
-                            row["title"],
-                            row["indexed_text"] or row["body"],
-                            row["uri"],
-                            row["keywords"],
-                        )
-                        for row in rows
-                    ),
-                )
-                conn.commit()
-            except sqlite3.DatabaseError:
-                conn.rollback()
-                conn.execute(f"DROP TABLE IF EXISTS {_LOCAL_FTS_TABLE}")
-                conn.execute(
-                    f"""
-                    CREATE VIRTUAL TABLE {_LOCAL_FTS_TABLE} USING fts5(
-                        title,
-                        body,
-                        uri,
-                        keywords,
-                        content='local_records',
-                        content_rowid='rowid',
-                        tokenize='unicode61'
-                    )
-                    """
-                )
-                rows = conn.execute(
-                    """
-                    SELECT rowid, title, body, indexed_text, uri, keywords
-                    FROM local_records
-                    """
-                ).fetchall()
-                conn.executemany(
-                    f"""
-                    INSERT INTO {_LOCAL_FTS_TABLE}
-                        (rowid, title, body, uri, keywords)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        (
-                            row["rowid"],
-                            row["title"],
-                            row["indexed_text"] or row["body"],
-                            row["uri"],
-                            row["keywords"],
-                        )
-                        for row in rows
-                    ),
-                )
-                conn.commit()
+        return self._keyword_engine.rebuild_keyword_index()
 
     def epoch(self) -> int:
         with self._lock:
