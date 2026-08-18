@@ -490,6 +490,37 @@ class RecordSearchPipeline:
             semantic_only=semantic_only,
         )
 
+    def _plan_query(self, execution: _SearchExecution) -> None:
+        """Route the query and record the plan's diagnostics and trace.
+
+        Advances ``execution`` in place; the routed plan drives every
+        acquisition, fusion, and re-fusion decision downstream.
+        """
+        semantic_only = execution.semantic_only
+        plan = self._router.route(
+            execution.query,
+            limit=execution.limit,
+            keyword_available=(
+                self._keyword_store is not None and not semantic_only
+            ),
+            vector_available=self._vector_store is not None,
+            graph_available=self._graph_store is not None and not semantic_only,
+            graph_enabled=self._config.graph_enabled and not semantic_only,
+            rerank_available=self._reranker is not None,
+        )
+        execution.plan = plan
+        execution.diagnostics.extend(_plan_diagnostics(plan))
+        if execution.trace is not None:
+            execution.trace.provenance = {
+                "query_plan": {
+                    "type": plan.query_type.name.lower(),
+                    "signals": plan.signals.names,
+                    "lanes": plan.enabled_lanes,
+                    "budgets": plan.lane_budgets,
+                    "skip_reasons": plan.diagnostic_skip_reasons,
+                }
+            }
+
     async def async_search(
         self,
         query: str,
@@ -517,28 +548,8 @@ class RecordSearchPipeline:
         raw_pre_fusion_overlap = execution.raw_pre_fusion_overlap
         trace = execution.trace
 
-        plan = self._router.route(
-            query,
-            limit=limit,
-            keyword_available=(
-                self._keyword_store is not None and not semantic_only
-            ),
-            vector_available=self._vector_store is not None,
-            graph_available=self._graph_store is not None and not semantic_only,
-            graph_enabled=self._config.graph_enabled and not semantic_only,
-            rerank_available=self._reranker is not None,
-        )
-        diagnostics.extend(_plan_diagnostics(plan))
-        if trace is not None:
-            trace.provenance = {
-                "query_plan": {
-                    "type": plan.query_type.name.lower(),
-                    "signals": plan.signals.names,
-                    "lanes": plan.enabled_lanes,
-                    "budgets": plan.lane_budgets,
-                    "skip_reasons": plan.diagnostic_skip_reasons,
-                }
-            }
+        self._plan_query(execution)
+        plan = execution.plan
         acquisition_limit = max(
             plan.keyword_candidate_budget,
             plan.vector_candidate_budget,
