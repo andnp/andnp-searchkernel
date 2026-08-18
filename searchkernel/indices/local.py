@@ -90,6 +90,7 @@ _KEYWORD_SQL_FILTERS = frozenset(
     }
 )
 _FALLBACK_SCAN_BATCH_SIZE = 1_000
+_KEYWORD_INIT_BATCH_SIZE = 1_000
 _FUZZY_QUERY_MAX_TERMS = 4
 _FUZZY_TERM_RATIO = 0.82
 _METADATA_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -1511,23 +1512,24 @@ class _KeywordEngine:
         return hits
 
     def _migrate_keyword_columns(self, conn: sqlite3.Connection) -> None:
-        rows = conn.execute(
+        cursor = conn.execute(
             "SELECT rowid, metadata, uri, keywords FROM local_records"
-        ).fetchall()
-        for row in rows:
-            try:
-                metadata = json.loads(row["metadata"])
-            except (TypeError, ValueError):
-                metadata = {}
-            if not isinstance(metadata, dict):
-                metadata = {}
-            keywords = self._metadata_keyword_text(metadata)
-            uri = row["uri"] or self._metadata_uri(metadata)
-            if row["keywords"] != keywords or row["uri"] != uri:
-                conn.execute(
-                    "UPDATE local_records SET uri = ?, keywords = ? WHERE rowid = ?",
-                    (uri, keywords, row["rowid"]),
-                )
+        )
+        while rows := cursor.fetchmany(_KEYWORD_INIT_BATCH_SIZE):
+            for row in rows:
+                try:
+                    metadata = json.loads(row["metadata"])
+                except (TypeError, ValueError):
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                keywords = self._metadata_keyword_text(metadata)
+                uri = row["uri"] or self._metadata_uri(metadata)
+                if row["keywords"] != keywords or row["uri"] != uri:
+                    conn.execute(
+                        "UPDATE local_records SET uri = ?, keywords = ? WHERE rowid = ?",
+                        (uri, keywords, row["rowid"]),
+                    )
 
     @staticmethod
     def _fts_table_columns(conn: sqlite3.Connection) -> tuple[str, ...] | None:
@@ -1621,29 +1623,30 @@ class _KeywordEngine:
                     )
                     """
                 )
-            rows = conn.execute(
+            cursor = conn.execute(
                 """
                 SELECT rowid, title, body, indexed_text, uri, keywords
                 FROM local_records
                 """
-            ).fetchall()
-            conn.executemany(
-                f"""
-                INSERT INTO {_LOCAL_FTS_TABLE}
-                    (rowid, title, body, uri, keywords)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    (
-                        row["rowid"],
-                        row["title"],
-                        row["indexed_text"] or row["body"],
-                        row["uri"],
-                        row["keywords"],
-                    )
-                    for row in rows
-                ),
             )
+            while rows := cursor.fetchmany(_KEYWORD_INIT_BATCH_SIZE):
+                conn.executemany(
+                    f"""
+                    INSERT INTO {_LOCAL_FTS_TABLE}
+                        (rowid, title, body, uri, keywords)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        (
+                            row["rowid"],
+                            row["title"],
+                            row["indexed_text"] or row["body"],
+                            row["uri"],
+                            row["keywords"],
+                        )
+                        for row in rows
+                    ),
+                )
 
         conn.execute(
             """
