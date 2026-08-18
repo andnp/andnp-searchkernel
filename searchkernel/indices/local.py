@@ -931,29 +931,6 @@ class _VectorEngine:
             yield rows
             last_storage_key = rows[-1]["storage_key"]
 
-    def _vector_row_matches(
-        self,
-        storage_key: str,
-        model_name: str,
-        dim: int,
-        filters: SearchFilters | None,
-    ) -> bool:
-        with self._access.lock:
-            conn = self._access.connection()
-            row = conn.execute(
-                """
-                SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                       r.status, r.metadata, r.uri
-                FROM local_records r
-                JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
-                WHERE r.storage_key = ?
-                  AND v.encoder_namespace = ? AND v.dim = ?
-                """,
-                (storage_key, model_name, dim),
-            ).fetchone()
-        return row is not None and self._matches(row, filters)
-
-
 class LocalRecordBackend:
     """Shared durable state for the local vector, keyword, and graph stores."""
 
