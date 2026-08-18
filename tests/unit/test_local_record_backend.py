@@ -1186,6 +1186,33 @@ def test_scalar_and_batched_keyword_ingestion_are_equivalent() -> None:
         batched.close()
 
 
+def test_keyword_schema_rebuild_preserves_rows_beyond_one_init_batch(
+    tmp_path: Path,
+) -> None:
+    """Rebuilding lexical state keeps records from every initialization window."""
+    db_path = tmp_path / "records.db"
+    backend = LocalRecordBackend(db_path)
+    backend.index(
+        [
+            _record("note", f"record-{index}", f"token-{index}")
+            for index in range(1_001)
+        ]
+    )
+    connection = backend.db_manager.get_connection()
+    connection.execute("DELETE FROM local_keyword_schema")
+    connection.commit()
+    backend.close()
+
+    rebuilt = LocalRecordBackend(db_path)
+    try:
+        assert [hit.source_id for hit in rebuilt.search_keyword("token-1000", 1)] == [
+            "record-1000"
+        ]
+        assert rebuilt.check_keyword_index()
+    finally:
+        rebuilt.close()
+
+
 def test_filtered_keyword_search_bounds_post_filter_candidates(tmp_path: Path) -> None:
     """
     Keep post-filtered FTS searches from materializing every matching row.
