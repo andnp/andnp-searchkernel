@@ -16,7 +16,7 @@ import math
 import re
 import sqlite3
 import threading
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -213,14 +213,26 @@ class _SQLiteAccess:
 class _GraphEngine:
     """Own graph edge schema and mutation for the local backend."""
 
-    def __init__(
-        self,
-        access: _SQLiteAccess,
-        *,
-        canonicalize_storage_key: Callable[[str], str],
-    ) -> None:
+    def __init__(self, access: _SQLiteAccess) -> None:
         self._access = access
-        self._canonicalize_storage_key = canonicalize_storage_key
+
+    @staticmethod
+    def _canonical_graph_storage_key(storage_key: str) -> str:
+        if not isinstance(storage_key, str):
+            raise TypeError("graph endpoints must be canonical storage keys")
+        try:
+            identity = RecordIdentity.from_storage_key(storage_key)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid canonical storage key for graph: {storage_key!r}"
+            ) from exc
+        if not identity.source_kind or not identity.source_id:
+            raise ValueError(
+                f"invalid canonical storage key for graph: {storage_key!r}"
+            )
+        if identity.storage_key != storage_key:
+            raise ValueError(f"non-canonical graph storage key: {storage_key!r}")
+        return storage_key
 
     @staticmethod
     def initialize_schema(conn: sqlite3.Connection) -> None:
@@ -237,8 +249,42 @@ class _GraphEngine:
             "ON local_graph_edges (source_id, edge_type)"
         )
 
+    def graph_integrity_errors(self) -> list[str]:
+        with self._access.lock:
+            conn = self._access.connection()
+            rows = conn.execute(
+                """
+                SELECT e.source_id, e.target_id
+                FROM local_graph_edges e
+                LEFT JOIN local_records source_record
+                    ON source_record.storage_key = e.source_id
+                LEFT JOIN local_records target_record
+                    ON target_record.storage_key = e.target_id
+                WHERE source_record.storage_key IS NULL
+                   OR target_record.storage_key IS NULL
+                ORDER BY e.source_id, e.target_id
+                """
+            ).fetchall()
+            errors = [
+                f"dangling graph edge: {row['source_id']} -> {row['target_id']}"
+                for row in rows
+            ]
+            for row in conn.execute(
+                "SELECT source_id, target_id FROM local_graph_edges "
+                "ORDER BY source_id, target_id"
+            ):
+                for column in ("source_id", "target_id"):
+                    try:
+                        self._canonical_graph_storage_key(row[column])
+                    except ValueError as exc:
+                        errors.append(str(exc))
+            return sorted(set(errors))
+
+    def check_graph_integrity(self) -> bool:
+        return not self.graph_integrity_errors()
+
     def _identity_from_storage_key(self, storage_key: str) -> RecordIdentity:
-        self._canonicalize_storage_key(storage_key)
+        self._canonical_graph_storage_key(storage_key)
         return RecordIdentity.from_storage_key(storage_key)
 
     def neighbors(
@@ -287,7 +333,7 @@ class _GraphEngine:
         identity_key = (
             record_id.storage_key if isinstance(record_id, RecordIdentity) else record_id
         )
-        identity_key = self._canonicalize_storage_key(identity_key)
+        identity_key = self._canonical_graph_storage_key(identity_key)
         frontier = {identity_key}
         best: dict[str, tuple[str, float]] = {}
         source_column = "target_id" if incoming else "source_id"
@@ -313,7 +359,7 @@ class _GraphEngine:
                     if allowed is not None and row["edge_type"] not in allowed:
                         continue
                     try:
-                        target_id = self._canonicalize_storage_key(
+                        target_id = self._canonical_graph_storage_key(
                             row[target_column]
                         )
                     except ValueError:
@@ -414,7 +460,7 @@ class _GraphEngine:
                 next_frontiers = {seed_key: set() for seed_key in seed_keys}
                 for row in rows:
                     try:
-                        target_id = self._canonicalize_storage_key(
+                        target_id = self._canonical_graph_storage_key(
                             row[target_column]
                         )
                     except ValueError:
@@ -469,8 +515,8 @@ class _GraphEngine:
                 if len(edge) != 4:
                     raise ValueError("graph edges require four values")
                 row = (edge[0], edge[1], edge[2], float(edge[3]))
-            source_id = self._canonicalize_storage_key(row[0])
-            target_id = self._canonicalize_storage_key(row[1])
+            source_id = self._canonical_graph_storage_key(row[0])
+            target_id = self._canonical_graph_storage_key(row[1])
             if not isinstance(row[2], str) or not row[2] or not math.isfinite(row[3]):
                 raise ValueError("graph edges require a finite weight and edge type")
             rows.append((source_id, target_id, row[2], row[3]))
@@ -541,8 +587,8 @@ class _GraphEngine:
                 raise ValueError("graph edges require a non-empty edge type")
             rows.append(
                 (
-                    self._canonicalize_storage_key(row[0]),
-                    self._canonicalize_storage_key(row[1]),
+                    self._canonical_graph_storage_key(row[0]),
+                    self._canonical_graph_storage_key(row[1]),
                     row[2],
                 )
             )
@@ -606,10 +652,7 @@ class LocalRecordBackend:
         )
         self._lock = threading.RLock()
         self._access = _SQLiteAccess(db=self._db, lock=self._lock)
-        self._graph_engine = _GraphEngine(
-            self._access,
-            canonicalize_storage_key=self._canonical_graph_storage_key,
-        )
+        self._graph_engine = _GraphEngine(self._access)
         self._snapshot_lock = threading.RLock()
         self._vector_storage_stats: dict[tuple[str, int], tuple[int, int, int]] = {}
         self._vector_snapshots: dict[tuple[str, int], VectorSnapshot] = (
@@ -769,24 +812,6 @@ class LocalRecordBackend:
             self._write_record_identity_version(conn)
             conn.commit()
         self._record_identity_stale = False
-
-    @staticmethod
-    def _canonical_graph_storage_key(storage_key: str) -> str:
-        if not isinstance(storage_key, str):
-            raise TypeError("graph endpoints must be canonical storage keys")
-        try:
-            identity = RecordIdentity.from_storage_key(storage_key)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"invalid canonical storage key for graph: {storage_key!r}"
-            ) from exc
-        if not identity.source_kind or not identity.source_id:
-            raise ValueError(
-                f"invalid canonical storage key for graph: {storage_key!r}"
-            )
-        if identity.storage_key != storage_key:
-            raise ValueError(f"non-canonical graph storage key: {storage_key!r}")
-        return storage_key
 
     @staticmethod
     def _ensure_local_record_column(
@@ -2707,38 +2732,10 @@ class LocalRecordBackend:
         self._graph_engine.delete_edges(edges)
 
     def graph_integrity_errors(self) -> list[str]:
-        with self._lock:
-            conn = self._db.get_connection()
-            rows = conn.execute(
-                """
-                SELECT e.source_id, e.target_id
-                FROM local_graph_edges e
-                LEFT JOIN local_records source_record
-                    ON source_record.storage_key = e.source_id
-                LEFT JOIN local_records target_record
-                    ON target_record.storage_key = e.target_id
-                WHERE source_record.storage_key IS NULL
-                   OR target_record.storage_key IS NULL
-                ORDER BY e.source_id, e.target_id
-                """
-            ).fetchall()
-            errors = [
-                f"dangling graph edge: {row['source_id']} -> {row['target_id']}"
-                for row in rows
-            ]
-            for row in conn.execute(
-                "SELECT source_id, target_id FROM local_graph_edges "
-                "ORDER BY source_id, target_id"
-            ):
-                for column in ("source_id", "target_id"):
-                    try:
-                        self._canonical_graph_storage_key(row[column])
-                    except ValueError as exc:
-                        errors.append(str(exc))
-            return sorted(set(errors))
+        return self._graph_engine.graph_integrity_errors()
 
     def check_graph_integrity(self) -> bool:
-        return not self.graph_integrity_errors()
+        return self._graph_engine.check_graph_integrity()
 
     def neighbors(
         self,
