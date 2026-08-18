@@ -1588,3 +1588,37 @@ def test_marking_the_identity_current_survives_reopening(tmp_path: Path) -> None
 
     with LocalRecordBackend(db_path) as backend:
         assert backend.record_identity_stale is False
+
+
+def test_rebuilding_the_keyword_index_invalidates_cached_readers(
+    tmp_path: Path,
+) -> None:
+    """Caches key on lane epochs, so a repair that leaves the epoch alone
+    would let readers keep serving results from the index it replaced."""
+    with LocalRecordBackend(tmp_path / "records.db") as backend:
+        backend.index([_record("notes", "doc", "findable body")])
+        before = backend.keyword_epoch()
+
+        backend.rebuild_keyword_index()
+
+        assert backend.keyword_epoch() > before
+
+
+def test_rebuilding_a_corrupt_keyword_index_invalidates_cached_readers(
+    tmp_path: Path,
+) -> None:
+    """The recovery path drops and recreates the table, and must invalidate
+    just as the ordinary rebuild does."""
+    db_path = tmp_path / "records.db"
+    with LocalRecordBackend(db_path) as backend:
+        backend.index([_record("notes", "doc", "findable body")])
+        before = backend.keyword_epoch()
+        connection = sqlite3.connect(db_path)
+        connection.execute("DROP TABLE IF EXISTS local_records_fts_data")
+        connection.commit()
+        connection.close()
+
+        backend.rebuild_keyword_index()
+
+        assert backend.keyword_epoch() > before
+        assert backend.search_keyword("findable", 5)
