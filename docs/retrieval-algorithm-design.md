@@ -27,8 +27,20 @@ idioms. New algorithms should extend these rather than invent a fifth.
 ### Sockets exist; batteries mostly do not
 
 `RecordSearchPolicy` already carries fourteen hooks. A consumer can implement
-MMR today through `post_process`, or HyDE through `query_expander`. What the
-library does not ship is a reference implementation of either.
+MMR today through `post_process`. What the library does not ship is a reference
+implementation.
+
+One correction, found by building against these hooks rather than by reading
+them. This document originally claimed HyDE was equally expressible through
+`query_expander`. It is not. `_normalize_query_expansion` keeps only the first
+`synonym_expansion_max_terms` words of a returned string — three by default —
+and the expanded query feeds `_candidate_acquirer.keyword` alone, never a
+re-embedding. So the hook carries *synonym-shaped* expansion, and a
+hypothetical answer document arrives truncated to a few words in the lexical
+lane, which is not HyDE in any meaningful sense. Real HyDE needs the expanded
+query to reach the vector lane, which no current hook allows. The shipped
+`hyde_expander` is honest about this in its docstring; treating the gap as
+closed would be the mistake.
 
 This is the useful lesson from the modules removed in the cleanup — `dedup`,
 `calibration`, `community`, `variance`. Those were batteries written without
@@ -227,17 +239,26 @@ gives the vector engine a real seam instead of a method on a 2,900-line class.
 
 ### Query expansion batteries
 
-`RecordSearchPolicy.query_expander` exists and is unused by any shipped
-implementation. Two batteries are worth having: a synonym expander needing no
-model, and a HyDE expander that generates a hypothetical answer document
-through the existing `LLM` port and embeds that instead of the raw query.
+**Shipped** as `searchkernel/search/expansion.py`: `synonym_expander` (no model
+required) and `hyde_expander` (any prompt-in/text-out callable, so no LLM client
+becomes a dependency). Both satisfy the existing `query_expander` hook and
+neither is wired on by default.
 
-- **Plugs into** The existing hook and the existing `LLM` port.
-- **Stance** Pluggable, off by default. `expansion_timeout_s` already exists to
-  bound the latency.
-- **Cost** ~100 lines.
-- **Risk** Latency, already bounded. HyDE can hurt on keyword-shaped queries —
-  the existing router already declines to expand artifact queries.
+Building them exposed a limit of the hook that this document had assumed away.
+`_normalize_query_expansion` keeps only the first `synonym_expansion_max_terms`
+words of a returned string — three by default — and the result is appended to
+the query and sent to `_candidate_acquirer.keyword`, never re-embedded. The hook
+is therefore shaped for synonyms, not for rewriting.
+
+- **Consequence for HyDE** A generated answer document reaches the lexical lane
+  as a handful of words. That is not useless, but it is not HyDE. Delivering the
+  real thing requires the expanded query to reach the vector lane — a pipeline
+  change, not a battery. Raising `synonym_expansion_max_terms` widens the
+  lexical half but cannot supply the embedding half.
+- **Stance** Pluggable, off by default. `expansion_timeout_s` bounds latency,
+  and the pipeline already declines to expand artifact-shaped queries.
+- **Remaining work** Decide whether the vector lane should accept an expanded
+  query at all. That is the actual HyDE task, and it is not small.
 
 ### Replacing the lexical heuristic ladder
 
