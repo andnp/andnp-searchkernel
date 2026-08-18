@@ -136,6 +136,11 @@ def _vector_literal(vec: Vector) -> str:
     return "[" + ",".join(repr(float(x)) for x in vec) + "]"
 
 
+def _parse_vector_literal(value: str) -> Vector:
+    """Parse pgvector's `[v1,v2,...]` text format back into a Python vector."""
+    return [float(component) for component in value.strip("[]").split(",")]
+
+
 def _string_filter_values(
     filters: Mapping[str, Any],
     *names: str,
@@ -1393,6 +1398,64 @@ class PGVectorStore:
 
     def epochs(self) -> dict[str, int]:
         return _POSTGRES_EPOCH_LANE.read_all(self.conn_pool)
+
+    def get_many(self, records: list[Record], model_name: str, dim: int) -> dict[str, Vector]:
+        """Return stored embeddings that are still valid for the given records.
+
+        A record's embedding is included only when its stored revision matches
+        the record's current embedding revision -- i.e. nothing about the
+        record has changed since it was last embedded. Records with no stored
+        vector, or a stale one, are omitted so callers know to embed them
+        fresh instead of reusing stale data.
+        """
+        if not records:
+            return {}
+        if dim < 1:
+            raise ValueError("dim must be positive")
+
+        conn = self.conn_pool.get_connection()
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT dim, table_name FROM vector_tables WHERE model_name = %s;",
+                (model_name,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return {}
+            existing_dim, table_name = row
+            if existing_dim != dim:
+                raise ModelDimensionMismatchError(
+                    f"Dimension mismatch for model {model_name}: "
+                    f"expected {existing_dim}, got {dim}"
+                )
+
+            storage_keys = [record.storage_key for record in records]
+            cursor.execute(
+                self._sql.SQL(
+                    "SELECT record_id, embedding::text, revision FROM {table} "
+                    "WHERE record_id = ANY(%s);"
+                ).format(table=self._sql.Identifier(table_name)),
+                (storage_keys,),
+            )
+            stored = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+            conn.commit()
+        finally:
+            if cursor is not None:
+                cursor.close()
+            self.conn_pool.put_connection(conn)
+
+        result: dict[str, Vector] = {}
+        for record in records:
+            entry = stored.get(record.storage_key)
+            if entry is None:
+                continue
+            embedding_text, revision = entry
+            if revision != record_embedding_revision(record, model_name, dim):
+                continue
+            result[record.storage_key] = _parse_vector_literal(embedding_text)
+        return result
 
 
 def _postgres_tsquery(query: str) -> tuple[str, str]:
