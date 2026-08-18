@@ -305,6 +305,70 @@ class AbReport:
         }
 
 
+_PAIRED_METRIC_FIELDS = frozenset({"recall_at_k", "ndcg_at_k", "mrr", "ap"})
+
+
+def per_query_metric_scores(report: EvalReport, metric: str) -> dict[str, float]:
+    """Return each query's mean value of one metric across measured repetitions.
+
+    Keyed by query text, in first-seen order. This is the per-query input
+    that :func:`searchkernel.eval.significance.compare_paired` needs; use
+    :func:`paired_metric_scores` to align two reports' values for that call.
+
+    Args:
+        report: An evaluation report produced by :func:`run_eval`.
+        metric: One of ``"recall_at_k"``, ``"ndcg_at_k"``, ``"mrr"``, ``"ap"``.
+
+    Raises:
+        ValueError: If ``metric`` is not a supported metric name.
+    """
+    if metric not in _PAIRED_METRIC_FIELDS:
+        raise ValueError(
+            f"unsupported metric {metric!r}; expected one of {sorted(_PAIRED_METRIC_FIELDS)}"
+        )
+    totals: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for snapshot in report.metrics:
+        value = getattr(snapshot, metric)
+        if snapshot.query not in totals:
+            order.append(snapshot.query)
+            totals[snapshot.query] = 0.0
+            counts[snapshot.query] = 0
+        totals[snapshot.query] += value
+        counts[snapshot.query] += 1
+    return {query: totals[query] / counts[query] for query in order}
+
+
+def paired_metric_scores(
+    report_a: EvalReport,
+    report_b: EvalReport,
+    metric: str = "ndcg_at_k",
+) -> tuple[list[float], list[float]]:
+    """Align two reports' per-query metric values for a paired comparison.
+
+    Both reports must cover exactly the same set of queries (order does not
+    need to match). The returned sequences are ordered by ``report_a``'s
+    first-seen query order and are ready to pass as the ``baseline`` and
+    ``candidate`` arguments of
+    :func:`searchkernel.eval.significance.compare_paired`.
+
+    Raises:
+        ValueError: If the two reports do not cover the same set of queries.
+    """
+    scores_a = per_query_metric_scores(report_a, metric)
+    scores_b = per_query_metric_scores(report_b, metric)
+    if scores_a.keys() != scores_b.keys():
+        missing_in_b = sorted(scores_a.keys() - scores_b.keys())
+        missing_in_a = sorted(scores_b.keys() - scores_a.keys())
+        raise ValueError(
+            "reports must cover the same queries for a paired comparison: "
+            f"missing_in_b={missing_in_b} missing_in_a={missing_in_a}"
+        )
+    queries = list(scores_a.keys())
+    return [scores_a[query] for query in queries], [scores_b[query] for query in queries]
+
+
 def _percentile(values: list[float], p: float) -> float:
     """Compute a percentile with the Hyndman-Fan type 7 method.
 
