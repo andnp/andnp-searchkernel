@@ -1,54 +1,76 @@
+import threading
+
 import pytest
 
 from searchkernel.adapters.rerank.llm_judge import LLMJudgeReranker
 from searchkernel.ports.rerank import Reranker
 
 
-def _judge(responses: list[str]) -> tuple[LLMJudgeReranker, list[str]]:
+def _judge(responses_by_document: dict[str, str]) -> tuple[LLMJudgeReranker, list[str]]:
+    """Maps responses by document content, not call order -- scoring is concurrent."""
     prompts: list[str] = []
-    responses_iter = iter(responses)
+    lock = threading.Lock()
 
     def complete(prompt: str) -> str:
-        prompts.append(prompt)
-        return next(responses_iter)
+        with lock:
+            prompts.append(prompt)
+        document = next(doc for doc in responses_by_document if doc in prompt)
+        return responses_by_document[document]
 
     return LLMJudgeReranker(complete, model_name="fake-judge"), prompts
 
 
 def test_implements_reranker_protocol() -> None:
-    reranker, _ = _judge(["Yes"])
+    reranker, _ = _judge({"doc": "Yes"})
     assert isinstance(reranker, Reranker)
 
 
 def test_model_name_is_the_caller_supplied_name() -> None:
-    reranker, _ = _judge([])
+    reranker, _ = _judge({})
     assert reranker.model_name == "fake-judge"
 
 
-def test_scores_one_document_per_call_in_order() -> None:
-    reranker, prompts = _judge(["Yes", "No"])
+def test_scores_preserve_input_document_order() -> None:
+    reranker, prompts = _judge({"cats document": "Yes", "dogs document": "No"})
 
-    scores = reranker.rerank("query", ["relevant doc", "irrelevant doc"])
+    scores = reranker.rerank("query", ["cats document", "dogs document"])
 
     assert scores == [1.0, 0.0]
     assert len(prompts) == 2
-    assert "relevant doc" in prompts[0]
-    assert "irrelevant doc" in prompts[1]
+    assert any("cats document" in prompt for prompt in prompts)
+    assert any("dogs document" in prompt for prompt in prompts)
+
+
+def test_rerank_judges_documents_concurrently() -> None:
+    """Two documents in flight at once, not one-at-a-time -- the whole point
+    of judging concurrently is to avoid paying N sequential completion calls.
+    """
+    barrier = threading.Barrier(2, timeout=2.0)
+
+    def complete(_prompt: str) -> str:
+        barrier.wait()
+        return "Yes"
+
+    reranker = LLMJudgeReranker(complete, model_name="fake-judge")
+
+    scores = reranker.rerank("query", ["doc-a", "doc-b"])
+
+    assert scores == [1.0, 1.0]
 
 
 def test_answer_parsing_is_case_insensitive_and_trims_whitespace() -> None:
-    reranker, _ = _judge(["  yES \n"])
+    reranker, _ = _judge({"doc": "  yES \n"})
     assert reranker.rerank("query", ["doc"]) == [1.0]
 
 
 def test_unparseable_response_raises() -> None:
-    reranker, _ = _judge(["I'm not sure"])
+    reranker, _ = _judge({"doc": "I'm not sure"})
     with pytest.raises(ValueError, match="unparseable"):
         reranker.rerank("query", ["doc"])
 
 
 def test_empty_response_raises() -> None:
-    reranker, _ = _judge([""])
+    reranker, _ = _judge({"doc": ""})
     with pytest.raises(ValueError, match="unparseable"):
         reranker.rerank("query", ["doc"])
 
