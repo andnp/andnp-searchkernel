@@ -1,5 +1,6 @@
 import logging
 import os
+from functools import cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -79,13 +80,20 @@ def compute_doc_id_multi_root(file_path: Path, docs_roots: list[Path]) -> str:
     return compute_doc_id(resolved_path, common_root)
 
 
-def _compute_common_docs_root(docs_roots: list[Path]) -> Path | None:
+@cache
+def _resolved_common_root(docs_roots: tuple[str, ...]) -> Path | None:
     if not docs_roots:
         return None
     if len(docs_roots) == 1:
-        return docs_roots[0].resolve()
-    common = os.path.commonpath([str(root.resolve()) for root in docs_roots])
+        return Path(docs_roots[0]).resolve()
+    common = os.path.commonpath([str(Path(root).resolve()) for root in docs_roots])
     return Path(common).resolve()
+
+
+def _compute_common_docs_root(docs_roots: list[Path]) -> Path | None:
+    # The document roots come from fixed configuration, so the canonicalized
+    # ancestor is stable for the life of the process.
+    return _resolved_common_root(tuple(str(root) for root in docs_roots))
 
 
 def extract_doc_id_from_chunk_id(chunk_id: str) -> str:
