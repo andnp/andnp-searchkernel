@@ -1604,21 +1604,26 @@ def test_rebuilding_the_keyword_index_invalidates_cached_readers(
         assert backend.keyword_epoch() > before
 
 
-def test_rebuilding_a_corrupt_keyword_index_invalidates_cached_readers(
+def test_rebuilding_a_desynced_keyword_index_invalidates_cached_readers(
     tmp_path: Path,
 ) -> None:
-    """The recovery path drops and recreates the table, and must invalidate
-    just as the ordinary rebuild does."""
-    db_path = tmp_path / "records.db"
-    with LocalRecordBackend(db_path) as backend:
-        backend.index([_record("notes", "doc", "findable body")])
-        before = backend.keyword_epoch()
-        connection = sqlite3.connect(db_path)
-        connection.execute("DROP TABLE IF EXISTS local_records_fts_data")
+    """A rebuild is triggered by detected corruption, so the invalidation
+    has to hold on that path too, not only on a healthy rebuild."""
+    with LocalRecordBackend(tmp_path / "records.db") as backend:
+        record = _record("notes", "doc", "findable body")
+        backend.index([record])
+        connection = backend.db_manager.get_connection()
+        connection.execute(
+            "DELETE FROM local_records_fts WHERE rowid = "
+            "(SELECT rowid FROM local_records WHERE storage_key = ?)",
+            (record.storage_key,),
+        )
         connection.commit()
-        connection.close()
+        assert not backend.check_keyword_index()
+        before = backend.keyword_epoch()
 
         backend.rebuild_keyword_index()
 
+        assert backend.check_keyword_index()
         assert backend.keyword_epoch() > before
         assert backend.search_keyword("findable", 5)
