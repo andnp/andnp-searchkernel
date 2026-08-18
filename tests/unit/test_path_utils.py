@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -318,3 +319,31 @@ def test_resolve_doc_path_only_returns_files(tmp_path):
 
     result = resolve_doc_path("subdir", docs_root)
     assert result is None  # Should not match directory
+
+
+def test_compute_doc_id_multi_root_keeps_root_sets_independent(tmp_path):
+    """A narrower root set must re-anchor the doc_id, not reuse a wider one."""
+    project_a = tmp_path / "project_a"
+    project_b = tmp_path / "project_b"
+    file_path = project_b / "docs" / "guide.md"
+
+    across_both = compute_doc_id_multi_root(file_path, [project_a, project_b])
+    within_one = compute_doc_id_multi_root(file_path, [project_b])
+
+    assert across_both == "project_b/docs/guide"
+    assert within_one == "docs/guide"
+
+
+def test_compute_doc_id_multi_root_reports_stray_path_once(tmp_path, caplog):
+    project_a = tmp_path / "project_a"
+    project_b = tmp_path / "project_b"
+    stray = tmp_path / "outside" / "notes.md"
+
+    with caplog.at_level(logging.WARNING, logger="searchkernel.search.path_utils"):
+        first = compute_doc_id_multi_root(stray, [project_a, project_b])
+        second = compute_doc_id_multi_root(stray, [project_a, project_b])
+
+    assert first == second == "outside/notes"
+    warnings = [record for record in caplog.records if "outside" in record.getMessage()]
+    assert len(warnings) == 1
+    assert str(project_a) not in warnings[0].getMessage()
