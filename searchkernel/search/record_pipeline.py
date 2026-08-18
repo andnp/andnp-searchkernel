@@ -909,6 +909,36 @@ class RecordSearchPipeline:
             execution.query_context,
         )
 
+    def _finalise_candidates(self, execution: _SearchExecution) -> None:
+        """Adjust scores, prioritise, sort, and apply graph priority in order.
+
+        Order is load-bearing: score adjustments must precede identifier
+        priority (which reads scores when annotating provenance), the sort
+        must follow both (it turns ``priority``/``score`` into an actual
+        ordering), and graph priority must follow the sort (it deliberately
+        overrides that ordering for relationship queries). ``direct_keys``
+        is built from ``execution.base_candidates``, the pre-graph set.
+        """
+        plan = execution.routed_plan
+        candidates = execution.candidates
+        candidates = self._apply_score_adjustments(
+            candidates, execution.query_context
+        )
+        candidates = self._apply_exact_identifier_priority(
+            candidates, execution.query
+        )
+        candidates = self._sort_candidates(candidates)
+        if plan.signals.relationship and plan.graph_enabled:
+            candidates = self._apply_graph_priority(
+                candidates,
+                direct_keys={
+                    candidate.storage_key
+                    for candidate in execution.base_candidates
+                },
+                plan=plan,
+            )
+        execution.candidates = candidates
+
     async def async_search(
         self,
         query: str,
@@ -926,7 +956,6 @@ class RecordSearchPipeline:
         if execution is None:
             return RecordSearchOutcome()
         filters = execution.filters
-        query_context = execution.query_context
         failures = execution.failures
         missing_record_ids = execution.missing_record_ids
         cache_diagnostics = execution.cache_diagnostics
@@ -963,7 +992,6 @@ class RecordSearchPipeline:
             self._fuse_candidates(execution)
             raw_pre_fusion_overlap = execution.raw_pre_fusion_overlap
             candidate_counts = execution.candidate_counts
-            base_candidates = execution.base_candidates
 
             self._reroute_for_adaptive_graph(execution)
             plan = execution.plan
@@ -974,17 +1002,9 @@ class RecordSearchPipeline:
             await self._expand_query_stage(execution)
             candidates = execution.candidates
 
-            candidates = self._apply_score_adjustments(candidates, query_context)
-            candidates = self._apply_exact_identifier_priority(candidates, query)
-            candidates = self._sort_candidates(candidates)
-            if plan.signals.relationship and plan.graph_enabled:
-                candidates = self._apply_graph_priority(
-                    candidates,
-                    direct_keys={
-                        candidate.storage_key for candidate in base_candidates
-                    },
-                    plan=plan,
-                )
+            self._finalise_candidates(execution)
+            candidates = execution.candidates
+
             candidates = await self._expand_parents(candidates, failures)
             if candidate_key is not None:
                 self._candidate_cache_policy.set(
