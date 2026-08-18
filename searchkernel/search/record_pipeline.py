@@ -1095,6 +1095,34 @@ class RecordSearchPipeline:
         ]
         execution.hydrated = hydrated
 
+    async def _acquire_candidates(self, execution: _SearchExecution) -> None:
+        """Choose and run exactly one of the three acquisition stages.
+
+        ``execution.rankings`` is established once, before any branch runs,
+        so all three (mutually exclusive) stages write into the same dict
+        that ``_fuse_candidates`` later reads. ``execution.routed_plan`` is
+        re-read after the artifact stage rather than hoisted into a single
+        local, since that stage may replace the plan (disabling the vector
+        lane) and the branch conditions below must see that replacement.
+        """
+        execution.rankings = {}
+        artifact_path_complete = False
+        plan = execution.routed_plan
+        if plan.signals.artifact:
+            artifact_path_complete = await self._acquire_artifact_candidates(
+                execution
+            )
+            plan = execution.routed_plan
+
+        if plan.vector_enabled and plan.signals.artifact is False and (
+            self._policy.vector_candidate_ids is not None
+        ):
+            await self._acquire_bounded_vector_candidates(execution)
+        elif not artifact_path_complete and (
+            plan.vector_enabled or plan.keyword_enabled
+        ):
+            await self._acquire_parallel_candidates(execution)
+
     async def async_search(
         self,
         query: str,
@@ -1112,45 +1140,16 @@ class RecordSearchPipeline:
         if execution is None:
             return RecordSearchOutcome()
         self._plan_query(execution)
-        plan = execution.plan
         await self._load_cached_candidates(execution)
-        candidates = execution.candidates
 
-        if candidates is None:
-            rankings: dict[str, list[RecordHit]] = {}
-            execution.rankings = rankings
-            artifact_path_complete = False
-            if plan.signals.artifact:
-                artifact_path_complete = await self._acquire_artifact_candidates(
-                    execution
-                )
-                plan = execution.plan
-
-            if plan.vector_enabled and plan.signals.artifact is False and (
-                self._policy.vector_candidate_ids is not None
-            ):
-                await self._acquire_bounded_vector_candidates(execution)
-            elif not artifact_path_complete and (
-                plan.vector_enabled or plan.keyword_enabled
-            ):
-                await self._acquire_parallel_candidates(execution)
-
+        if execution.candidates is None:
+            await self._acquire_candidates(execution)
             self._fuse_candidates(execution)
-
             self._reroute_for_adaptive_graph(execution)
-            plan = execution.plan
-
             await self._expand_graph_stage(execution)
-            candidates = execution.candidates
-
             await self._expand_query_stage(execution)
-            candidates = execution.candidates
-
             self._finalise_candidates(execution)
-            candidates = execution.candidates
-
             await self._store_acquired_candidates(execution)
-            candidates = execution.candidates
 
         result_limit = await self._hydrate_results(execution)
         await self._refine_results(execution, result_limit)
