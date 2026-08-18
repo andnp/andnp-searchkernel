@@ -127,9 +127,11 @@ class SQLiteEmbeddingCache:
                     self.encoder_namespace,
                     content_hash,
                     self.dimension,
-                    # float32 matches faiss's internal representation and halves
-                    # storage versus JSON text; embeddings round-trip at this
-                    # precision without meaningful loss.
+                    # float32 is what the vector store already persists, so a
+                    # cached hit matches what a fresh embed would be stored as.
+                    # It also costs roughly a quarter of the JSON text it
+                    # replaces, which decides the size of this cache far more
+                    # than anything else does.
                     packed.tobytes(),
                 )
             )
