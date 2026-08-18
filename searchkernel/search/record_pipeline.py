@@ -561,6 +561,59 @@ class RecordSearchPipeline:
                 )
         execution.candidates = candidates
 
+    async def _acquire_artifact_candidates(self, execution: _SearchExecution) -> bool:
+        """Try the artifact fast path: keyword-only acquisition for identifier-like queries.
+
+        Returns ``True`` when a confident, policy-eligible keyword result set
+        disabled the vector lane, meaning the caller must not run the other
+        acquisition branches for this request; ``False`` otherwise.
+        """
+        plan = execution.routed_plan
+        keyword_result = await self._capture_optional_stage(
+            "keyword",
+            plan.keyword_enabled,
+            lambda: self._candidate_acquirer.keyword(
+                execution.query,
+                plan.keyword_candidate_budget,
+                execution.filters,
+            ),
+            execution.failures,
+        )
+        if keyword_result is not None:
+            execution.rankings["keyword"] = keyword_result
+        artifact_confident = _artifact_results_are_confident(
+            execution.rankings.get("keyword", ()),
+            requested_limit=execution.limit,
+            threshold=self._config.artifact_confidence_threshold,
+            saturation_k=self._config.keyword_saturation_k,
+        )
+        candidate_set_eligible = (
+            self._policy.query_candidate_set_eligible
+            if artifact_confident
+            else None
+        )
+        eligible = artifact_confident and (
+            candidate_set_eligible is None
+            or candidate_set_eligible(
+                execution.rankings.get("keyword", ()),
+                execution.query_context,
+            )
+        )
+        if eligible:
+            plan = dataclass_replace(
+                plan,
+                vector_enabled=False,
+                diagnostic_skip_reasons=(
+                    *plan.diagnostic_skip_reasons,
+                    "vector:artifact_keyword_confident",
+                ),
+            )
+            execution.plan = plan
+            execution.diagnostics.append("vector:artifact_keyword_confident")
+        elif artifact_confident:
+            execution.diagnostics.append("vector:artifact_keyword_ineligible")
+        return eligible
+
     async def async_search(
         self,
         query: str,
@@ -596,48 +649,13 @@ class RecordSearchPipeline:
 
         if candidates is None:
             rankings: dict[str, list[RecordHit]] = {}
+            execution.rankings = rankings
+            artifact_path_complete = False
             if plan.signals.artifact:
-                keyword_result = await self._capture_optional_stage(
-                    "keyword",
-                    plan.keyword_enabled,
-                    lambda: self._candidate_acquirer.keyword(
-                        query,
-                        plan.keyword_candidate_budget,
-                        filters,
-                    ),
-                    failures,
+                artifact_path_complete = await self._acquire_artifact_candidates(
+                    execution
                 )
-                if keyword_result is not None:
-                    rankings["keyword"] = keyword_result
-                artifact_confident = _artifact_results_are_confident(
-                    rankings.get("keyword", ()),
-                    requested_limit=limit,
-                    threshold=self._config.artifact_confidence_threshold,
-                    saturation_k=self._config.keyword_saturation_k,
-                )
-                candidate_set_eligible = (
-                    self._policy.query_candidate_set_eligible
-                    if artifact_confident
-                    else None
-                )
-                if artifact_confident and (
-                    candidate_set_eligible is None
-                    or candidate_set_eligible(
-                        rankings.get("keyword", ()),
-                        query_context,
-                    )
-                ):
-                    plan = dataclass_replace(
-                        plan,
-                        vector_enabled=False,
-                        diagnostic_skip_reasons=(
-                            *plan.diagnostic_skip_reasons,
-                            "vector:artifact_keyword_confident",
-                        ),
-                    )
-                    diagnostics.append("vector:artifact_keyword_confident")
-                elif artifact_confident:
-                    diagnostics.append("vector:artifact_keyword_ineligible")
+                plan = execution.plan
 
             if plan.vector_enabled and plan.signals.artifact is False and (
                 self._policy.vector_candidate_ids is not None
@@ -689,7 +707,9 @@ class RecordSearchPipeline:
                     vector_value = self._consume_stage(vector_result, failures)
                     if vector_value is not None:
                         rankings["vector"] = cast(list[RecordHit], vector_value)
-            elif plan.vector_enabled or plan.keyword_enabled:
+            elif not artifact_path_complete and (
+                plan.vector_enabled or plan.keyword_enabled
+            ):
                 stage_results = await _gather_tasks(
                     [
                         asyncio.create_task(
