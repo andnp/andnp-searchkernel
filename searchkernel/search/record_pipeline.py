@@ -939,6 +939,30 @@ class RecordSearchPipeline:
             )
         execution.candidates = candidates
 
+    async def _store_acquired_candidates(self, execution: _SearchExecution) -> None:
+        """Expand parents, cache the result, and recompute overlap diagnostics.
+
+        The cache stores the PARENT-EXPANDED set, since expansion runs
+        first here. The overlap recompute is deliberately a second, later
+        pass over ``execution.rankings``/``execution.failures`` — by now
+        ``rankings`` has gained ``"graph"`` and possibly ``"expansion"``
+        entries beyond what ``_fuse_candidates`` saw, so this value can
+        legitimately differ from the earlier one and is the one that wins.
+        """
+        candidates = await self._expand_parents(
+            execution.candidates, execution.failures
+        )
+        execution.candidates = candidates
+        if execution.candidate_key is not None:
+            self._candidate_cache_policy.set(
+                execution.candidate_key,
+                candidates,
+                execution.cache_diagnostics,
+            )
+        execution.raw_pre_fusion_overlap = _raw_pre_fusion_overlap(
+            execution.rankings, execution.failures
+        )
+
     async def async_search(
         self,
         query: str,
@@ -967,7 +991,6 @@ class RecordSearchPipeline:
         self._plan_query(execution)
         plan = execution.plan
         await self._load_cached_candidates(execution)
-        candidate_key = execution.candidate_key
         candidates = execution.candidates
 
         if candidates is None:
@@ -1005,14 +1028,9 @@ class RecordSearchPipeline:
             self._finalise_candidates(execution)
             candidates = execution.candidates
 
-            candidates = await self._expand_parents(candidates, failures)
-            if candidate_key is not None:
-                self._candidate_cache_policy.set(
-                    candidate_key,
-                    candidates,
-                    cache_diagnostics,
-                )
-            raw_pre_fusion_overlap = _raw_pre_fusion_overlap(rankings, failures)
+            await self._store_acquired_candidates(execution)
+            candidates = execution.candidates
+            raw_pre_fusion_overlap = execution.raw_pre_fusion_overlap
 
         assert candidates is not None
         result_limit = resolve_adaptive_result_limit(
