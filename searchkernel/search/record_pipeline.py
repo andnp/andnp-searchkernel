@@ -1044,6 +1044,57 @@ class RecordSearchPipeline:
         execution.hydrated = hydrated
         return result_limit
 
+    async def _refine_results(
+        self, execution: _SearchExecution, result_limit: int
+    ) -> None:
+        """Rerank, prioritise, aggregate, post-process, and normalize.
+
+        ``result_limit`` is a per-call parameter, not execution state (same
+        reasoning as ``acquisition_limit`` in ``_load_cached_candidates``).
+        Four ordering facts are load-bearing here: exact-identifier keys are
+        computed from the pre-priority, pre-aggregation result set (since
+        aggregation replaces chunk results with their parents) but are
+        applied to chunk aggregation after the priority sort; chunk
+        aggregation truncates to the possibly-expanded ``result_limit``
+        while the final truncation uses the REQUESTED ``execution.limit``;
+        ``normalize_scores`` runs last, over the final truncated list, so
+        normalized scores reflect what the caller actually receives;
+        reranking runs before identifier priority, so identifier precedence
+        overrides the reranker rather than the reverse.
+        """
+        plan = execution.routed_plan
+        hydrated = await self._rerank_results(
+            execution.query,
+            execution.hydrated,
+            plan,
+            execution.failures,
+            execution.diagnostics,
+        )
+        exact_identifier_keys = _exact_identifier_result_keys(
+            hydrated, execution.query
+        )
+        hydrated = self._apply_exact_identifier_result_priority(
+            hydrated, execution.query
+        )
+        hydrated = await self._aggregate_chunk_results(
+            hydrated,
+            execution.failures,
+            execution.missing_record_ids,
+            limit=result_limit,
+            priority_keys=exact_identifier_keys,
+        )
+        if self._policy.post_process is not None:
+            hydrated = list(self._policy.post_process(hydrated))
+        hydrated = hydrated[: execution.limit]
+        normalized_scores = normalize_scores(
+            [result.score for result in hydrated]
+        )
+        hydrated = [
+            dataclass_replace(result, normalized_score=normalized_score)
+            for result, normalized_score in zip(hydrated, normalized_scores)
+        ]
+        execution.hydrated = hydrated
+
     async def async_search(
         self,
         query: str,
@@ -1114,32 +1165,8 @@ class RecordSearchPipeline:
             raw_pre_fusion_overlap = execution.raw_pre_fusion_overlap
 
         result_limit = await self._hydrate_results(execution)
+        await self._refine_results(execution, result_limit)
         hydrated = execution.hydrated
-
-        hydrated = await self._rerank_results(
-            query,
-            hydrated,
-            plan,
-            failures,
-            diagnostics,
-        )
-        exact_identifier_keys = _exact_identifier_result_keys(hydrated, query)
-        hydrated = self._apply_exact_identifier_result_priority(hydrated, query)
-        hydrated = await self._aggregate_chunk_results(
-            hydrated,
-            failures,
-            missing_record_ids,
-            limit=result_limit,
-            priority_keys=exact_identifier_keys,
-        )
-        if self._policy.post_process is not None:
-            hydrated = list(self._policy.post_process(hydrated))
-        hydrated = hydrated[:limit]
-        normalized_scores = normalize_scores([result.score for result in hydrated])
-        hydrated = [
-            dataclass_replace(result, normalized_score=normalized_score)
-            for result, normalized_score in zip(hydrated, normalized_scores)
-        ]
 
         if trace is not None:
             trace.provenance = {
