@@ -941,10 +941,27 @@ class _KeywordEngine:
         *,
         status_values: Callable[[SearchFilters | None], set[str]],
         filter_values: Callable[[Any], list[Any]],
+        matches: Callable[[sqlite3.Row, SearchFilters | None], bool],
+        fts5_available: Callable[[], bool],
+        keyword_overfetch_multiplier: float,
     ) -> None:
         self._access = access
         self._status_values = status_values
         self._filter_values = filter_values
+        self._matches = matches
+        self._fts5_available = fts5_available
+        self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
+        self._last_keyword_search_diagnostics: Mapping[str, int | bool] = (
+            MappingProxyType(
+                {
+                    "scanned": 0,
+                    "requested_k": 0,
+                    "returned": 0,
+                    "scan_complete": True,
+                    "fallback": False,
+                }
+            )
+        )
 
     def _keyword_filter_sql(
         self,
@@ -1199,6 +1216,298 @@ class _KeywordEngine:
             variants.add(leaf.rsplit(".", 1)[0])
         return variants
 
+    def search_keyword(
+        self,
+        query: str,
+        k: int,
+        filters: SearchFilters | None = None,
+    ) -> list[RecordHit]:
+        if k < 1 or not query.strip():
+            self._last_keyword_search_diagnostics = MappingProxyType(
+                {
+                    "scanned": 0,
+                    "requested_k": k,
+                    "returned": 0,
+                    "scan_complete": True,
+                    "fallback": False,
+                }
+            )
+            return []
+        if self._fts5_available():
+            hits = self._search_keyword_fts(query, k, filters)
+            self._last_keyword_search_diagnostics = MappingProxyType(
+                {
+                    "scanned": 0,
+                    "requested_k": k,
+                    "returned": len(hits),
+                    "scan_complete": True,
+                    "fallback": False,
+                }
+            )
+            return hits
+        return self._search_keyword_fallback(query, k, filters)
+
+    def _search_keyword_fts(
+        self,
+        query: str,
+        k: int,
+        filters: SearchFilters | None,
+    ) -> list[RecordHit]:
+        match_query = _keyword_scoring.sanitize_fts_query(query)
+        if match_query == '""':
+            return []
+        needs_artifact_rerank = _keyword_scoring.looks_like_artifact_query(query)
+        artifact_tokens = _keyword_scoring._embedded_artifact_tokens(query)
+        if needs_artifact_rerank and artifact_tokens:
+            artifact_queries = [
+                _keyword_scoring.sanitize_fts_query(token)
+                for token in artifact_tokens
+            ]
+            match_query = " OR ".join(
+                f"({artifact_query})"
+                for artifact_query in artifact_queries
+                if artifact_query != '""'
+            )
+        if needs_artifact_rerank and len(query.strip().split()) == 1:
+            match_query = '"' + match_query.replace('"', "") + '"'
+        limit = k
+        if needs_artifact_rerank:
+            limit = max(k, math.ceil(k * self._keyword_overfetch_multiplier))
+        if filters and not set(filters).issubset(_KEYWORD_SQL_FILTERS):
+            limit = min(limit * _FILTERED_KEYWORD_OVERFETCH, _FALLBACK_SCAN_MAX_ROWS)
+        def fetch_rows(current_query: str) -> list[sqlite3.Row]:
+            clauses, parameters = self._keyword_filter_sql(filters)
+            clauses.insert(0, f"{_LOCAL_FTS_TABLE} MATCH ?")
+            parameters.insert(0, current_query)
+            with self._access.lock:
+                conn = self._access.connection()
+                return conn.execute(
+                    f"""
+                    SELECT
+                        r.storage_key,
+                        r.workspace_id,
+                        r.source_kind,
+                        r.source_id,
+                        r.status,
+                        r.title,
+                        r.body,
+                        r.indexed_text,
+                        r.uri,
+                        r.keywords,
+                        r.metadata,
+                        -bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0) AS score
+                    FROM {_LOCAL_FTS_TABLE}
+                    JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
+                    WHERE {" AND ".join(clauses)}
+                    ORDER BY score DESC, r.storage_key ASC
+                    LIMIT ?
+                    """,
+                    (*parameters, limit),
+                ).fetchall()
+
+        def build_hits(rows: Sequence[sqlite3.Row]) -> list[RecordHit]:
+            hits: list[RecordHit] = []
+            for row in rows:
+                if filters and not self._matches(row, filters):
+                    continue
+                score = float(row["score"])
+                if needs_artifact_rerank:
+                    normalized_query = _keyword_scoring.normalize_artifact_value(query)
+                    score += _keyword_scoring.score_field_aware_match(
+                        query,
+                        content=row["indexed_text"] or row["body"],
+                        title=row["title"],
+                        headers=row["keywords"],
+                        source_file=row["uri"] or "",
+                    )
+                    score += _keyword_scoring.score_artifact_match(
+                        normalized_query,
+                        Path(normalized_query).name,
+                        row["body"],
+                        row["title"],
+                        row["keywords"],
+                        row["uri"] or "",
+                    )
+                hits.append(
+                    RecordHit(
+                        RecordIdentity(
+                            row["workspace_id"],
+                            row["source_kind"],
+                            row["source_id"],
+                        ),
+                        score,
+                    )
+                )
+            hits.sort(key=lambda item: (-item.score, item.storage_key))
+            return hits
+
+        hits = build_hits(fetch_rows(match_query))
+        fallback_query = _natural_language_match_query(query, match_query)
+        if not hits and fallback_query is not None:
+            hits = build_hits(fetch_rows(fallback_query))
+        if not hits:
+            hits = self._search_keyword_fuzzy(query, k, filters)
+        return hits[:k]
+
+    def _search_keyword_fuzzy(
+        self,
+        query: str,
+        k: int,
+        filters: SearchFilters | None,
+    ) -> list[RecordHit]:
+        if (
+            '"' in query
+            or _keyword_scoring.looks_like_artifact_query(query)
+        ):
+            return []
+        terms = [term.casefold() for term in _TOKEN_RE.findall(query)]
+        if (
+            not 2 <= len(terms) <= _FUZZY_QUERY_MAX_TERMS
+            or not all(len(term) >= 4 for term in terms)
+        ):
+            return []
+        prefix_query = " OR ".join(
+            f"{term[:3]}*" for term in terms
+        )
+        clauses, parameters = self._keyword_filter_sql(filters)
+        clauses.insert(0, f"{_LOCAL_FTS_TABLE} MATCH ?")
+        parameters.insert(0, prefix_query)
+        with self._access.lock:
+            conn = self._access.connection()
+            rows = conn.execute(
+                f"""
+                SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                       r.status, r.title, r.body, r.indexed_text, r.uri,
+                       r.keywords, r.metadata
+                FROM {_LOCAL_FTS_TABLE}
+                JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
+                WHERE {" AND ".join(clauses)}
+                ORDER BY bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0),
+                         r.storage_key ASC
+                LIMIT ?
+                """,
+                (*parameters, _FALLBACK_SCAN_MAX_ROWS),
+            ).fetchall()
+        hits: list[RecordHit] = []
+        for row in rows:
+            if filters and not self._matches(row, filters):
+                continue
+            text = " ".join(
+                (
+                    row["title"] or "",
+                    row["indexed_text"] or row["body"] or "",
+                    row["uri"] or "",
+                    row["keywords"] or "",
+                )
+            )
+            tokens = list(dict.fromkeys(
+                _TOKEN_RE.findall(text.casefold())
+            ))
+            scores = [_fuzzy_term_score(term, tokens) for term in terms]
+            if all(score >= _FUZZY_TERM_RATIO for score in scores):
+                hits.append(
+                    RecordHit(
+                        RecordIdentity(
+                            row["workspace_id"],
+                            row["source_kind"],
+                            row["source_id"],
+                        ),
+                        sum(scores),
+                    )
+                )
+        hits.sort(key=lambda item: (-item.score, item.storage_key))
+        return hits[:k]
+
+    def _search_keyword_fallback(
+        self,
+        query: str,
+        k: int,
+        filters: SearchFilters | None,
+    ) -> list[RecordHit]:
+        terms = [term.casefold() for term in _TOKEN_RE.findall(query)]
+        if not terms:
+            self._last_keyword_search_diagnostics = MappingProxyType(
+                {
+                    "scanned": 0,
+                    "requested_k": k,
+                    "returned": 0,
+                    "scan_complete": True,
+                    "fallback": True,
+                }
+            )
+            return []
+        clauses, parameters = self._keyword_filter_sql(filters)
+        heap: list[_FallbackHeapItem] = []
+        last_rowid = 0
+        scanned_rows = 0
+        scan_complete = False
+        while True:
+            with self._access.lock:
+                conn = self._access.connection()
+                rows = conn.execute(
+                    f"""
+                    SELECT r.rowid, storage_key, workspace_id, source_kind,
+                           source_id, status, title, body, indexed_text, uri,
+                           keywords, metadata
+                    FROM local_records r
+                    WHERE r.rowid > ?
+                      AND {" AND ".join(clause.replace("r.", "") for clause in clauses)}
+                    ORDER BY r.rowid ASC
+                    LIMIT ?
+                    """,
+                    (last_rowid, *parameters, _FALLBACK_SCAN_BATCH_SIZE),
+                ).fetchall()
+            if not rows:
+                scan_complete = True
+                break
+            scanned_rows += len(rows)
+            last_rowid = int(rows[-1]["rowid"])
+            for row in rows:
+                if filters and not self._matches(row, filters):
+                    continue
+                indexed_text = row["indexed_text"] or row["body"]
+                haystack = " ".join(
+                    (
+                        row["title"] or "",
+                        indexed_text or "",
+                        row["uri"] or "",
+                        row["keywords"] or "",
+                    )
+                ).lower()
+                score = sum(haystack.count(term) for term in terms)
+                if not score:
+                    continue
+                hit = RecordHit(
+                    RecordIdentity(
+                        row["workspace_id"],
+                        row["source_kind"],
+                        row["source_id"],
+                    ),
+                    float(score),
+                )
+                candidate = _FallbackHeapItem(hit)
+                if len(heap) < k:
+                    heapq.heappush(heap, candidate)
+                elif heap[0] < candidate:
+                    heapq.heapreplace(heap, candidate)
+            if len(rows) < _FALLBACK_SCAN_BATCH_SIZE:
+                scan_complete = True
+                break
+        hits = sorted(
+            (candidate.hit for candidate in heap),
+            key=lambda item: (-item.score, item.storage_key),
+        )
+        self._last_keyword_search_diagnostics = MappingProxyType(
+            {
+                "scanned": scanned_rows,
+                "requested_k": k,
+                "returned": len(hits),
+                "scan_complete": scan_complete,
+                "fallback": True,
+            }
+        )
+        return hits
+
 
 class LocalRecordBackend:
     """Shared durable state for the local vector, keyword, and graph stores."""
@@ -1262,25 +1571,17 @@ class LocalRecordBackend:
             status_values=self._status_values,
             filter_values=self._filter_values,
         )
+        self._fts5_available = False
         self._keyword_engine = _KeywordEngine(
             self._access,
             status_values=self._status_values,
             filter_values=self._filter_values,
+            matches=self._matches,
+            fts5_available=lambda: self._fts5_available,
+            keyword_overfetch_multiplier=self._keyword_overfetch_multiplier,
         )
-        self._fts5_available = False
         self._keyword_search_diagnostic = (
             "FTS5 indexed lexical search has not been initialized"
-        )
-        self._last_keyword_search_diagnostics: Mapping[str, int | bool] = (
-            MappingProxyType(
-                {
-                    "scanned": 0,
-                    "requested_k": 0,
-                    "returned": 0,
-                    "scan_complete": True,
-                    "fallback": False,
-                }
-            )
         )
         self._initialize_schema()
 
@@ -2078,291 +2379,7 @@ class LocalRecordBackend:
         k: int,
         filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
-        if k < 1 or not query.strip():
-            self._last_keyword_search_diagnostics = MappingProxyType(
-                {
-                    "scanned": 0,
-                    "requested_k": k,
-                    "returned": 0,
-                    "scan_complete": True,
-                    "fallback": False,
-                }
-            )
-            return []
-        if self._fts5_available:
-            hits = self._search_keyword_fts(query, k, filters)
-            self._last_keyword_search_diagnostics = MappingProxyType(
-                {
-                    "scanned": 0,
-                    "requested_k": k,
-                    "returned": len(hits),
-                    "scan_complete": True,
-                    "fallback": False,
-                }
-            )
-            return hits
-        return self._search_keyword_fallback(query, k, filters)
-
-    def _search_keyword_fts(
-        self,
-        query: str,
-        k: int,
-        filters: SearchFilters | None,
-    ) -> list[RecordHit]:
-        match_query = _keyword_scoring.sanitize_fts_query(query)
-        if match_query == '""':
-            return []
-        needs_artifact_rerank = _keyword_scoring.looks_like_artifact_query(query)
-        artifact_tokens = _keyword_scoring._embedded_artifact_tokens(query)
-        if needs_artifact_rerank and artifact_tokens:
-            artifact_queries = [
-                _keyword_scoring.sanitize_fts_query(token)
-                for token in artifact_tokens
-            ]
-            match_query = " OR ".join(
-                f"({artifact_query})"
-                for artifact_query in artifact_queries
-                if artifact_query != '""'
-            )
-        if needs_artifact_rerank and len(query.strip().split()) == 1:
-            match_query = '"' + match_query.replace('"', "") + '"'
-        limit = k
-        if needs_artifact_rerank:
-            limit = max(k, math.ceil(k * self._keyword_overfetch_multiplier))
-        if filters and not set(filters).issubset(_KEYWORD_SQL_FILTERS):
-            limit = min(limit * _FILTERED_KEYWORD_OVERFETCH, _FALLBACK_SCAN_MAX_ROWS)
-        def fetch_rows(current_query: str) -> list[sqlite3.Row]:
-            clauses, parameters = self._keyword_engine._keyword_filter_sql(filters)
-            clauses.insert(0, f"{_LOCAL_FTS_TABLE} MATCH ?")
-            parameters.insert(0, current_query)
-            with self._lock:
-                conn = self._db.get_connection()
-                return conn.execute(
-                    f"""
-                    SELECT
-                        r.storage_key,
-                        r.workspace_id,
-                        r.source_kind,
-                        r.source_id,
-                        r.status,
-                        r.title,
-                        r.body,
-                        r.indexed_text,
-                        r.uri,
-                        r.keywords,
-                        r.metadata,
-                        -bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0) AS score
-                    FROM {_LOCAL_FTS_TABLE}
-                    JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
-                    WHERE {" AND ".join(clauses)}
-                    ORDER BY score DESC, r.storage_key ASC
-                    LIMIT ?
-                    """,
-                    (*parameters, limit),
-                ).fetchall()
-
-        def build_hits(rows: Sequence[sqlite3.Row]) -> list[RecordHit]:
-            hits: list[RecordHit] = []
-            for row in rows:
-                if filters and not self._matches(row, filters):
-                    continue
-                score = float(row["score"])
-                if needs_artifact_rerank:
-                    normalized_query = _keyword_scoring.normalize_artifact_value(query)
-                    score += _keyword_scoring.score_field_aware_match(
-                        query,
-                        content=row["indexed_text"] or row["body"],
-                        title=row["title"],
-                        headers=row["keywords"],
-                        source_file=row["uri"] or "",
-                    )
-                    score += _keyword_scoring.score_artifact_match(
-                        normalized_query,
-                        Path(normalized_query).name,
-                        row["body"],
-                        row["title"],
-                        row["keywords"],
-                        row["uri"] or "",
-                    )
-                hits.append(
-                    RecordHit(
-                        RecordIdentity(
-                            row["workspace_id"],
-                            row["source_kind"],
-                            row["source_id"],
-                        ),
-                        score,
-                    )
-                )
-            hits.sort(key=lambda item: (-item.score, item.storage_key))
-            return hits
-
-        hits = build_hits(fetch_rows(match_query))
-        fallback_query = _natural_language_match_query(query, match_query)
-        if not hits and fallback_query is not None:
-            hits = build_hits(fetch_rows(fallback_query))
-        if not hits:
-            hits = self._search_keyword_fuzzy(query, k, filters)
-        return hits[:k]
-
-    def _search_keyword_fuzzy(
-        self,
-        query: str,
-        k: int,
-        filters: SearchFilters | None,
-    ) -> list[RecordHit]:
-        if (
-            '"' in query
-            or _keyword_scoring.looks_like_artifact_query(query)
-        ):
-            return []
-        terms = [term.casefold() for term in _TOKEN_RE.findall(query)]
-        if (
-            not 2 <= len(terms) <= _FUZZY_QUERY_MAX_TERMS
-            or not all(len(term) >= 4 for term in terms)
-        ):
-            return []
-        prefix_query = " OR ".join(
-            f"{term[:3]}*" for term in terms
-        )
-        clauses, parameters = self._keyword_engine._keyword_filter_sql(filters)
-        clauses.insert(0, f"{_LOCAL_FTS_TABLE} MATCH ?")
-        parameters.insert(0, prefix_query)
-        with self._lock:
-            conn = self._db.get_connection()
-            rows = conn.execute(
-                f"""
-                SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                       r.status, r.title, r.body, r.indexed_text, r.uri,
-                       r.keywords, r.metadata
-                FROM {_LOCAL_FTS_TABLE}
-                JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
-                WHERE {" AND ".join(clauses)}
-                ORDER BY bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0),
-                         r.storage_key ASC
-                LIMIT ?
-                """,
-                (*parameters, _FALLBACK_SCAN_MAX_ROWS),
-            ).fetchall()
-        hits: list[RecordHit] = []
-        for row in rows:
-            if filters and not self._matches(row, filters):
-                continue
-            text = " ".join(
-                (
-                    row["title"] or "",
-                    row["indexed_text"] or row["body"] or "",
-                    row["uri"] or "",
-                    row["keywords"] or "",
-                )
-            )
-            tokens = list(dict.fromkeys(
-                _TOKEN_RE.findall(text.casefold())
-            ))
-            scores = [_fuzzy_term_score(term, tokens) for term in terms]
-            if all(score >= _FUZZY_TERM_RATIO for score in scores):
-                hits.append(
-                    RecordHit(
-                        RecordIdentity(
-                            row["workspace_id"],
-                            row["source_kind"],
-                            row["source_id"],
-                        ),
-                        sum(scores),
-                    )
-                )
-        hits.sort(key=lambda item: (-item.score, item.storage_key))
-        return hits[:k]
-
-    def _search_keyword_fallback(
-        self,
-        query: str,
-        k: int,
-        filters: SearchFilters | None,
-    ) -> list[RecordHit]:
-        terms = [term.casefold() for term in _TOKEN_RE.findall(query)]
-        if not terms:
-            self._last_keyword_search_diagnostics = MappingProxyType(
-                {
-                    "scanned": 0,
-                    "requested_k": k,
-                    "returned": 0,
-                    "scan_complete": True,
-                    "fallback": True,
-                }
-            )
-            return []
-        clauses, parameters = self._keyword_engine._keyword_filter_sql(filters)
-        heap: list[_FallbackHeapItem] = []
-        last_rowid = 0
-        scanned_rows = 0
-        scan_complete = False
-        while True:
-            with self._lock:
-                conn = self._db.get_connection()
-                rows = conn.execute(
-                    f"""
-                    SELECT r.rowid, storage_key, workspace_id, source_kind,
-                           source_id, status, title, body, indexed_text, uri,
-                           keywords, metadata
-                    FROM local_records r
-                    WHERE r.rowid > ?
-                      AND {" AND ".join(clause.replace("r.", "") for clause in clauses)}
-                    ORDER BY r.rowid ASC
-                    LIMIT ?
-                    """,
-                    (last_rowid, *parameters, _FALLBACK_SCAN_BATCH_SIZE),
-                ).fetchall()
-            if not rows:
-                scan_complete = True
-                break
-            scanned_rows += len(rows)
-            last_rowid = int(rows[-1]["rowid"])
-            for row in rows:
-                if filters and not self._matches(row, filters):
-                    continue
-                indexed_text = row["indexed_text"] or row["body"]
-                haystack = " ".join(
-                    (
-                        row["title"] or "",
-                        indexed_text or "",
-                        row["uri"] or "",
-                        row["keywords"] or "",
-                    )
-                ).lower()
-                score = sum(haystack.count(term) for term in terms)
-                if not score:
-                    continue
-                hit = RecordHit(
-                    RecordIdentity(
-                        row["workspace_id"],
-                        row["source_kind"],
-                        row["source_id"],
-                    ),
-                    float(score),
-                )
-                candidate = _FallbackHeapItem(hit)
-                if len(heap) < k:
-                    heapq.heappush(heap, candidate)
-                elif heap[0] < candidate:
-                    heapq.heapreplace(heap, candidate)
-            if len(rows) < _FALLBACK_SCAN_BATCH_SIZE:
-                scan_complete = True
-                break
-        hits = sorted(
-            (candidate.hit for candidate in heap),
-            key=lambda item: (-item.score, item.storage_key),
-        )
-        self._last_keyword_search_diagnostics = MappingProxyType(
-            {
-                "scanned": scanned_rows,
-                "requested_k": k,
-                "returned": len(hits),
-                "scan_complete": scan_complete,
-                "fallback": True,
-            }
-        )
-        return hits
+        return self._keyword_engine.search_keyword(query, k, filters)
 
     def search_vector(
         self,
@@ -2631,7 +2648,7 @@ class LocalRecordBackend:
 
     @property
     def last_keyword_search_diagnostics(self) -> Mapping[str, int | bool]:
-        return self._last_keyword_search_diagnostics
+        return self._keyword_engine._last_keyword_search_diagnostics
 
     def check_keyword_index(self) -> bool:
         """Return whether the external-content keyword index matches records."""
