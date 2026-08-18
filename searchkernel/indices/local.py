@@ -1755,6 +1755,7 @@ class _KeywordEngine:
                         for row in rows
                     ),
                 )
+                _LocalEpochLane.bump(conn, keyword=True)
                 conn.commit()
             except sqlite3.DatabaseError:
                 conn.rollback()
@@ -1795,6 +1796,7 @@ class _KeywordEngine:
                         for row in rows
                     ),
                 )
+                _LocalEpochLane.bump(conn, keyword=True)
                 conn.commit()
 
 
