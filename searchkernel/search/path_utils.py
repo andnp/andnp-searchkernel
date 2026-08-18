@@ -59,20 +59,29 @@ def compute_doc_id(file_path: Path, docs_root: Path) -> str:
 
 def compute_doc_id_multi_root(file_path: Path, docs_roots: list[Path]) -> str:
     """Compute document ID relative to the common ancestor of multiple roots."""
-    resolved_path = _canonical_path(str(file_path))
-    common_root = _compute_common_docs_root(docs_roots)
+    return _compute_doc_id_multi_root_cached(
+        str(file_path), tuple(str(root) for root in docs_roots)
+    )
+
+
+@lru_cache(maxsize=200_000)
+def _compute_doc_id_multi_root_cached(file_path: str, docs_roots: tuple[str, ...]) -> str:
+    # Bounded because a long-lived daemon calls this for every link in every
+    # rebuild, and the same (path, root-set) pairs recur heavily across a corpus.
+    resolved_path = _canonical_path(file_path)
+    common_root = _resolved_common_root(docs_roots)
 
     if common_root is None:
         return str(resolved_path.with_suffix("")).replace("\\", "/")
 
     resolved_str = str(resolved_path)
-    for docs_root in _resolved_docs_roots(tuple(str(root) for root in docs_roots)):
+    for docs_root in _resolved_docs_roots(docs_roots):
         root_str = str(docs_root)
         prefix = root_str if root_str.endswith(os.sep) else root_str + os.sep
         if resolved_str == root_str or resolved_str.startswith(prefix):
             return compute_doc_id(resolved_path, common_root)
 
-    _warn_outside_docs_roots(str(file_path), len(docs_roots))
+    _warn_outside_docs_roots(file_path, len(docs_roots))
     return compute_doc_id(resolved_path, common_root)
 
 
