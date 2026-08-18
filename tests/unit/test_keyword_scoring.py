@@ -1,17 +1,17 @@
 import sqlite3
 import string
 
-from searchkernel.indices.keyword_scoring import (
+from searchkernel.adapters.keyword_scoring.filesystem import (
     looks_like_artifact_query,
     normalize_artifact_value,
     normalize_field_text,
-    sanitize_fts_query,
     score_artifact_match,
     score_field_aware_match,
     score_header_locality,
     score_title_locality,
     split_header_segments,
 )
+from searchkernel.indices.keyword_scoring import sanitize_fts_query
 
 
 def test_sanitize_fts_query_removes_match_operators():

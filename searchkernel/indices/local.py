@@ -25,6 +25,7 @@ from typing import Any, ClassVar, Self
 
 import numpy as np
 
+from searchkernel.adapters.keyword_scoring import filesystem as _artifact_scoring
 from searchkernel.domain import (
     GraphEdge,
     GraphNeighbor,
@@ -100,7 +101,7 @@ def _natural_language_match_query(
     query: str,
     match_query: str,
 ) -> str | None:
-    if '"' in query or _keyword_scoring.looks_like_artifact_query(query):
+    if '"' in query or _artifact_scoring.looks_like_artifact_query(query):
         return None
     terms = match_query.split()
     if len(terms) < 2:
@@ -1262,8 +1263,8 @@ class _KeywordEngine:
         match_query = _keyword_scoring.sanitize_fts_query(query)
         if match_query == '""':
             return []
-        needs_artifact_rerank = _keyword_scoring.looks_like_artifact_query(query)
-        artifact_tokens = _keyword_scoring._embedded_artifact_tokens(query)
+        needs_artifact_rerank = _artifact_scoring.looks_like_artifact_query(query)
+        artifact_tokens = _artifact_scoring.embedded_artifact_tokens(query)
         if needs_artifact_rerank and artifact_tokens:
             artifact_queries = [
                 _keyword_scoring.sanitize_fts_query(token)
@@ -1318,15 +1319,15 @@ class _KeywordEngine:
                     continue
                 score = float(row["score"])
                 if needs_artifact_rerank:
-                    normalized_query = _keyword_scoring.normalize_artifact_value(query)
-                    score += _keyword_scoring.score_field_aware_match(
+                    normalized_query = _artifact_scoring.normalize_artifact_value(query)
+                    score += _artifact_scoring.score_field_aware_match(
                         query,
                         content=row["indexed_text"] or row["body"],
                         title=row["title"],
                         headers=row["keywords"],
                         source_file=row["uri"] or "",
                     )
-                    score += _keyword_scoring.score_artifact_match(
+                    score += _artifact_scoring.score_artifact_match(
                         normalized_query,
                         Path(normalized_query).name,
                         row["body"],
@@ -1363,7 +1364,7 @@ class _KeywordEngine:
     ) -> list[RecordHit]:
         if (
             '"' in query
-            or _keyword_scoring.looks_like_artifact_query(query)
+            or _artifact_scoring.looks_like_artifact_query(query)
         ):
             return []
         terms = [term.casefold() for term in _TOKEN_RE.findall(query)]
