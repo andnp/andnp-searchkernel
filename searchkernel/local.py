@@ -39,6 +39,15 @@ class LocalRecordKernel:
     pipeline: RecordSearchPipeline
     kernel: SearchKernel
 
+    @property
+    def requires_rebuild(self) -> bool:
+        """An index written under an older record identity scheme cannot be served correctly."""
+        return self.backend.record_identity_stale
+
+    def mark_rebuilt(self) -> None:
+        """Acknowledge that the store has been rebuilt under the current record identity scheme."""
+        self.backend.mark_record_identity_current()
+
     def close(self) -> None:
         """Release resources owned by the local composition."""
         self.backend.close()
