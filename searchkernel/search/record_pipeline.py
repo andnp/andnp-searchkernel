@@ -34,7 +34,7 @@ from searchkernel.ports import (
     ParentRecordExpander,
     VectorStore,
 )
-from searchkernel.ports.rerank import Reranker
+from searchkernel.ports.rerank import RecordReranker, Reranker
 from searchkernel.ports.search_results import (
     DiagnosticCapability,
     FailureStage,
@@ -1248,9 +1248,16 @@ class RecordSearchPipeline:
         if not rerankable:
             return list(results)
         try:
-            scores = await _call_async(
-                reranker.rerank, query, [text for _, _, text in rerankable]
-            )
+            if isinstance(reranker, RecordReranker):
+                scores = await _call_async(
+                    reranker.rerank_records,
+                    query,
+                    [result.record for _, result, _ in rerankable],
+                )
+            else:
+                scores = await _call_async(
+                    reranker.rerank, query, [text for _, _, text in rerankable]
+                )
             if len(scores) != len(rerankable):
                 raise ValueError(
                     f"reranker returned {len(scores)} scores for "

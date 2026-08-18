@@ -4,12 +4,24 @@ Reranking today is one model over a fixed budget. A cascade runs a cheap
 ("fast") model over the whole candidate set and escalates to an expensive
 ("slow") model only for the top few, and only when the fast model's ordering
 is genuinely in doubt. This module implements the existing `Reranker` port
-by composition; it adds no new port and no new extension point.
+by composition, and also implements `RecordReranker` -- when a tier supports
+identity-aware scoring, the cascade passes records through to it instead of
+flattening them to text.
 """
 
 from __future__ import annotations
 
-from searchkernel.ports.rerank import Reranker
+from collections.abc import Callable
+
+from searchkernel.domain import Record
+from searchkernel.ports.rerank import RecordReranker, Reranker
+
+
+def _tier_scores(tier: Reranker, query: str, records: list[Record]) -> list[float]:
+    if isinstance(tier, RecordReranker):
+        return tier.rerank_records(query, records)
+    documents = [f"{record.title}\n{record.indexed_text or record.body}".strip() for record in records]
+    return tier.rerank(query, documents)
 
 
 class CascadingReranker:
@@ -38,18 +50,17 @@ class CascadingReranker:
     - At most `escalate_top_n` documents (the common case in practice,
       since reranking is normally applied to an already-narrowed final
       set): there is no cut, so the cut-boundary gap cannot be measured.
-      Instead, every ordering decision the fast model made is scrutinized
-      directly: the minimum adjacent gap across the whole fast-ranked list
-      is compared against `confidence_gap`. If some neighbouring pair is
-      too close to call, the ordering as a whole is in doubt and every
-      document is rescored by the slow model. If every adjacent pair
-      clears the threshold, the fast model has separated the set and
-      escalation is skipped. This deliberately does NOT reuse the "fewer
-      documents than the escalation budget means nothing to escalate"
-      shortcut: a small set the fast model cannot separate at all (e.g.
-      every document scored identically) has a completely unresolved
-      ordering, which is exactly the case the slow model is most useful
-      for, so it must still be escalated.
+      Instead the leading gap decides: the distance between the best and
+      second-best fast scores is compared against `confidence_gap`. A model
+      that cannot separate its own top two has left the ordering in doubt
+      where it matters, and every document is rescored. Reading the
+      smallest gap anywhere in the list instead would escalate on ordinary
+      tail clustering -- 0.09 against 0.08 among results nobody reads --
+      which is every real score distribution, and the cheap tier would buy
+      nothing. This still does NOT reuse the "fewer documents than the
+      escalation budget means nothing to escalate" shortcut: a set the fast
+      model cannot separate at all has a completely unresolved ordering,
+      which is exactly the case the slow model is most useful for.
 
     Combining scores
     ----------------
@@ -103,9 +114,37 @@ class CascadingReranker:
     def rerank(self, query: str, documents: list[str]) -> list[float]:
         if not documents:
             return []
-
         fast_scores = self._fast.rerank(query, documents)
-        n = len(documents)
+        return self._cascade(
+            query,
+            n=len(documents),
+            fast_scores=fast_scores,
+            score_slow=lambda indices: self._slow.rerank(
+                query, [documents[i] for i in indices]
+            ),
+        )
+
+    def rerank_records(self, query: str, records: list[Record]) -> list[float]:
+        if not records:
+            return []
+        fast_scores = _tier_scores(self._fast, query, records)
+        return self._cascade(
+            query,
+            n=len(records),
+            fast_scores=fast_scores,
+            score_slow=lambda indices: _tier_scores(
+                self._slow, query, [records[i] for i in indices]
+            ),
+        )
+
+    def _cascade(
+        self,
+        query: str,
+        *,
+        n: int,
+        fast_scores: list[float],
+        score_slow: Callable[[list[int]], list[float]],
+    ) -> list[float]:
         ranked_indices = sorted(range(n), key=lambda i: (-fast_scores[i], i))
 
         if n <= self._escalate_top_n:
@@ -119,8 +158,7 @@ class CascadingReranker:
         if not escalate:
             return fast_scores
 
-        top_documents = [documents[i] for i in top_indices]
-        slow_scores = self._slow.rerank(query, top_documents)
+        slow_scores = score_slow(top_indices)
 
         remainder_max = max(
             (fast_scores[i] for i in remainder_indices), default=0.0

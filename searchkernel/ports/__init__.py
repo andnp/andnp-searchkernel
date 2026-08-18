@@ -78,7 +78,7 @@ from searchkernel.ports.reindex import (
     ModelNamespaceStore,
     ModelValidationStore,
 )
-from searchkernel.ports.rerank import Reranker
+from searchkernel.ports.rerank import RecordReranker, Reranker
 from searchkernel.ports.retrieval import (
     RetrievalFieldExtractor,
     RetrievalFields,
@@ -159,6 +159,7 @@ __all__ = [
     "RecordIngestionResult",
     "RecordIngestionStatus",
     "RecordIngestor",
+    "RecordReranker",
     "RecordSearchFailure",
     "RecordSearchOutcome",
     "RecordSearchResult",
