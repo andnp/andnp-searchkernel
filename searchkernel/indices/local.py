@@ -17,6 +17,7 @@ import re
 import sqlite3
 import threading
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -198,6 +199,17 @@ class _LocalEpochLane:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _SQLiteAccess:
+    """Serialised access to one SQLite database, shared by every engine."""
+
+    db: SQLiteDatabase
+    lock: threading.RLock
+
+    def connection(self) -> sqlite3.Connection:
+        return self.db.get_connection()
+
+
 class LocalRecordBackend:
     """Shared durable state for the local vector, keyword, and graph stores."""
 
@@ -236,6 +248,7 @@ class LocalRecordBackend:
             else InMemorySQLiteDatabase(sqlite_tuning)
         )
         self._lock = threading.RLock()
+        self._access = _SQLiteAccess(db=self._db, lock=self._lock)
         self._snapshot_lock = threading.RLock()
         self._vector_storage_stats: dict[tuple[str, int], tuple[int, int, int]] = {}
         self._vector_snapshots: dict[tuple[str, int], VectorSnapshot] = (
