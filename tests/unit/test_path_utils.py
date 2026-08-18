@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from searchkernel.search import path_utils
 from searchkernel.search.path_utils import (
     compute_doc_id,
     compute_doc_id_multi_root,
@@ -373,3 +374,23 @@ def test_compute_doc_id_multi_root_rejects_sibling_prefix_root(tmp_path, caplog)
     assert result == "project-extra/x"
     warnings = [r for r in caplog.records if "configured document roots" in r.getMessage()]
     assert len(warnings) == 1
+
+
+def test_compute_doc_id_multi_root_memoizes_repeated_lookups(tmp_path, monkeypatch):
+    """A repeated (path, roots) lookup must not redo path resolution work."""
+    project = tmp_path / "project"
+    file_path = project / "docs" / "guide.md"
+
+    call_count = 0
+
+    def counting_canonical_path(path):
+        nonlocal call_count
+        call_count += 1
+        return Path(path).resolve()
+
+    monkeypatch.setattr(path_utils, "_canonical_path", counting_canonical_path)
+
+    compute_doc_id_multi_root(file_path, [project])
+    compute_doc_id_multi_root(file_path, [project])
+
+    assert call_count == 1
