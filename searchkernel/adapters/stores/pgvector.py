@@ -1430,6 +1430,14 @@ class PGVectorStore:
                     f"Dimension mismatch for model {model_name}: "
                     f"expected {existing_dim}, got {dim}"
                 )
+            # A table created before revision tracking existed has no such
+            # column; add it (idempotent) rather than assume every existing
+            # deployment has already upserted since that column was added.
+            cursor.execute(
+                self._sql.SQL(
+                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS revision TEXT;"
+                ).format(table=self._sql.Identifier(table_name))
+            )
 
             storage_keys = [record.storage_key for record in records]
             cursor.execute(

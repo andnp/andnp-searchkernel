@@ -804,6 +804,26 @@ class TestVectorStore:
 
         assert store.get_many(fixture_records, model_name="never-indexed", dim=4) == {}
 
+    def test_get_many_backfills_a_missing_revision_column(self, pg_conn, fixture_records):
+        """A table created before revision tracking existed has no such
+        column; get_many must add it rather than assume every existing
+        deployment has already upserted since that column was added."""
+        store = PGVectorStore(pg_conn)
+        store.upsert(fixture_records, model_name="test-model", dim=4)
+
+        conn = pg_conn.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f'ALTER TABLE "{_vector_table_name("test-model", 4)}" DROP COLUMN revision;'
+        )
+        conn.commit()
+        cursor.close()
+        pg_conn.put_connection(conn)
+
+        stored = store.get_many(fixture_records, model_name="test-model", dim=4)
+
+        assert stored == {}
+
     def test_get_many_empty_records_returns_empty_without_querying(self, pg_conn):
         store = PGVectorStore(pg_conn)
 
