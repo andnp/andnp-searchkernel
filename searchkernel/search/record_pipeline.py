@@ -756,6 +756,51 @@ class RecordSearchPipeline:
             base_candidates, execution.query_context
         )
 
+    def _reroute_for_adaptive_graph(self, execution: _SearchExecution) -> None:
+        """Re-route with adaptive-graph readiness once base candidates exist.
+
+        The readiness check runs against ``execution.base_candidates`` as
+        produced under the plan already in place; this does not recompute
+        them under any replacement plan. The diagnostics filter mutates
+        ``execution.diagnostics`` in place (slice-assignment) rather than
+        rebinding it, so the list object stays the one aliased elsewhere.
+        """
+        plan = execution.routed_plan
+        if not (
+            self._config.adaptive_graph_enabled and not plan.signals.relationship
+        ):
+            return
+        semantic_only = execution.semantic_only
+        adaptive_plan = self._router.route(
+            execution.query,
+            limit=execution.limit,
+            keyword_available=self._keyword_store is not None,
+            vector_available=self._vector_store is not None,
+            graph_available=self._graph_store is not None,
+            graph_enabled=self._config.graph_enabled and not semantic_only,
+            adaptive_graph_ready=self._adaptive_graph_ready(
+                execution.base_candidates
+            ),
+            rerank_available=self._reranker is not None,
+        )
+        if not adaptive_plan.graph_enabled:
+            return
+        execution.plan = adaptive_plan
+        execution.diagnostics[:] = [
+            diagnostic
+            for diagnostic in execution.diagnostics
+            if diagnostic != "query_plan:skip:graph:awaiting_seed_confidence"
+        ]
+        execution.diagnostics.append("query_plan:graph:adaptive")
+        if execution.trace is not None:
+            execution.trace.provenance["query_plan"] = {
+                "type": adaptive_plan.query_type.name.lower(),
+                "signals": adaptive_plan.signals.names,
+                "lanes": adaptive_plan.enabled_lanes,
+                "budgets": adaptive_plan.lane_budgets,
+                "skip_reasons": adaptive_plan.diagnostic_skip_reasons,
+            }
+
     async def async_search(
         self,
         query: str,
@@ -773,7 +818,6 @@ class RecordSearchPipeline:
         if execution is None:
             return RecordSearchOutcome()
         filters = execution.filters
-        semantic_only = execution.semantic_only
         query_context = execution.query_context
         failures = execution.failures
         missing_record_ids = execution.missing_record_ids
@@ -814,40 +858,8 @@ class RecordSearchPipeline:
             candidate_counts = execution.candidate_counts
             base_candidates = execution.base_candidates
 
-            if (
-                self._config.adaptive_graph_enabled
-                and not plan.signals.relationship
-            ):
-                adaptive_plan = self._router.route(
-                    query,
-                    limit=limit,
-                    keyword_available=self._keyword_store is not None,
-                    vector_available=self._vector_store is not None,
-                    graph_available=self._graph_store is not None,
-                    graph_enabled=self._config.graph_enabled
-                    and not semantic_only,
-                    adaptive_graph_ready=self._adaptive_graph_ready(
-                        base_candidates
-                    ),
-                    rerank_available=self._reranker is not None,
-                )
-                if adaptive_plan.graph_enabled:
-                    plan = adaptive_plan
-                    diagnostics = [
-                        diagnostic
-                        for diagnostic in diagnostics
-                        if diagnostic
-                        != "query_plan:skip:graph:awaiting_seed_confidence"
-                    ]
-                    diagnostics.append("query_plan:graph:adaptive")
-                    if trace is not None:
-                        trace.provenance["query_plan"] = {
-                            "type": plan.query_type.name.lower(),
-                            "signals": plan.signals.names,
-                            "lanes": plan.enabled_lanes,
-                            "budgets": plan.lane_budgets,
-                            "skip_reasons": plan.diagnostic_skip_reasons,
-                        }
+            self._reroute_for_adaptive_graph(execution)
+            plan = execution.plan
 
             if plan.graph_enabled and base_candidates:
                 try:
