@@ -863,6 +863,52 @@ class RecordSearchPipeline:
         else:
             execution.candidates = base_candidates
 
+    async def _expand_query_stage(self, execution: _SearchExecution) -> None:
+        """Conditionally re-acquire keyword candidates under an expanded query.
+
+        Reads ``execution.candidates`` (post-graph-expansion, not the
+        pre-graph ``base_candidates``) to decide whether expansion is
+        needed. ``candidate_counts["expansion"]`` is an item assignment into
+        the dict already live on ``execution.candidate_counts`` (set by
+        ``_fuse_candidates``), not a rebind, so it is safe to write in
+        place. Re-fuses via ``self._fuse_rankings`` as a third, independent
+        fusion point — left as-is, not unified with ``_fuse_candidates``.
+        """
+        plan = execution.routed_plan
+        candidates = execution.candidates
+        if not (
+            plan.expansion_strategy is not None
+            and _needs_conditional_expansion(candidates, execution.limit)
+        ):
+            return
+        expanded_query = await self._expand_query(
+            execution.query,
+            plan.expansion_strategy,
+            execution.diagnostics,
+        )
+        if expanded_query is None or expanded_query == execution.query:
+            return
+        expansion_ranking = await self._capture_optional_stage(
+            "keyword",
+            plan.keyword_enabled,
+            lambda: self._candidate_acquirer.keyword(
+                expanded_query,
+                plan.keyword_candidate_budget,
+                execution.filters,
+            ),
+            execution.failures,
+        )
+        if not expansion_ranking:
+            return
+        execution.candidate_counts["expansion"] = len(expansion_ranking)
+        execution.rankings["expansion"] = expansion_ranking
+        fused_scores = self._fuse_rankings(execution.rankings, plan)
+        execution.fused_scores = fused_scores
+        execution.candidates = self._apply_candidate_policy(
+            self._build_candidates(fused_scores, execution.rankings),
+            execution.query_context,
+        )
+
     async def async_search(
         self,
         query: str,
@@ -916,7 +962,6 @@ class RecordSearchPipeline:
 
             self._fuse_candidates(execution)
             raw_pre_fusion_overlap = execution.raw_pre_fusion_overlap
-            fused_scores = execution.fused_scores
             candidate_counts = execution.candidate_counts
             base_candidates = execution.base_candidates
 
@@ -925,36 +970,9 @@ class RecordSearchPipeline:
 
             await self._expand_graph_stage(execution)
             candidates = execution.candidates
-            fused_scores = execution.fused_scores
 
-            if (
-                plan.expansion_strategy is not None
-                and _needs_conditional_expansion(candidates, limit)
-            ):
-                expanded_query = await self._expand_query(
-                    query,
-                    plan.expansion_strategy,
-                    diagnostics,
-                )
-                if expanded_query is not None and expanded_query != query:
-                    expansion_ranking = await self._capture_optional_stage(
-                        "keyword",
-                        plan.keyword_enabled,
-                        lambda: self._candidate_acquirer.keyword(
-                            expanded_query,
-                            plan.keyword_candidate_budget,
-                            filters,
-                        ),
-                        failures,
-                    )
-                    if expansion_ranking:
-                        candidate_counts["expansion"] = len(expansion_ranking)
-                        rankings["expansion"] = expansion_ranking
-                        fused_scores = self._fuse_rankings(rankings, plan)
-                        candidates = self._apply_candidate_policy(
-                            self._build_candidates(fused_scores, rankings),
-                            query_context,
-                        )
+            await self._expand_query_stage(execution)
+            candidates = execution.candidates
 
             candidates = self._apply_score_adjustments(candidates, query_context)
             candidates = self._apply_exact_identifier_priority(candidates, query)
