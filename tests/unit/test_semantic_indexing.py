@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from searchkernel.domain import Chunk, Record
@@ -433,8 +434,8 @@ class TestSQLiteEmbeddingCache:
 
             results = cache.get_many(["hash-1", "hash-2"])
             assert len(results) == 2
-            assert list(results["hash-1"]) == [0.1, 0.2, 0.3]
-            assert list(results["hash-2"]) == [0.4, 0.5, 0.6]
+            assert list(results["hash-1"]) == np.asarray([0.1, 0.2, 0.3], dtype="<f4").tolist()
+            assert list(results["hash-2"]) == np.asarray([0.4, 0.5, 0.6], dtype="<f4").tolist()
 
     def test_cache_namespace_isolation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -559,7 +560,7 @@ class TestLlamaIndexEmbeddingCacheAdapter:
 
             assert result is not None
             (vector,) = result.values()
-            assert list(vector) == [0.1, 0.2, 0.3]
+            assert list(vector) == np.asarray([0.1, 0.2, 0.3], dtype="<f4").tolist()
 
     def test_different_text_keys_do_not_collide(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -575,5 +576,5 @@ class TestLlamaIndexEmbeddingCacheAdapter:
             assert result_b is not None
             (vec_a,) = result_a.values()
             (vec_b,) = result_b.values()
-            assert list(vec_a) == [0.1, 0.2, 0.3]
-            assert list(vec_b) == [0.4, 0.5, 0.6]
+            assert list(vec_a) == np.asarray([0.1, 0.2, 0.3], dtype="<f4").tolist()
+            assert list(vec_b) == np.asarray([0.4, 0.5, 0.6], dtype="<f4").tolist()

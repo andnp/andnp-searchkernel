@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import sqlite3
@@ -11,6 +10,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
+
+import numpy as np
 
 from searchkernel.utils.ordered_key_chunks import (
     DEFAULT_KEY_CHUNK_LIMIT,
@@ -89,8 +90,8 @@ class SQLiteEmbeddingCache:
             invalid: list[str] = []
             for content_hash, encoded in rows:
                 try:
-                    vector = self._validated_vector(json.loads(encoded))
-                except (ValueError, TypeError, json.JSONDecodeError):
+                    vector = self._validated_vector(self._decode_vector(encoded))
+                except (ValueError, TypeError):
                     invalid.append(content_hash)
                     continue
                 result[content_hash] = list(vector)
@@ -115,12 +116,21 @@ class SQLiteEmbeddingCache:
         prepared = []
         for content_hash, vector in vectors.items():
             normalized = self._validated_vector(vector)
+            with np.errstate(over="ignore"):
+                packed = np.asarray(normalized, dtype="<f4")
+            if not np.isfinite(packed).all():
+                raise ValueError(
+                    "embedding vector cannot be represented as finite float32 values"
+                )
             prepared.append(
                 (
                     self.encoder_namespace,
                     content_hash,
                     self.dimension,
-                    json.dumps(list(normalized)),
+                    # float32 matches faiss's internal representation and halves
+                    # storage versus JSON text; embeddings round-trip at this
+                    # precision without meaningful loss.
+                    packed.tobytes(),
                 )
             )
         with self._lock:
@@ -230,6 +240,13 @@ class SQLiteEmbeddingCache:
                 self.path.with_name(self.path.name + suffix).unlink()
             except FileNotFoundError:
                 pass
+
+    def _decode_vector(self, encoded: object) -> tuple[float, ...]:
+        if not isinstance(encoded, bytes):
+            raise TypeError("embedding vector must be stored as bytes")
+        if self.dimension and len(encoded) != self.dimension * 4:
+            raise ValueError("embedding vector has unexpected byte length")
+        return tuple(float(value) for value in np.frombuffer(encoded, dtype="<f4"))
 
     def _validated_vector(self, vector: Sequence[float]) -> tuple[float, ...]:
         try:
