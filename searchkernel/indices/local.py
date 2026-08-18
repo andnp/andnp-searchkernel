@@ -25,7 +25,7 @@ from typing import Any, ClassVar, Self
 
 import numpy as np
 
-from searchkernel.adapters.keyword_scoring import filesystem as _artifact_scoring
+from searchkernel.adapters.keyword_scoring.filesystem import FilesystemArtifactScorer
 from searchkernel.domain import (
     GraphEdge,
     GraphNeighbor,
@@ -96,18 +96,6 @@ _METADATA_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _VECTOR_EMBEDDING_BYTES = np.dtype("<f4").itemsize
 _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 logger = logging.getLogger(__name__)
-
-
-def _natural_language_match_query(
-    query: str,
-    match_query: str,
-) -> str | None:
-    if '"' in query or _artifact_scoring.looks_like_artifact_query(query):
-        return None
-    terms = match_query.split()
-    if len(terms) < 2:
-        return None
-    return " OR ".join(terms)
 
 
 def _fuzzy_term_score(query_term: str, tokens: Sequence[str]) -> float:
@@ -973,6 +961,18 @@ class _KeywordEngine:
             )
         )
 
+    def _natural_language_match_query(
+        self,
+        query: str,
+        match_query: str,
+    ) -> str | None:
+        if '"' in query or self._artifact_scorer.looks_like_identifier_query(query):
+            return None
+        terms = match_query.split()
+        if len(terms) < 2:
+            return None
+        return " OR ".join(terms)
+
     def _keyword_filter_sql(
         self,
         filters: SearchFilters | None,
@@ -1266,8 +1266,8 @@ class _KeywordEngine:
         match_query = _keyword_scoring.sanitize_fts_query(query)
         if match_query == '""':
             return []
-        needs_artifact_rerank = _artifact_scoring.looks_like_artifact_query(query)
-        artifact_tokens = _artifact_scoring.embedded_artifact_tokens(query)
+        needs_artifact_rerank = self._artifact_scorer.looks_like_identifier_query(query)
+        artifact_tokens = self._artifact_scorer.identifier_tokens(query)
         if needs_artifact_rerank and artifact_tokens:
             artifact_queries = [
                 _keyword_scoring.sanitize_fts_query(token)
@@ -1322,21 +1322,13 @@ class _KeywordEngine:
                     continue
                 score = float(row["score"])
                 if needs_artifact_rerank:
-                    normalized_query = _artifact_scoring.normalize_artifact_value(query)
-                    score += _artifact_scoring.score_field_aware_match(
+                    score += self._artifact_scorer.score(
                         query,
-                        content=row["indexed_text"] or row["body"],
                         title=row["title"],
+                        body=row["body"],
+                        indexed_text=row["indexed_text"],
                         headers=row["keywords"],
-                        source_file=row["uri"] or "",
-                    )
-                    score += _artifact_scoring.score_artifact_match(
-                        normalized_query,
-                        Path(normalized_query).name,
-                        row["body"],
-                        row["title"],
-                        row["keywords"],
-                        row["uri"] or "",
+                        uri=row["uri"] or "",
                     )
                 hits.append(
                     RecordHit(
@@ -1352,7 +1344,7 @@ class _KeywordEngine:
             return hits
 
         hits = build_hits(fetch_rows(match_query))
-        fallback_query = _natural_language_match_query(query, match_query)
+        fallback_query = self._natural_language_match_query(query, match_query)
         if not hits and fallback_query is not None:
             hits = build_hits(fetch_rows(fallback_query))
         if not hits:
@@ -1367,7 +1359,7 @@ class _KeywordEngine:
     ) -> list[RecordHit]:
         if (
             '"' in query
-            or _artifact_scoring.looks_like_artifact_query(query)
+            or self._artifact_scorer.looks_like_identifier_query(query)
         ):
             return []
         terms = [term.casefold() for term in _TOKEN_RE.findall(query)]
@@ -2411,7 +2403,7 @@ class LocalRecordBackend:
         )
         self._epoch_lane = _LocalEpochLane()
         self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
-        self._keyword_artifact_scorer = keyword_artifact_scorer or _artifact_scoring.FilesystemArtifactScorer()
+        self._keyword_artifact_scorer = keyword_artifact_scorer or FilesystemArtifactScorer()
         self._vector_engine = vector_engine
         self._faiss_threshold = faiss_threshold
         self._vector_snapshot_max_rows = vector_snapshot_max_rows
