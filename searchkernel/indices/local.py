@@ -2247,6 +2247,156 @@ class _SchemaManager:
             conn.execute(f"ALTER TABLE local_vectors_v2 ADD COLUMN {column} {definition}")
 
 
+class _HydrationEngine:
+    """Own record hydration and chunk-parent expansion for the local backend."""
+
+    def __init__(self, access: _SQLiteAccess) -> None:
+        self._access = access
+
+    def _record_rows(self) -> list[sqlite3.Row]:
+        conn = self._access.connection()
+        conn.row_factory = sqlite3.Row
+        return conn.execute("SELECT * FROM local_records").fetchall()
+
+    def hydrate_record(
+        self,
+        record_id: RecordIdentity | str,
+        *,
+        source_kind: str | None = None,
+        workspace_id: str | None = None,
+    ) -> Record | None:
+        storage_key = (
+            record_id.storage_key if isinstance(record_id, RecordIdentity) else record_id
+        )
+        if isinstance(record_id, RecordIdentity):
+            source_kind = record_id.source_kind
+            workspace_id = record_id.workspace_id
+        with self._access.lock:
+            conn = self._access.connection()
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM local_records WHERE storage_key = ?",
+                (storage_key,),
+            ).fetchone()
+            if row is None:
+                candidates = conn.execute(
+                    """
+                    SELECT * FROM local_records
+                    WHERE source_id = ?
+                      AND (? IS NULL OR source_kind = ?)
+                      AND (? IS NULL OR workspace_id = ?)
+                    ORDER BY storage_key
+                    """,
+                    (
+                        record_id.source_id if isinstance(record_id, RecordIdentity) else record_id,
+                        source_kind,
+                        source_kind,
+                        workspace_id,
+                        workspace_id,
+                    ),
+                ).fetchall()
+                if len(candidates) != 1:
+                    return None
+                row = candidates[0]
+            return Record(
+                workspace_id=row["workspace_id"],
+                source_kind=row["source_kind"],
+                source_id=row["source_id"],
+                title=row["title"],
+                body=row["body"],
+                indexed_text=row["indexed_text"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+                metadata=json.loads(row["metadata"]),
+                uri=row["uri"],
+                status=RecordStatus(row["status"]),
+            )
+
+    def hydrate_records(
+        self,
+        identities: Sequence[RecordIdentity],
+    ) -> dict[str, Record | None]:
+        """Hydrate canonical identities with bounded record queries."""
+        keys = list(dict.fromkeys(identity.storage_key for identity in identities))
+        if not keys:
+            return {}
+        with self._access.lock:
+            conn = self._access.connection()
+            conn.row_factory = sqlite3.Row
+            rows: list[sqlite3.Row] = []
+            for key_chunk in LocalRecordBackend._key_chunks(keys):
+                placeholders = ",".join("?" for _ in key_chunk)
+                rows.extend(
+                    conn.execute(
+                        f"SELECT * FROM local_records WHERE storage_key IN ({placeholders})",
+                        key_chunk,
+                    ).fetchall()
+                )
+        records = {
+            row["storage_key"]: Record(
+                workspace_id=row["workspace_id"],
+                source_kind=row["source_kind"],
+                source_id=row["source_id"],
+                title=row["title"],
+                body=row["body"],
+                indexed_text=row["indexed_text"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+                metadata=json.loads(row["metadata"]),
+                uri=row["uri"],
+                status=RecordStatus(row["status"]),
+            )
+            for row in rows
+        }
+        return {key: records.get(key) for key in keys}
+
+    def chunk_parent(self, record_id: RecordIdentity | str) -> RecordIdentity | None:
+        """Return the canonical parent identity for a persisted chunk."""
+        storage_key = (
+            record_id.storage_key if isinstance(record_id, RecordIdentity) else record_id
+        )
+        with self._access.lock:
+            conn = self._access.connection()
+            row = conn.execute(
+                """
+                SELECT parent_storage_key
+                FROM local_chunk_state
+                WHERE chunk_storage_key = ?
+                """,
+                (storage_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return RecordIdentity.from_storage_key(row[0])
+
+    def chunk_records(
+        self,
+        parent_id: RecordIdentity | str,
+    ) -> dict[str, Record]:
+        """Hydrate persisted chunks for one canonical parent."""
+        parent_key = (
+            parent_id.storage_key if isinstance(parent_id, RecordIdentity) else parent_id
+        )
+        with self._access.lock:
+            conn = self._access.connection()
+            rows = conn.execute(
+                """
+                SELECT chunk_storage_key
+                FROM local_chunk_state
+                WHERE parent_storage_key = ?
+                ORDER BY chunk_index, chunk_id
+                """,
+                (parent_key,),
+            ).fetchall()
+        identities = [RecordIdentity.from_storage_key(row[0]) for row in rows]
+        hydrated = self.hydrate_records(identities)
+        return {
+            key: record
+            for key, record in hydrated.items()
+            if record is not None
+        }
+
+
 class LocalRecordBackend:
     """Shared durable state for the local vector, keyword, and graph stores."""
 
@@ -2329,6 +2479,7 @@ class LocalRecordBackend:
             initialize_keyword_schema=self._keyword_engine.initialize_schema,
             initialize_graph_schema=self._graph_engine.initialize_schema,
         )
+        self._hydration_engine = _HydrationEngine(self._access)
         self._schema_manager.initialize_schema()
 
     @property
@@ -2558,11 +2709,6 @@ class LocalRecordBackend:
             filters=filters,
         )
 
-    def _record_rows(self) -> list[sqlite3.Row]:
-        conn = self._db.get_connection()
-        conn.row_factory = sqlite3.Row
-        return conn.execute("SELECT * FROM local_records").fetchall()
-
     def search_keyword(
         self,
         query: str,
@@ -2617,136 +2763,29 @@ class LocalRecordBackend:
         source_kind: str | None = None,
         workspace_id: str | None = None,
     ) -> Record | None:
-        storage_key = (
-            record_id.storage_key if isinstance(record_id, RecordIdentity) else record_id
+        return self._hydration_engine.hydrate_record(
+            record_id,
+            source_kind=source_kind,
+            workspace_id=workspace_id,
         )
-        if isinstance(record_id, RecordIdentity):
-            source_kind = record_id.source_kind
-            workspace_id = record_id.workspace_id
-        with self._lock:
-            conn = self._db.get_connection()
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT * FROM local_records WHERE storage_key = ?",
-                (storage_key,),
-            ).fetchone()
-            if row is None:
-                candidates = conn.execute(
-                    """
-                    SELECT * FROM local_records
-                    WHERE source_id = ?
-                      AND (? IS NULL OR source_kind = ?)
-                      AND (? IS NULL OR workspace_id = ?)
-                    ORDER BY storage_key
-                    """,
-                    (
-                        record_id.source_id if isinstance(record_id, RecordIdentity) else record_id,
-                        source_kind,
-                        source_kind,
-                        workspace_id,
-                        workspace_id,
-                    ),
-                ).fetchall()
-                if len(candidates) != 1:
-                    return None
-                row = candidates[0]
-            return Record(
-                workspace_id=row["workspace_id"],
-                source_kind=row["source_kind"],
-                source_id=row["source_id"],
-                title=row["title"],
-                body=row["body"],
-                indexed_text=row["indexed_text"],
-                created_at=datetime.fromisoformat(row["created_at"]),
-                updated_at=datetime.fromisoformat(row["updated_at"]),
-                metadata=json.loads(row["metadata"]),
-                uri=row["uri"],
-                status=RecordStatus(row["status"]),
-            )
 
     def hydrate_records(
         self,
         identities: Sequence[RecordIdentity],
     ) -> dict[str, Record | None]:
         """Hydrate canonical identities with bounded record queries."""
-        keys = list(dict.fromkeys(identity.storage_key for identity in identities))
-        if not keys:
-            return {}
-        with self._lock:
-            conn = self._db.get_connection()
-            conn.row_factory = sqlite3.Row
-            rows: list[sqlite3.Row] = []
-            for key_chunk in self._key_chunks(keys):
-                placeholders = ",".join("?" for _ in key_chunk)
-                rows.extend(
-                    conn.execute(
-                        f"SELECT * FROM local_records WHERE storage_key IN ({placeholders})",
-                        key_chunk,
-                    ).fetchall()
-                )
-        records = {
-            row["storage_key"]: Record(
-                workspace_id=row["workspace_id"],
-                source_kind=row["source_kind"],
-                source_id=row["source_id"],
-                title=row["title"],
-                body=row["body"],
-                indexed_text=row["indexed_text"],
-                created_at=datetime.fromisoformat(row["created_at"]),
-                updated_at=datetime.fromisoformat(row["updated_at"]),
-                metadata=json.loads(row["metadata"]),
-                uri=row["uri"],
-                status=RecordStatus(row["status"]),
-            )
-            for row in rows
-        }
-        return {key: records.get(key) for key in keys}
+        return self._hydration_engine.hydrate_records(identities)
 
     def chunk_parent(self, record_id: RecordIdentity | str) -> RecordIdentity | None:
         """Return the canonical parent identity for a persisted chunk."""
-        storage_key = (
-            record_id.storage_key if isinstance(record_id, RecordIdentity) else record_id
-        )
-        with self._lock:
-            conn = self._db.get_connection()
-            row = conn.execute(
-                """
-                SELECT parent_storage_key
-                FROM local_chunk_state
-                WHERE chunk_storage_key = ?
-                """,
-                (storage_key,),
-            ).fetchone()
-        if row is None:
-            return None
-        return RecordIdentity.from_storage_key(row[0])
+        return self._hydration_engine.chunk_parent(record_id)
 
     def chunk_records(
         self,
         parent_id: RecordIdentity | str,
     ) -> dict[str, Record]:
         """Hydrate persisted chunks for one canonical parent."""
-        parent_key = (
-            parent_id.storage_key if isinstance(parent_id, RecordIdentity) else parent_id
-        )
-        with self._lock:
-            conn = self._db.get_connection()
-            rows = conn.execute(
-                """
-                SELECT chunk_storage_key
-                FROM local_chunk_state
-                WHERE parent_storage_key = ?
-                ORDER BY chunk_index, chunk_id
-                """,
-                (parent_key,),
-            ).fetchall()
-        identities = [RecordIdentity.from_storage_key(row[0]) for row in rows]
-        hydrated = self.hydrate_records(identities)
-        return {
-            key: record
-            for key, record in hydrated.items()
-            if record is not None
-        }
+        return self._hydration_engine.chunk_records(parent_id)
 
     def delete(self, record_ids: list[str]) -> None:
         if not record_ids:
