@@ -521,6 +521,38 @@ class RecordSearchPipeline:
                 }
             }
 
+    async def _load_cached_candidates(self, execution: _SearchExecution) -> None:
+        """Look up cached candidates for the routed plan, or record a miss key.
+
+        ``acquisition_limit`` only shapes the cache key, so it stays local
+        rather than joining the execution state.
+        """
+        plan = execution.plan
+        acquisition_limit = max(
+            plan.keyword_candidate_budget,
+            plan.vector_candidate_budget,
+        )
+        candidate_key = self._candidate_cache_policy.key(
+            execution.query,
+            execution.filters,
+            execution.limit,
+            acquisition_limit,
+            execution.cache_diagnostics,
+        )
+        execution.candidate_key = candidate_key
+        candidates: list[RecordSearchCandidate] | None = None
+        if candidate_key is not None and not execution.failures:
+            candidates = self._candidate_cache_policy.get(
+                candidate_key,
+                execution.cache_diagnostics,
+            )
+            if candidates is None:
+                candidates = await self._candidate_cache_policy.async_wait_for_miss(
+                    candidate_key,
+                    execution.cache_diagnostics,
+                )
+        execution.candidates = candidates
+
     async def async_search(
         self,
         query: str,
@@ -550,28 +582,9 @@ class RecordSearchPipeline:
 
         self._plan_query(execution)
         plan = execution.plan
-        acquisition_limit = max(
-            plan.keyword_candidate_budget,
-            plan.vector_candidate_budget,
-        )
-        candidate_key = self._candidate_cache_policy.key(
-            query,
-            filters,
-            limit,
-            acquisition_limit,
-            cache_diagnostics,
-        )
-        candidates: list[RecordSearchCandidate] | None = None
-        if candidate_key is not None and not failures:
-            candidates = self._candidate_cache_policy.get(
-                candidate_key,
-                cache_diagnostics,
-            )
-            if candidates is None:
-                candidates = await self._candidate_cache_policy.async_wait_for_miss(
-                    candidate_key,
-                    cache_diagnostics,
-                )
+        await self._load_cached_candidates(execution)
+        candidate_key = execution.candidate_key
+        candidates = execution.candidates
 
         if candidates is None:
             rankings: dict[str, list[RecordHit]] = {}
