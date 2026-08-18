@@ -437,23 +437,21 @@ class RecordSearchPipeline:
             )
         return self.async_search(query, limit=limit, filters=filters)
 
-    async def async_search(
+    def _begin_search(
         self,
         query: str,
-        *,
-        limit: int = 10,
-        filters: dict[str, object] | None = None,
-    ) -> RecordSearchOutcome:
-        """Return deterministic hydrated results for ``query``.
+        limit: int,
+        filters: dict[str, object] | None,
+    ) -> _SearchExecution | None:
+        """Validate the request and build its working state, or signal empty.
 
-        ``filters["retrieval_mode"]`` accepts ``"hybrid"`` (the default),
-        ``"semantic"``, or ``"semantic_only"``. Semantic-only requests keep
-        vector retrieval and disable keyword and graph retrieval.
+        Returns ``None`` when the query is blank, telling the caller to
+        short-circuit with an empty outcome without routing or acquisition.
         """
         if limit < 1:
             raise ValueError("limit must be positive")
         if not query.strip():
-            return RecordSearchOutcome()
+            return None
 
         failures: list[RecordSearchFailure] = []
         missing_record_ids: list[str] = []
@@ -477,6 +475,48 @@ class RecordSearchPipeline:
             filters=filters,
             limit=limit,
         )
+        return _SearchExecution(
+            query=query,
+            limit=limit,
+            filters=filters,
+            query_context=query_context,
+            failures=failures,
+            missing_record_ids=missing_record_ids,
+            cache_diagnostics=cache_diagnostics,
+            diagnostics=diagnostics,
+            candidate_counts=candidate_counts,
+            raw_pre_fusion_overlap=raw_pre_fusion_overlap,
+            trace=trace,
+            semantic_only=semantic_only,
+        )
+
+    async def async_search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        filters: dict[str, object] | None = None,
+    ) -> RecordSearchOutcome:
+        """Return deterministic hydrated results for ``query``.
+
+        ``filters["retrieval_mode"]`` accepts ``"hybrid"`` (the default),
+        ``"semantic"``, or ``"semantic_only"``. Semantic-only requests keep
+        vector retrieval and disable keyword and graph retrieval.
+        """
+        execution = self._begin_search(query, limit, filters)
+        if execution is None:
+            return RecordSearchOutcome()
+        filters = execution.filters
+        semantic_only = execution.semantic_only
+        query_context = execution.query_context
+        failures = execution.failures
+        missing_record_ids = execution.missing_record_ids
+        cache_diagnostics = execution.cache_diagnostics
+        diagnostics = execution.diagnostics
+        candidate_counts = execution.candidate_counts
+        raw_pre_fusion_overlap = execution.raw_pre_fusion_overlap
+        trace = execution.trace
+
         plan = self._router.route(
             query,
             limit=limit,
