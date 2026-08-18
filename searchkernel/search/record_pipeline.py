@@ -677,6 +677,60 @@ class RecordSearchPipeline:
             if vector_value is not None:
                 rankings["vector"] = cast(list[RecordHit], vector_value)
 
+    async def _acquire_parallel_candidates(self, execution: _SearchExecution) -> None:
+        """Acquire keyword and vector candidates concurrently.
+
+        Bind the plan, query, filters, rankings, and query context once up
+        front so the task lambdas close over these fixed locals rather than
+        re-reading ``execution`` at call time. The vector task is handed the
+        same ``rankings`` dict the keyword task may still be writing into
+        concurrently; that pre-existing interleaving is preserved as-is.
+        Mutates ``execution.rankings`` and ``execution.failures`` in place.
+        """
+        plan = execution.routed_plan
+        query = execution.query
+        filters = execution.filters
+        query_context = execution.query_context
+        failures = execution.failures
+        rankings = execution.rankings
+        stage_results = await _gather_tasks(
+            [
+                asyncio.create_task(
+                    _capture_stage(
+                        "keyword",
+                        lambda: self._candidate_acquirer.keyword(
+                            query, plan.keyword_candidate_budget, filters
+                        ),
+                    )
+                )
+                if plan.keyword_enabled and "keyword" not in rankings
+                else None,
+                asyncio.create_task(
+                    _capture_stage(
+                        "vector",
+                        lambda: self._candidate_acquirer.vector(
+                            None,
+                            plan.vector_candidate_budget,
+                            filters,
+                            rankings,
+                            context=query_context,
+                            query=query,
+                            plan=plan,
+                        ),
+                    )
+                )
+                if plan.vector_enabled
+                else None,
+            ]
+        )
+        for stage, value, error in stage_results:
+            if error is not None:
+                self._handle_error(stage, error, failures)
+            elif stage == "keyword":
+                rankings["keyword"] = cast(list[RecordHit], value)
+            else:
+                rankings["vector"] = cast(list[RecordHit], value)
+
     async def async_search(
         self,
         query: str,
@@ -727,43 +781,7 @@ class RecordSearchPipeline:
             elif not artifact_path_complete and (
                 plan.vector_enabled or plan.keyword_enabled
             ):
-                stage_results = await _gather_tasks(
-                    [
-                        asyncio.create_task(
-                            _capture_stage(
-                                "keyword",
-                                lambda: self._candidate_acquirer.keyword(
-                                    query, plan.keyword_candidate_budget, filters
-                                ),
-                            )
-                        )
-                        if plan.keyword_enabled and "keyword" not in rankings
-                        else None,
-                        asyncio.create_task(
-                            _capture_stage(
-                                "vector",
-                                lambda: self._candidate_acquirer.vector(
-                                    None,
-                                    plan.vector_candidate_budget,
-                                    filters,
-                                    rankings,
-                                    context=query_context,
-                                    query=query,
-                                    plan=plan,
-                                ),
-                            )
-                        )
-                        if plan.vector_enabled
-                        else None,
-                    ]
-                )
-                for stage, value, error in stage_results:
-                    if error is not None:
-                        self._handle_error(stage, error, failures)
-                    elif stage == "keyword":
-                        rankings["keyword"] = cast(list[RecordHit], value)
-                    else:
-                        rankings["vector"] = cast(list[RecordHit], value)
+                await self._acquire_parallel_candidates(execution)
 
             raw_pre_fusion_overlap = _raw_pre_fusion_overlap(rankings, failures)
             fused_scores: dict[str, float] = {}
