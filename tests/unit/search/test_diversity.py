@@ -179,3 +179,38 @@ def test_ties_are_broken_by_original_input_position_deterministically() -> None:
 
     for _ in range(5):
         assert _ids(post_process(results)) == ["first", "second", "third"]
+
+
+def test_mmr_relevance_survives_unnormalised_results() -> None:
+    """The pipeline assigns ``normalized_score`` after ``post_process`` runs,
+    so every result still carries the dataclass default when MMR sees it.
+    Reading that field would drop relevance out of the selection entirely."""
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    vectors = {"a": [1.0, 0.0], "b": [0.99, 0.01], "c": [0.0, 1.0]}
+
+    def _result(source_id: str, score: float) -> RecordSearchResult:
+        record = Record(
+            source_kind="note",
+            source_id=source_id,
+            title=source_id,
+            body=source_id,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        # normalized_score deliberately left at its 0.0 default, as the
+        # pipeline leaves it when post_process runs.
+        return RecordSearchResult(
+            record=record, score=score, provenance=SearchResultProvenance()
+        )
+
+    # Input order deliberately disagrees with relevance order, so a
+    # uniform-relevance bug would fall back to input order and be caught.
+    results = [_result("c", 0.10), _result("a", 0.90), _result("b", 0.85)]
+
+    ordered = mmr_post_process(
+        lambda result: vectors[result.record.source_id], lambda_=1.0
+    )(results)
+
+    # lambda_=1.0 is pure relevance, so the weakest result must stay last
+    # even though its embedding is maximally distinct.
+    assert [item.record.source_id for item in ordered] == ["a", "b", "c"]
