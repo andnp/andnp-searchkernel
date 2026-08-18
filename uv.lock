@@ -115,7 +115,7 @@ wheels = [
 
 [[package]]
 name = "andnp-searchkernel"
-version = "0.25.0"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
