@@ -1,17 +1,30 @@
 """LLM-judge reranker: an ADDITIVE Reranker implementation backed by any
-text-completion callable, not a specific provider or API. Mirrors
-HuggingFaceReranker's yes/no relevance-judgment approach, but the model call
+text-completion callable, not a specific provider or API. The model call
 itself is supplied by the caller as a plain prompt-in/text-out function, so no
 LLM client library is a dependency here.
+
+Asks for a graded 0-10 relevance rating rather than a yes/no verdict: a
+reranker's job is to order documents, and a binary judgment ties every
+relevant document at the same score, leaving the pipeline's storage-key
+tie-break (effectively alphabetical order) to do the actual ranking. A 0-10
+integer scale was chosen over a 0-1 decimal because models produce it more
+consistently -- no "0.7" vs "7/10" vs "70%" ambiguity in what's *asked for*,
+even though a few of those forms still show up in answers and are parsed
+below.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
-_ANSWER_PUNCTUATION = ".,;:!?\"'*`)]}"
+_MARKDOWN_EMPHASIS = "*`"
+_DECIMAL_RATING = re.compile(r"\d+\.\d+")
+_RATING_OF_TEN = re.compile(r"(-?\d{1,3})\s*/\s*10\b")
+_BARE_RATING = re.compile(r"-?\d{1,3}\b")
+_MAX_RATING = 10
 
 
 class LLMJudgeReranker:
@@ -31,6 +44,8 @@ class LLMJudgeReranker:
         model_name: str,
         max_concurrency: int = 8,
     ) -> None:
+        if max_concurrency < 1:
+            raise ValueError(f"max_concurrency must be >= 1, got {max_concurrency}")
         self._complete = complete
         self.model_name = model_name
         self._max_concurrency = max_concurrency
@@ -49,23 +64,35 @@ class LLMJudgeReranker:
     @staticmethod
     def _build_prompt(query: str, document: str) -> str:
         return (
-            "You judge whether a document is relevant to a search query.\n\n"
+            "You judge how relevant a document is to a search query.\n\n"
             f"Query: {query}\n\n"
             f"Document: {document}\n\n"
-            "Is this document relevant to the query? Answer with exactly "
-            "one word, 'Yes' or 'No'."
+            "Rate the relevance on a scale from 0 (completely irrelevant) "
+            "to 10 (perfectly relevant). Answer with exactly one integer, "
+            "and nothing else."
         )
 
     @staticmethod
     def _parse_score(response: str) -> float:
-        # Models answer "Yes." or "Yes, this is relevant" however plainly the
-        # prompt asks for one word, and one stray comma would otherwise abort
-        # the whole rerank, since every document is judged separately.
+        # Models answer "Score: 7", "**7**", or "7/10" however plainly the
+        # prompt asks for one integer, and one stray decoration would
+        # otherwise abort the whole rerank, since every document is judged
+        # separately.
         stripped = response.strip()
-        first_word = stripped.split()[0] if stripped else ""
-        answer = first_word.strip(_ANSWER_PUNCTUATION).casefold()
-        if answer == "yes":
-            return 1.0
-        if answer == "no":
-            return 0.0
-        raise ValueError(f"judge reranker got an unparseable response: {response!r}")
+        cleaned = stripped.translate(str.maketrans("", "", _MARKDOWN_EMPHASIS))
+        # A fractional rating ("7.5") is rejected rather than guessed at: the
+        # prompt asks for an integer, so silently truncating to "7" would
+        # discard precision the model may have intended differently (e.g.
+        # rounding to 8), and there is no documented convention to resolve it.
+        if _DECIMAL_RATING.search(cleaned):
+            raise ValueError(
+                f"judge reranker got an unparseable response: {response!r}"
+            )
+        match = _RATING_OF_TEN.search(cleaned) or _BARE_RATING.search(cleaned)
+        if match is None:
+            raise ValueError(
+                f"judge reranker got an unparseable response: {response!r}"
+            )
+        rating = int(match.group(1)) if match.re is _RATING_OF_TEN else int(match.group())
+        clamped = max(0, min(_MAX_RATING, rating))
+        return clamped / _MAX_RATING
