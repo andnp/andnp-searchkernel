@@ -731,6 +731,31 @@ class RecordSearchPipeline:
             else:
                 rankings["vector"] = cast(list[RecordHit], value)
 
+    def _fuse_candidates(self, execution: _SearchExecution) -> None:
+        """Fuse acquired rankings into a scored, policy-filtered candidate set.
+
+        ``candidate_counts`` is only reassigned (not mutated) when there are
+        rankings to count, matching the original conditional; the call site
+        re-aliases it from ``execution`` afterward so the rebind is visible.
+        """
+        rankings = execution.rankings
+        failures = execution.failures
+        plan = execution.routed_plan
+        execution.raw_pre_fusion_overlap = _raw_pre_fusion_overlap(
+            rankings, failures
+        )
+        fused_scores: dict[str, float] = {}
+        if rankings:
+            execution.candidate_counts = {
+                strategy: len(ranking) for strategy, ranking in rankings.items()
+            }
+            fused_scores = self._fuse_rankings(rankings, plan)
+        execution.fused_scores = fused_scores
+        base_candidates = self._build_candidates(fused_scores, rankings)
+        execution.base_candidates = self._apply_candidate_policy(
+            base_candidates, execution.query_context
+        )
+
     async def async_search(
         self,
         query: str,
@@ -783,18 +808,11 @@ class RecordSearchPipeline:
             ):
                 await self._acquire_parallel_candidates(execution)
 
-            raw_pre_fusion_overlap = _raw_pre_fusion_overlap(rankings, failures)
-            fused_scores: dict[str, float] = {}
-            if rankings:
-                candidate_counts = {
-                    strategy: len(ranking)
-                    for strategy, ranking in rankings.items()
-                }
-                fused_scores = self._fuse_rankings(rankings, plan)
-            base_candidates = self._build_candidates(fused_scores, rankings)
-            base_candidates = self._apply_candidate_policy(
-                base_candidates, query_context
-            )
+            self._fuse_candidates(execution)
+            raw_pre_fusion_overlap = execution.raw_pre_fusion_overlap
+            fused_scores = execution.fused_scores
+            candidate_counts = execution.candidate_counts
+            base_candidates = execution.base_candidates
 
             if (
                 self._config.adaptive_graph_enabled
