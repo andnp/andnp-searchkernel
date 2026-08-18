@@ -5,6 +5,7 @@ against a live Postgres database with pgvector extension.
 """
 
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import numpy as np
@@ -762,6 +763,51 @@ class TestVectorStore:
             f"recall@{k} = {recall} below threshold; "
             f"pgvector={pgvector_ids} reference={reference_ids}"
         )
+
+    def test_get_many_returns_stored_vectors_for_unchanged_records(
+        self, pg_conn, fixture_records
+    ):
+        store = PGVectorStore(pg_conn)
+        store.upsert(fixture_records, model_name="test-model", dim=4)
+
+        stored = store.get_many(fixture_records, model_name="test-model", dim=4)
+
+        assert set(stored) == {record.storage_key for record in fixture_records}
+        for record in fixture_records:
+            assert stored[record.storage_key] == record.embedding
+
+    def test_get_many_omits_records_whose_content_changed_since_upsert(
+        self, pg_conn, fixture_records
+    ):
+        store = PGVectorStore(pg_conn)
+        store.upsert(fixture_records, model_name="test-model", dim=4)
+
+        changed = replace(fixture_records[0], body="Completely different content now.")
+        current_records = [changed, *fixture_records[1:]]
+
+        stored = store.get_many(current_records, model_name="test-model", dim=4)
+
+        assert changed.storage_key not in stored
+        for record in fixture_records[1:]:
+            assert record.storage_key in stored
+
+    def test_get_many_omits_records_with_no_stored_vector(self, pg_conn, fixture_records):
+        store = PGVectorStore(pg_conn)
+        store.upsert(fixture_records[:1], model_name="test-model", dim=4)
+
+        stored = store.get_many(fixture_records, model_name="test-model", dim=4)
+
+        assert set(stored) == {fixture_records[0].storage_key}
+
+    def test_get_many_returns_empty_for_unknown_model(self, pg_conn, fixture_records):
+        store = PGVectorStore(pg_conn)
+
+        assert store.get_many(fixture_records, model_name="never-indexed", dim=4) == {}
+
+    def test_get_many_empty_records_returns_empty_without_querying(self, pg_conn):
+        store = PGVectorStore(pg_conn)
+
+        assert store.get_many([], model_name="test-model", dim=4) == {}
 
 
 class TestKeywordStore:
