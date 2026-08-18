@@ -1456,6 +1456,126 @@ def test_a_stale_store_still_serves_searches(tmp_path: Path) -> None:
         assert backend.search_keyword("findable", 5)
 
 
+def _cosine_ranked_records() -> list[Record]:
+    """Five records with fixed embeddings giving a known cosine order vs [1, 0]."""
+    specs = [
+        ("a", [1.0, 0.0]),
+        ("b", [0.9, 0.1]),
+        ("c", [0.5, 0.5]),
+        ("d", [0.0, 1.0]),
+        ("e", [-1.0, 0.0]),
+    ]
+    records = []
+    for source_id, embedding in specs:
+        record = _record("note", source_id, source_id)
+        record.embedding = embedding
+        records.append(record)
+    return records
+
+
+def test_block_vector_search_agrees_with_snapshot_vector_search(tmp_path) -> None:
+    """The disk-streaming block path must rank and score identically to the
+    in-memory snapshot path for the same corpus and query."""
+    records = _cosine_ranked_records()
+
+    snapshot_backend = LocalRecordBackend(tmp_path / "snapshot.db")
+    snapshot_backend.upsert(records, "test", 2)
+
+    block_backend = LocalRecordBackend(
+        tmp_path / "block.db",
+        vector_snapshot_max_rows=2,
+        vector_snapshot_max_bytes=1_000_000,
+    )
+    block_backend.upsert(records, "test", 2)
+
+    snapshot_hits = snapshot_backend.search_vector(
+        [1.0, 0.0], 5, model_name="test", dim=2
+    )
+    block_hits = block_backend.search_vector(
+        [1.0, 0.0], 5, model_name="test", dim=2
+    )
+
+    assert [(hit.storage_key, hit.score) for hit in snapshot_hits] == [
+        (hit.storage_key, hit.score) for hit in block_hits
+    ]
+    assert [hit.source_id for hit in block_hits] == ["a", "b", "c", "d", "e"]
+
+
+def test_block_vector_search_paginates_across_multiple_batches(tmp_path) -> None:
+    """Force the block loop to run more than one iteration and still rank
+    correctly across the batch boundary."""
+    records = _cosine_ranked_records()
+    max_rows = 2
+    backend = LocalRecordBackend(
+        tmp_path / "records.db",
+        vector_snapshot_max_rows=max_rows,
+        vector_snapshot_max_bytes=1_000_000,
+    )
+    backend.upsert(records, "test", 2)
+    # batch_limit == vector_snapshot_max_rows here (bytes cap is not binding),
+    # so 5 records over a limit-2 page size cross at least 2 batch boundaries.
+    batch_limit = max_rows
+    assert len(records) > 2 * batch_limit
+
+    hits = backend.search_vector([1.0, 0.0], 5, model_name="test", dim=2)
+
+    assert [hit.source_id for hit in hits] == ["a", "b", "c", "d", "e"]
+
+
+def test_block_vector_search_trims_to_requested_top_k(tmp_path) -> None:
+    records = _cosine_ranked_records()
+    backend = LocalRecordBackend(
+        tmp_path / "records.db",
+        vector_snapshot_max_rows=2,
+        vector_snapshot_max_bytes=1_000_000,
+    )
+    backend.upsert(records, "test", 2)
+
+    hits = backend.search_vector([1.0, 0.0], 2, model_name="test", dim=2)
+
+    assert [hit.source_id for hit in hits] == ["a", "b"]
+
+
+def test_block_vector_search_applies_filters_per_batch(tmp_path) -> None:
+    """The block path re-applies filters batch by batch, unlike the snapshot
+    path's single mask over the whole matrix."""
+    records = _cosine_ranked_records()
+    for record in records:
+        record.metadata = {"keep": record.source_id in {"a", "c", "e"}}
+    backend = LocalRecordBackend(
+        tmp_path / "records.db",
+        vector_snapshot_max_rows=2,
+        vector_snapshot_max_bytes=1_000_000,
+    )
+    backend.upsert(records, "test", 2)
+
+    hits = backend.search_vector(
+        [1.0, 0.0],
+        5,
+        model_name="test",
+        dim=2,
+        filters={"metadata_equals": {"keep": True}},
+    )
+
+    assert [hit.source_id for hit in hits] == ["a", "c", "e"]
+
+
+def test_block_vector_search_returns_all_available_when_k_exceeds_corpus(
+    tmp_path,
+) -> None:
+    records = _cosine_ranked_records()
+    backend = LocalRecordBackend(
+        tmp_path / "records.db",
+        vector_snapshot_max_rows=2,
+        vector_snapshot_max_bytes=1_000_000,
+    )
+    backend.upsert(records, "test", 2)
+
+    hits = backend.search_vector([1.0, 0.0], 100, model_name="test", dim=2)
+
+    assert [hit.source_id for hit in hits] == ["a", "b", "c", "d", "e"]
+
+
 def test_marking_the_identity_current_survives_reopening(tmp_path: Path) -> None:
     db_path = tmp_path / "records.db"
     with LocalRecordBackend(db_path) as backend:
