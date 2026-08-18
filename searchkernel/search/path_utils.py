@@ -1,6 +1,6 @@
 import logging
 import os
-from functools import cache
+from functools import cache, lru_cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def compute_doc_id(file_path: Path, docs_root: Path) -> str:
 
 def compute_doc_id_multi_root(file_path: Path, docs_roots: list[Path]) -> str:
     """Compute document ID relative to the common ancestor of multiple roots."""
-    resolved_path = file_path.resolve()
+    resolved_path = _canonical_path(str(file_path))
     common_root = _compute_common_docs_root(docs_roots)
 
     if common_root is None:
@@ -78,6 +78,13 @@ def compute_doc_id_multi_root(file_path: Path, docs_roots: list[Path]) -> str:
         docs_roots,
     )
     return compute_doc_id(resolved_path, common_root)
+
+
+@lru_cache(maxsize=8192)
+def _canonical_path(path: str) -> Path:
+    # Bounded because a long-lived daemon canonicalizes every indexed file,
+    # and the same paths recur across every link in a corpus.
+    return Path(path).resolve()
 
 
 @cache
