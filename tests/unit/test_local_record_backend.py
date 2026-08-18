@@ -1396,3 +1396,75 @@ def test_repeated_graph_upsert_does_not_advance_epoch(tmp_path) -> None:
     graph.upsert_edges([edge])
 
     assert graph.graph_epoch() == epoch
+
+
+def _set_identity_marker(db_path: Path, value: str | None) -> None:
+    connection = sqlite3.connect(db_path)
+    if value is None:
+        connection.execute(
+            "DELETE FROM system_state WHERE key = ?",
+            (local_indices._RECORD_IDENTITY_VERSION_KEY,),
+        )
+    else:
+        connection.execute(
+            "UPDATE system_state SET value = ? WHERE key = ?",
+            (value, local_indices._RECORD_IDENTITY_VERSION_KEY),
+        )
+    connection.commit()
+    connection.close()
+
+
+def test_new_store_is_not_stale(tmp_path: Path) -> None:
+    with LocalRecordBackend(tmp_path / "records.db") as backend:
+        assert backend.record_identity_stale is False
+
+
+def test_store_written_without_a_marker_is_stale(tmp_path: Path) -> None:
+    """A populated store predating the marker cannot be assumed current."""
+    db_path = tmp_path / "records.db"
+    with LocalRecordBackend(db_path) as backend:
+        backend.index([_record("notes", "doc", "body")])
+    _set_identity_marker(db_path, None)
+
+    with LocalRecordBackend(db_path) as backend:
+        assert backend.record_identity_stale is True
+
+
+@pytest.mark.parametrize("marker", ("1", "banana", ""))
+def test_store_written_under_another_identity_scheme_is_stale(
+    tmp_path: Path, marker: str
+) -> None:
+    """An older or unreadable marker cannot prove the store is current."""
+    db_path = tmp_path / "records.db"
+    with LocalRecordBackend(db_path):
+        pass
+    _set_identity_marker(db_path, marker)
+
+    with LocalRecordBackend(db_path) as backend:
+        assert backend.record_identity_stale is True
+
+
+def test_a_stale_store_still_serves_searches(tmp_path: Path) -> None:
+    """Reporting staleness must not cost the caller access to their data."""
+    db_path = tmp_path / "records.db"
+    with LocalRecordBackend(db_path) as backend:
+        backend.index([_record("notes", "doc", "findable body")])
+    _set_identity_marker(db_path, "1")
+
+    with LocalRecordBackend(db_path) as backend:
+        assert backend.record_identity_stale is True
+        assert backend.search_keyword("findable", 5)
+
+
+def test_marking_the_identity_current_survives_reopening(tmp_path: Path) -> None:
+    db_path = tmp_path / "records.db"
+    with LocalRecordBackend(db_path) as backend:
+        backend.index([_record("notes", "doc", "body")])
+    _set_identity_marker(db_path, "1")
+
+    with LocalRecordBackend(db_path) as backend:
+        backend.mark_record_identity_current()
+        assert backend.record_identity_stale is False
+
+    with LocalRecordBackend(db_path) as backend:
+        assert backend.record_identity_stale is False
