@@ -62,6 +62,7 @@ from searchkernel.ports.freshness import (
 )
 from searchkernel.ports.graph import BatchGraphStore
 from searchkernel.ports.index_manager import IndexManagerPort
+from searchkernel.ports.keyword_scoring import KeywordArtifactScorer
 from searchkernel.ports.llm import LLMProvider
 from searchkernel.ports.orchestrator_config import OrchestratorConfig
 from searchkernel.ports.record_search import (
@@ -144,6 +145,7 @@ __all__ = [
     "IngestionError",
     "IngestionFailureMode",
     "IngestionReceipt",
+    "KeywordArtifactScorer",
     "KeywordStore",
     "LLMProvider",
     "ModelBackupStore",
