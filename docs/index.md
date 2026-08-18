@@ -13,6 +13,8 @@ short.
   ingestion, search outcomes, and optional integrations.
 - [Lifecycle and ownership](lifecycle.md) — close local compositions and
   distinguish owned from injected resources.
+- [Upgrading](upgrading.md) — breaking changes by release and what each one
+  requires, including when a stored index must be rebuilt.
 - [Retrieval evaluation](evaluation.md) — metric semantics, duplicate result
   reporting, and labeled corpus contracts.
 - [Federated search](guides/federated-search.md) — combine compatible local or
