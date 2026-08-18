@@ -1,7 +1,22 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from searchkernel.adapters.rerank.cascading import CascadingReranker
-from searchkernel.ports.rerank import Reranker
+from searchkernel.domain import Record
+from searchkernel.ports.rerank import RecordReranker, Reranker
+
+
+def _record(source_id: str) -> Record:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    return Record(
+        source_kind="test",
+        source_id=source_id,
+        title=source_id,
+        body=f"body for {source_id}",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
 
 
 class _FakeReranker:
@@ -12,6 +27,17 @@ class _FakeReranker:
 
     def rerank(self, query: str, documents: list[str]) -> list[float]:
         self.calls.append(list(documents))
+        return list(self._scores)
+
+
+class _FakeRecordReranker:
+    def __init__(self, model_name: str, scores: list[float]) -> None:
+        self.model_name = model_name
+        self._scores = scores
+        self.calls: list[list[str]] = []
+
+    def rerank_records(self, query: str, records: list[Record]) -> list[float]:
+        self.calls.append([record.source_id for record in records])
         return list(self._scores)
 
 
@@ -264,3 +290,41 @@ def test_constructor_rejects_invalid_confidence_gap(confidence_gap: float) -> No
             escalate_top_n=2,
             confidence_gap=confidence_gap,
         )
+
+
+def test_implements_record_reranker_protocol() -> None:
+    cascade, _, _ = _cascade([0.9, 0.1], [0.5, 0.5])
+    assert isinstance(cascade, RecordReranker)
+
+
+def test_rerank_records_passes_records_to_record_aware_tiers() -> None:
+    records = [_record("a"), _record("b"), _record("c")]
+    fast = _FakeRecordReranker("fast-model", [0.80, 0.85, 0.78])
+    slow = _FakeRecordReranker("slow-model", [0.2, 0.9])
+    cascade = CascadingReranker(fast, slow, escalate_top_n=2, confidence_gap=0.1)
+
+    cascade.rerank_records("q", records)
+
+    assert fast.calls == [["a", "b", "c"]]
+    assert slow.calls == [["b", "a"]]  # top 2 by fast score, fast-rank order
+
+
+def test_rerank_records_falls_back_to_text_for_plain_rerankers() -> None:
+    """A tier without rerank_records still gets scored, via flattened text."""
+    records = [_record("a"), _record("b")]
+    fast = _FakeReranker("fast-model", [0.9, 0.1])
+    slow = _FakeReranker("slow-model", [])
+    cascade = CascadingReranker(fast, slow, escalate_top_n=2, confidence_gap=0.5)
+
+    scores = cascade.rerank_records("q", records)
+
+    assert scores == [0.9, 0.1]
+    assert fast.calls == [["a\nbody for a", "b\nbody for b"]]
+
+
+def test_rerank_records_empty_returns_empty_without_scoring() -> None:
+    cascade, fast, slow = _cascade([], [])
+
+    assert cascade.rerank_records("q", []) == []
+    assert fast.calls == []
+    assert slow.calls == []

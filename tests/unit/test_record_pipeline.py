@@ -74,3 +74,38 @@ async def test_reranking_bypasses_empty_text_and_preserves_position_and_score() 
     assert outcome.results[0].score == pytest.approx(1 / 61)
     assert reranker.documents == ["indexed\nsear", "body\nfallbac"]
     assert "reranker_bypassed_empty_text" in outcome.diagnostics
+
+
+@pytest.mark.asyncio
+async def test_reranking_prefers_record_reranker_over_plain_text() -> None:
+    """A RecordReranker receives full Records instead of flattened text."""
+    records = {
+        "empty": _record("empty", title="", body=""),
+        "indexed": _record(
+            "indexed", title="indexed", body="raw body", indexed_text="search text"
+        ),
+        "body": _record("body", title="body", body="fallback body"),
+    }
+
+    class IdentityAwareReranker:
+        model_name = "test-record-reranker"
+
+        def __init__(self) -> None:
+            self.received: list[Record] = []
+
+        def rerank_records(self, query: str, records: list[Record]) -> list[float]:
+            del query
+            self.received = records
+            return [0.1, 0.9]
+
+    reranker = IdentityAwareReranker()
+    pipeline = RecordSearchPipeline(
+        keyword_store=_KeywordStore(),
+        hydrator=lambda identity: records.get(identity.source_id),
+        reranker=reranker,
+        config=RecordSearchConfig(rerank_budget=3),
+    )
+
+    await pipeline.async_search("query", limit=3)
+
+    assert [record.source_id for record in reranker.received] == ["indexed", "body"]
