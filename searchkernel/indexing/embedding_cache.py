@@ -90,11 +90,9 @@ class SQLiteEmbeddingCache:
             invalid: list[str] = []
             for content_hash, encoded in rows:
                 try:
-                    vector = self._validated_vector(self._decode_vector(encoded))
+                    result[content_hash] = self._decode_vector(encoded)
                 except (ValueError, TypeError):
                     invalid.append(content_hash)
-                    continue
-                result[content_hash] = list(vector)
 
             if invalid:
                 self._connection.executemany(
@@ -248,12 +246,17 @@ class SQLiteEmbeddingCache:
             except FileNotFoundError:
                 pass
 
-    def _decode_vector(self, encoded: object) -> tuple[float, ...]:
+    def _decode_vector(self, encoded: object) -> list[float]:
         if not isinstance(encoded, bytes):
             raise TypeError("embedding vector must be stored as bytes")
         if self.dimension and len(encoded) != self.dimension * 4:
             raise ValueError("embedding vector has unexpected byte length")
-        return tuple(float(value) for value in np.frombuffer(encoded, dtype="<f4"))
+        packed = np.frombuffer(encoded, dtype="<f4")
+        if not packed.size or not np.isfinite(packed).all():
+            raise ValueError("embedding vector must contain finite values")
+        if self.dimension and packed.size != self.dimension:
+            raise ValueError("embedding vector has unexpected dimension")
+        return packed.tolist()
 
     def _validated_vector(self, vector: Sequence[float]) -> tuple[float, ...]:
         try:
