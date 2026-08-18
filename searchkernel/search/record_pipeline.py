@@ -1111,15 +1111,6 @@ class RecordSearchPipeline:
         execution = self._begin_search(query, limit, filters)
         if execution is None:
             return RecordSearchOutcome()
-        filters = execution.filters
-        failures = execution.failures
-        missing_record_ids = execution.missing_record_ids
-        cache_diagnostics = execution.cache_diagnostics
-        diagnostics = execution.diagnostics
-        candidate_counts = execution.candidate_counts
-        raw_pre_fusion_overlap = execution.raw_pre_fusion_overlap
-        trace = execution.trace
-
         self._plan_query(execution)
         plan = execution.plan
         await self._load_cached_candidates(execution)
@@ -1145,8 +1136,6 @@ class RecordSearchPipeline:
                 await self._acquire_parallel_candidates(execution)
 
             self._fuse_candidates(execution)
-            raw_pre_fusion_overlap = execution.raw_pre_fusion_overlap
-            candidate_counts = execution.candidate_counts
 
             self._reroute_for_adaptive_graph(execution)
             plan = execution.plan
@@ -1162,16 +1151,30 @@ class RecordSearchPipeline:
 
             await self._store_acquired_candidates(execution)
             candidates = execution.candidates
-            raw_pre_fusion_overlap = execution.raw_pre_fusion_overlap
 
         result_limit = await self._hydrate_results(execution)
         await self._refine_results(execution, result_limit)
-        hydrated = execution.hydrated
 
+        return self._build_outcome(execution)
+
+    def _build_outcome(self, execution: _SearchExecution) -> RecordSearchOutcome:
+        """Close the trace, collect stage timings, and assemble the outcome.
+
+        The trace must be closed before timings are read, since closing is
+        what finalises ``total_duration_ms``. Every mutable container here
+        (``failures``, ``missing_record_ids``, ``cache_diagnostics``,
+        ``diagnostics``, ``candidate_counts``) is read from ``execution`` at
+        this single point, after every prior stage's in-place mutation or
+        attribute reassignment — this is the last chance for an aliasing
+        mistake made upstream to surface.
+        """
+        plan = execution.routed_plan
+        trace = execution.trace
+        hydrated = execution.hydrated
         if trace is not None:
             trace.provenance = {
                 **(trace.provenance or {}),
-                "diagnostics": tuple(diagnostics),
+                "diagnostics": tuple(execution.diagnostics),
             }
             trace.close()
         stage_timings_ms: dict[str, float] = {}
@@ -1188,27 +1191,27 @@ class RecordSearchPipeline:
 
         return RecordSearchOutcome(
             results=tuple(hydrated),
-            failures=tuple(failures),
-            missing_record_ids=tuple(missing_record_ids),
-            cache_diagnostics=tuple(cache_diagnostics),
-            diagnostics=tuple(diagnostics),
-            candidate_count=len(candidates),
-            candidate_counts=candidate_counts,
+            failures=tuple(execution.failures),
+            missing_record_ids=tuple(execution.missing_record_ids),
+            cache_diagnostics=tuple(execution.cache_diagnostics),
+            diagnostics=tuple(execution.diagnostics),
+            candidate_count=len(execution.acquired_candidates),
+            candidate_counts=execution.candidate_counts,
             stage_timings_ms=stage_timings_ms,
             trace=trace,
             diagnostic_evidence=RecordSearchDiagnostics(
                 enabled_lanes=plan.enabled_lanes,
                 lane_budgets=plan.lane_budgets,
                 skipped_lanes=plan.diagnostic_skip_decisions,
-                failures=tuple(failures),
-                missing_record_ids=tuple(missing_record_ids),
+                failures=tuple(execution.failures),
+                missing_record_ids=tuple(execution.missing_record_ids),
                 stage_timings_ms=stage_timings_ms,
                 result_provenance={
                     result.storage_key: result.provenance.strategies
                     for result in hydrated
                 },
                 final_duplicate_count=_duplicate_count(hydrated),
-                raw_pre_fusion_overlap=raw_pre_fusion_overlap,
+                raw_pre_fusion_overlap=execution.raw_pre_fusion_overlap,
             ),
         )
 
