@@ -598,7 +598,8 @@ class TestSQLiteEmbeddingCache:
             ).fetchall()
             assert remaining == []
 
-    def test_old_format_cache_file_still_opens(self) -> None:
+    def test_cache_predating_float32_storage_is_discarded(self) -> None:
+        """A text-vector cache serves no hits, so it is dropped rather than kept."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "cache.db"
             connection = sqlite3.connect(str(path))
@@ -608,10 +609,13 @@ class TestSQLiteEmbeddingCache:
                 "dimension INTEGER NOT NULL, vector TEXT NOT NULL, "
                 "PRIMARY KEY (namespace, content_hash))"
             )
-            connection.execute(
+            connection.executemany(
                 "INSERT INTO embeddings "
                 "(namespace, content_hash, dimension, vector) VALUES (?, ?, ?, ?)",
-                ("namespace-1", "legacy-hash", 3, json.dumps([0.1, 0.2, 0.3])),
+                [
+                    ("namespace-1", "legacy-hash", 3, json.dumps([0.1, 0.2, 0.3])),
+                    ("namespace-1", "untouched-hash", 3, json.dumps([0.4, 0.5, 0.6])),
+                ],
             )
             connection.commit()
             connection.close()
@@ -619,6 +623,17 @@ class TestSQLiteEmbeddingCache:
             cache = SQLiteEmbeddingCache(path, "namespace-1", dimension=3)
 
             assert cache.get_many(["legacy-hash"]) == {}
+            assert cache.metrics.invalidations == 1
+
+            # The whole file goes, not just the row that happened to be read;
+            # otherwise unread legacy rows accumulate forever.
+            inspector = sqlite3.connect(str(path))
+            retained = inspector.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+            inspector.close()
+            assert retained == 0
+
+            cache.put_many({"fresh-hash": [0.1, 0.2, 0.3]})
+            assert list(cache.get_many(["fresh-hash"])) == ["fresh-hash"]
 
     def test_put_many_rejects_values_too_large_for_float32(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
