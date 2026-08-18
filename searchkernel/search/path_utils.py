@@ -72,12 +72,20 @@ def compute_doc_id_multi_root(file_path: Path, docs_roots: list[Path]) -> str:
         except ValueError:
             continue
 
-    logger.warning(
-        "File %s is outside configured document roots %s. Falling back to common ancestor.",
-        file_path,
-        docs_roots,
-    )
+    _warn_outside_docs_roots(str(file_path), len(docs_roots))
     return compute_doc_id(resolved_path, common_root)
+
+
+@lru_cache(maxsize=1024)
+def _warn_outside_docs_roots(file_path: str, root_count: int) -> None:
+    # Cached so a corpus-wide rebuild reports each stray path once instead of
+    # once per link that mentions it.
+    logger.warning(
+        "File %s is outside the %d configured document roots. "
+        "Falling back to common ancestor.",
+        file_path,
+        root_count,
+    )
 
 
 @lru_cache(maxsize=8192)
