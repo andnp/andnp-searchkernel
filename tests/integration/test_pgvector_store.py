@@ -1141,6 +1141,73 @@ class TestGraphStore:
             ]
         }
 
+    def test_batch_graph_traversal_preserves_direction_identity_and_order(
+        self, pg_conn
+    ):
+        """Batch traversal handles multiple seeds and recursive graph semantics.
+
+        Incoming traversal must preserve canonical seed keys, best-path weights,
+        cycle prevention, and deterministic ties while matching single-seed
+        outgoing traversal.
+        """
+        store = PGGraphStore(pg_conn)
+        target_a = RecordIdentity("workspace-a", "note", "shared")
+        target_b = RecordIdentity("workspace-b", "note", "shared")
+        inbound_a = RecordIdentity("workspace-a", "note", "inbound-a")
+        inbound_b = RecordIdentity("workspace-a", "note", "inbound-b")
+        upstream = RecordIdentity("workspace-a", "note", "upstream")
+
+        store.upsert_edges(
+            [
+                GraphEdge(inbound_b, target_a, "links", 0.9),
+                GraphEdge(inbound_a, target_a, "links", 0.9),
+                GraphEdge(upstream, inbound_a, "links", 0.8),
+                GraphEdge(target_a, inbound_a, "links", 0.7),
+                GraphEdge(target_a, target_b, "links", 0.6),
+            ]
+        )
+
+        expected_a = [
+            GraphNeighbor(inbound_a, "links", pytest.approx(0.9)),
+            GraphNeighbor(inbound_b, "links", pytest.approx(0.9)),
+            GraphNeighbor(upstream, "links", pytest.approx(0.72)),
+        ]
+        expected_b = [
+            GraphNeighbor(target_a, "links", pytest.approx(0.6)),
+            GraphNeighbor(inbound_a, "links", pytest.approx(0.54)),
+            GraphNeighbor(inbound_b, "links", pytest.approx(0.54)),
+            GraphNeighbor(upstream, "links", pytest.approx(0.432)),
+        ]
+
+        incoming = store.incoming_neighbors_many(
+            [target_a, target_a, target_b], depth=3
+        )
+        assert list(incoming) == [target_a.storage_key, target_b.storage_key]
+        for seed, expected in ((target_a, expected_a), (target_b, expected_b)):
+            assert [neighbor.identity for neighbor in incoming[seed.storage_key]] == [
+                neighbor.identity for neighbor in expected
+            ]
+            assert [neighbor.edge_type for neighbor in incoming[seed.storage_key]] == [
+                neighbor.edge_type for neighbor in expected
+            ]
+            assert [neighbor.weight for neighbor in incoming[seed.storage_key]] == [
+                neighbor.weight for neighbor in expected
+            ]
+        assert store.incoming_neighbors_many([], depth=1) == {}
+        assert store.neighbors_many(
+            [inbound_a, inbound_b], depth=1
+        ) == {
+            inbound_a.storage_key: [
+                GraphNeighbor(target_a, "links", pytest.approx(0.9))
+            ],
+            inbound_b.storage_key: [
+                GraphNeighbor(target_a, "links", pytest.approx(0.9))
+            ],
+        }
+        assert store.neighbors_many([inbound_a], depth=2) == {
+            inbound_a.storage_key: list(store.neighbors(inbound_a, depth=2))
+        }
+
     def test_edge_upsert_updates_weight_and_missing_neighbors_are_empty(self, pg_conn):
         """Test graph edge conflict updates and empty lookups."""
         store = PGGraphStore(pg_conn)

@@ -1913,16 +1913,44 @@ class PGGraphStore:
         depth: int,
         max_neighbors: int | None = None,
     ) -> dict[str, list[GraphNeighbor]]:
+        return self._neighbors_many_direction(
+            identities,
+            depth=depth,
+            max_neighbors=max_neighbors,
+            incoming=False,
+        )
+
+    def incoming_neighbors_many(
+        self,
+        identities: Sequence[RecordIdentity],
+        *,
+        depth: int,
+        max_neighbors: int | None = None,
+    ) -> dict[str, list[GraphNeighbor]]:
+        return self._neighbors_many_direction(
+            identities,
+            depth=depth,
+            max_neighbors=max_neighbors,
+            incoming=True,
+        )
+
+    def _neighbors_many_direction(
+        self,
+        identities: Sequence[RecordIdentity],
+        *,
+        depth: int,
+        max_neighbors: int | None,
+        incoming: bool,
+    ) -> dict[str, list[GraphNeighbor]]:
         """Retrieve neighbors for all seeds with one recursive query."""
         if depth < 1:
             raise ValueError("depth must be positive")
         if max_neighbors is not None and max_neighbors <= 0:
             raise ValueError("max_neighbors must be positive")
-        unique_keys = list(dict.fromkeys(identity.storage_key for identity in identities))
-        seed_identities = [
-            next(identity for identity in identities if identity.storage_key == key)
-            for key in unique_keys
-        ]
+        seed_identities_by_key: dict[str, RecordIdentity] = {}
+        for identity in identities:
+            seed_identities_by_key.setdefault(identity.storage_key, identity)
+        seed_identities = list(seed_identities_by_key.values())
         result: dict[str, list[GraphNeighbor]] = {
             identity.storage_key: [] for identity in seed_identities
         }
@@ -1948,13 +1976,19 @@ class PGGraphStore:
             if max_neighbors is not None:
                 limit_clause = "WHERE neighbor_number <= %s"
                 params.append(max_neighbors)
+            seed_workspace = "target_workspace_id" if incoming else "source_workspace_id"
+            seed_kind = "target_kind" if incoming else "source_kind"
+            seed_id = "target_id" if incoming else "source_id"
+            neighbor_workspace = "source_workspace_id" if incoming else "target_workspace_id"
+            neighbor_kind = "source_kind" if incoming else "target_kind"
+            neighbor_id = "source_id" if incoming else "target_id"
             sql = f"""
                 WITH RECURSIVE seeds(workspace_id, source_kind, source_id) AS (
                     VALUES {values}
                 ), walk AS (
                     SELECT s.workspace_id AS seed_workspace_id,
                            s.source_kind AS seed_kind, s.source_id AS seed_id,
-                           e.target_workspace_id, e.target_kind, e.target_id,
+                           e.{neighbor_workspace}, e.{neighbor_kind}, e.{neighbor_id},
                            e.edge_type, e.weight, 1 AS hop,
                            ARRAY[concat_ws(E'\\x1f', e.source_workspace_id,
                                            e.source_kind, e.source_id),
@@ -1962,48 +1996,51 @@ class PGGraphStore:
                                            e.target_kind, e.target_id)] AS path
                     FROM seeds s
                     JOIN graph_edges e
-                      ON e.source_workspace_id = s.workspace_id
-                     AND e.source_kind = s.source_kind
-                     AND e.source_id = s.source_id
+                      ON e.{seed_workspace} = s.workspace_id
+                     AND e.{seed_kind} = s.source_kind
+                     AND e.{seed_id} = s.source_id
                     UNION ALL
                     SELECT w.seed_workspace_id, w.seed_kind, w.seed_id,
-                           e.target_workspace_id, e.target_kind, e.target_id,
+                           e.{neighbor_workspace}, e.{neighbor_kind}, e.{neighbor_id},
                            e.edge_type, w.weight * e.weight, w.hop + 1,
                            w.path || ARRAY[concat_ws(E'\\x1f',
+                                                     e.source_workspace_id,
+                                                     e.source_kind, e.source_id),
+                                           concat_ws(E'\\x1f',
                                                      e.target_workspace_id,
                                                      e.target_kind, e.target_id)]
                     FROM walk w
                     JOIN graph_edges e
-                      ON e.source_workspace_id = w.target_workspace_id
-                     AND e.source_kind = w.target_kind
-                     AND e.source_id = w.target_id
+                      ON e.{seed_workspace} = w.{neighbor_workspace}
+                     AND e.{seed_kind} = w.{neighbor_kind}
+                     AND e.{seed_id} = w.{neighbor_id}
                     WHERE w.hop < %s
-                      AND NOT concat_ws(E'\\x1f', e.target_workspace_id,
-                                        e.target_kind, e.target_id) = ANY(w.path)
+                      AND NOT concat_ws(E'\\x1f', e.{neighbor_workspace},
+                                        e.{neighbor_kind}, e.{neighbor_id}) = ANY(w.path)
                 ), best AS (
                     SELECT *, ROW_NUMBER() OVER (
                         PARTITION BY seed_workspace_id, seed_kind, seed_id,
-                                     target_workspace_id, target_kind, target_id
+                                     {neighbor_workspace}, {neighbor_kind}, {neighbor_id}
                         ORDER BY weight DESC, edge_type
                     ) AS target_number
                     FROM walk
                 ), ranked AS (
                     SELECT *, ROW_NUMBER() OVER (
                         PARTITION BY seed_workspace_id, seed_kind, seed_id
-                        ORDER BY weight DESC, target_workspace_id,
-                                 target_kind, target_id, edge_type
+                        ORDER BY weight DESC, {neighbor_workspace},
+                                 {neighbor_kind}, {neighbor_id}, edge_type
                     ) AS neighbor_number
                     FROM best
                     WHERE target_number = 1
                 )
                 SELECT seed_workspace_id, seed_kind, seed_id,
-                       target_workspace_id, target_kind, target_id,
+                       {neighbor_workspace}, {neighbor_kind}, {neighbor_id},
                        edge_type, weight
                 FROM ranked
                 {limit_clause}
                 ORDER BY seed_workspace_id, seed_kind, seed_id,
-                         weight DESC, target_workspace_id, target_kind,
-                         target_id, edge_type;
+                         weight DESC, {neighbor_workspace}, {neighbor_kind},
+                         {neighbor_id}, edge_type;
             """
             cursor.execute(sql, params)
             for row in cursor.fetchall():
@@ -2022,29 +2059,6 @@ class PGGraphStore:
             if cursor is not None:
                 cursor.close()
             self.conn_pool.put_connection(conn)
-
-
-    def incoming_neighbors_many(
-        self,
-        identities: Sequence[RecordIdentity],
-        *,
-        depth: int,
-        max_neighbors: int | None = None,
-    ) -> dict[str, list[GraphNeighbor]]:
-        unique_identities = list(
-            dict.fromkeys(identity.storage_key for identity in identities)
-        )
-        by_key = {identity.storage_key: identity for identity in identities}
-        return {
-            storage_key: list(
-                self.incoming_neighbors(
-                    by_key[storage_key],
-                    depth=depth,
-                    max_neighbors=max_neighbors,
-                )
-            )
-            for storage_key in unique_identities
-        }
 
 
 class PGCacheStore:
