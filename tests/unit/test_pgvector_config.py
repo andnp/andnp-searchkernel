@@ -155,12 +155,14 @@ def test_upsert_submits_records_with_one_psycopg3_bulk_call() -> None:
 
     store.upsert(records, model_name="test-model", dim=3)
 
-    assert len(cursor.executemany_calls) == 2
+    assert len(cursor.executemany_calls) == 1
     record_calls = [
         call for call in cursor.executemany_calls if "INSERT INTO records" in str(call[0])
     ]
-    vector_calls = [call for call in cursor.executemany_calls if call not in record_calls]
     assert len(record_calls) == 1
+    vector_calls = [
+        call for call in cursor.executed if "RETURNING record_id" in str(call[0])
+    ]
     assert len(vector_calls) == 1
     statement, rows = record_calls[0]
     assert "INSERT INTO records" in str(statement)
