@@ -1859,14 +1859,14 @@ class _RecordWriter:
         self,
         conn: sqlite3.Connection,
         records: Sequence[Record],
-    ) -> None:
+    ) -> bool:
         chunk_rows = [
             values
             for record in records
             if (values := self._chunk_state_values(record)) is not None
         ]
         if not chunk_rows:
-            return
+            return False
         parent_keys = sorted({row[1] for row in chunk_rows})
         incoming_keys = {row[0] for row in chunk_rows}
         placeholders = ",".join("?" for _ in parent_keys)
@@ -1922,12 +1922,13 @@ class _RecordWriter:
             """,
             chunk_rows,
         )
+        return bool(stale_rows)
 
     def _write_records(
         self,
         conn: sqlite3.Connection,
         rows: list[Record],
-    ) -> None:
+    ) -> tuple[bool, bool]:
         keys = list(dict.fromkeys(record.storage_key for record in rows))
         old_rows: dict[str, sqlite3.Row] = {}
         for key_chunk in LocalRecordBackend._key_chunks(keys):
@@ -1937,7 +1938,9 @@ class _RecordWriter:
                     row["storage_key"]: row
                     for row in conn.execute(
                         f"""
-                        SELECT storage_key, rowid, title, body, indexed_text, uri, keywords
+                        SELECT storage_key, rowid, workspace_id, source_kind, source_id,
+                               title, body, indexed_text, created_at, updated_at,
+                               metadata, uri, keywords, status
                         FROM local_records
                         WHERE storage_key IN ({placeholders})
                         """,
@@ -1945,6 +1948,53 @@ class _RecordWriter:
                     ).fetchall()
                 }
             )
+
+        canonical_values = {
+            key: tuple(
+                row[column]
+                for column in (
+                    "workspace_id",
+                    "source_kind",
+                    "source_id",
+                    "title",
+                    "body",
+                    "indexed_text",
+                    "created_at",
+                    "updated_at",
+                    "metadata",
+                    "uri",
+                    "keywords",
+                    "status",
+                )
+            )
+            for key, row in old_rows.items()
+        }
+        changed_rows: list[Record] = []
+        fts_changed_keys: set[str] = set()
+        keyword_changed = False
+        for record in rows:
+            values = self._record_values(record)
+            previous = canonical_values.get(record.storage_key)
+            if previous == values[1:]:
+                continue
+            changed_rows.append(record)
+            canonical_values[record.storage_key] = values[1:]
+            if previous is None or (
+                previous[3] != values[4]
+                or (previous[5] or previous[4]) != (values[6] or values[5])
+                or previous[9] != values[10]
+                or previous[10] != values[11]
+            ):
+                fts_changed_keys.add(record.storage_key)
+            if previous is None or (
+                previous[3] != values[4]
+                or (previous[5] or previous[4]) != (values[6] or values[5])
+                or previous[8] != values[9]
+                or previous[9] != values[10]
+                or previous[10] != values[11]
+                or previous[11] != values[12]
+            ):
+                keyword_changed = True
 
         if self._fts5_available():
             conn.executemany(
@@ -1961,35 +2011,40 @@ class _RecordWriter:
                         row["uri"],
                         row["keywords"],
                     )
-                    for row in old_rows.values()
+                    for key in keys
+                    if key in old_rows and key in fts_changed_keys
+                    for row in [old_rows[key]]
                 ],
             )
-        conn.executemany(
-            """
-            INSERT INTO local_records (
-                storage_key, workspace_id, source_kind, source_id, title, body,
-                indexed_text, created_at, updated_at, metadata, uri, keywords, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(storage_key) DO UPDATE SET
-                workspace_id = excluded.workspace_id,
-                source_kind = excluded.source_kind,
-                source_id = excluded.source_id,
-                title = excluded.title,
-                body = excluded.body,
-                indexed_text = excluded.indexed_text,
-                created_at = excluded.created_at,
-                updated_at = excluded.updated_at,
-                metadata = excluded.metadata,
-                uri = excluded.uri,
-                keywords = excluded.keywords,
-                status = excluded.status
-            """,
-            [self._record_values(record) for record in rows],
-        )
+        if changed_rows:
+            conn.executemany(
+                """
+                INSERT INTO local_records (
+                    storage_key, workspace_id, source_kind, source_id, title, body,
+                    indexed_text, created_at, updated_at, metadata, uri, keywords, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(storage_key) DO UPDATE SET
+                    workspace_id = excluded.workspace_id,
+                    source_kind = excluded.source_kind,
+                    source_id = excluded.source_id,
+                    title = excluded.title,
+                    body = excluded.body,
+                    indexed_text = excluded.indexed_text,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    metadata = excluded.metadata,
+                    uri = excluded.uri,
+                    keywords = excluded.keywords,
+                    status = excluded.status
+                """,
+                [self._record_values(record) for record in changed_rows],
+            )
 
         if self._fts5_available():
             new_rows: list[sqlite3.Row] = []
-            for key_chunk in LocalRecordBackend._key_chunks(keys):
+            for key_chunk in LocalRecordBackend._key_chunks(
+                [key for key in keys if key in fts_changed_keys]
+            ):
                 placeholders = ",".join("?" for _ in key_chunk)
                 new_rows.extend(
                     conn.execute(
@@ -2018,7 +2073,11 @@ class _RecordWriter:
                     for row in new_rows
                 ],
             )
-        self._sync_chunk_state(conn, rows)
+        stale_rows_removed = self._sync_chunk_state(conn, rows)
+        return (
+            bool(changed_rows) or stale_rows_removed,
+            keyword_changed or stale_rows_removed,
+        )
 
     @staticmethod
     def _records_have_vectors(
@@ -2043,8 +2102,13 @@ class _RecordWriter:
             conn = self._access.connection()
             try:
                 vector_affected = self._records_have_vectors(conn, rows)
-                self._write_records(conn, rows)
-                _LocalEpochLane.bump(conn, keyword=True, vector=vector_affected)
+                record_changed, keyword_changed = self._write_records(conn, rows)
+                if keyword_changed or (vector_affected and record_changed):
+                    _LocalEpochLane.bump(
+                        conn,
+                        keyword=keyword_changed,
+                        vector=vector_affected and record_changed,
+                    )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -2594,7 +2658,7 @@ class LocalRecordBackend:
                             )
                         )
                 vector_affected = bool(packed_vectors)
-                self._record_writer._write_records(conn, rows)
+                _, keyword_changed = self._record_writer._write_records(conn, rows)
                 conn.executemany(
                     """
                     INSERT INTO local_vectors_v2 (
@@ -2622,7 +2686,7 @@ class LocalRecordBackend:
                 )
                 self._epoch_lane.bump(
                     conn,
-                    keyword=True,
+                    keyword=keyword_changed,
                     vector=vector_affected,
                 )
                 conn.commit()

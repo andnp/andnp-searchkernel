@@ -144,6 +144,127 @@ def test_local_keyword_searches_indexed_text_hydrates_raw_body(tmp_path) -> None
     assert hydrated.indexed_text == "search-only vocabulary"
 
 
+def test_repeated_canonical_sync_preserves_results_without_keyword_epoch_changes(
+    tmp_path,
+) -> None:
+    """Identical keyword and vector syncs preserve records.
+
+    Keyword synchronization must not churn canonical or keyword epochs.
+    """
+    backend, _keyword, vector, _graph = _backend(tmp_path)
+    record = _record("note", "repeat", "raw body", indexed_text="findable text")
+    record.embedding = [1.0, 0.0]
+
+    vector.upsert([record], "test", 2)
+    before = backend.epochs()
+    vector.upsert([record], "test", 2)
+    after_vector = backend.epochs()
+    backend.index([record])
+
+    assert after_vector["vector"] == before["vector"] + 1
+    assert backend.epochs() == after_vector
+    assert [hit.source_id for hit in backend.search_keyword("findable", 10)] == [
+        "repeat"
+    ]
+    hydrated = backend.hydrate_record(record.storage_key)
+    assert hydrated is not None
+    assert hydrated.body == "raw body"
+
+
+def test_changed_indexed_fields_update_keyword_results_and_hydrated_record(
+    tmp_path,
+) -> None:
+    """Indexed text, metadata keywords, and URI changes replace search data.
+
+    Hydration must expose the new canonical values after replacement.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    record = _record(
+        "note",
+        "changed",
+        "raw body",
+        indexed_text="old indexed text",
+        uri="docs/old-uri.md",
+        metadata={"tags": ["old-tag"]},
+    )
+    backend.index([record])
+
+    record.indexed_text = "new indexed text"
+    record.uri = "docs/new-uri.md"
+    record.metadata = {"tags": ["new-tag"]}
+    backend.index([record])
+
+    assert backend.search_keyword("old", 10) == []
+    assert [hit.source_id for hit in backend.search_keyword("new", 10)] == [
+        "changed"
+    ]
+    assert backend.search_keyword("old-tag", 10) == []
+    assert [hit.source_id for hit in backend.search_keyword("new-tag", 10)] == [
+        "changed"
+    ]
+    assert backend.search_keyword("old-uri", 10) == []
+    assert [hit.source_id for hit in backend.search_keyword("new-uri", 10)] == [
+        "changed"
+    ]
+    hydrated = backend.hydrate_record(record.storage_key)
+    assert hydrated is not None
+    assert hydrated.indexed_text == "new indexed text"
+    assert hydrated.uri == "docs/new-uri.md"
+
+
+def test_standalone_vector_upsert_creates_searchable_canonical_record(tmp_path) -> None:
+    """A vector-only write persists the canonical row.
+
+    The row must be available to keyword retrieval without a separate index call.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    record = _record("note", "vector-only", "vector-created body")
+    record.embedding = [1.0, 0.0]
+
+    backend.upsert([record], "test", 2)
+
+    assert [hit.source_id for hit in backend.search_keyword("vector-created", 10)] == [
+        "vector-only"
+    ]
+    assert backend.hydrate_record(record.storage_key) is not None
+
+
+def test_chunk_replacement_removes_stale_records_from_search_and_state(tmp_path) -> None:
+    """Replacing chunks removes stale canonical rows and keyword hits.
+
+    Chunk state must contain only the replacement set for the parent.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    parent = _record("note", "parent", "parent body")
+
+    def chunk(chunk_id: str, content: str, index: int) -> Record:
+        return _record(
+            "note",
+            f"parent#chunk:{chunk_id}",
+            content,
+            indexed_text=content,
+            metadata={
+                "_searchkernel_chunk": True,
+                "_chunk_parent_storage_key": parent.storage_key,
+                "_chunk_id": chunk_id,
+                "_chunk_index": index,
+                "_chunk_metadata": {"header_path": chunk_id},
+            },
+        )
+
+    first = chunk("first", "first needle", 0)
+    stale = chunk("stale", "stale needle", 1)
+    replacement = chunk("replacement", "replacement needle", 0)
+    backend.index([parent, first, stale])
+    backend.index([parent, replacement])
+
+    assert backend.search_keyword("stale", 10) == []
+    assert [hit.source_id for hit in backend.search_keyword("replacement", 10)] == [
+        replacement.source_id
+    ]
+    assert list(backend.chunk_records(parent.identity)) == [replacement.storage_key]
+
+
 def test_local_batch_hydration_and_graph_preserve_canonical_keys(tmp_path) -> None:
     backend, _keyword, _vector, graph = _backend(tmp_path)
     source = _record("note", "source", "source", workspace_id="one")
