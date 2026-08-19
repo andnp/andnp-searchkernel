@@ -14,7 +14,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, ClassVar, Protocol
+from typing import Any
 
 try:
     import psycopg2  # type: ignore[import-not-found]
@@ -32,6 +32,10 @@ except ImportError:
     psycopg = None  # type: ignore[assignment]
     psycopg_pool = None  # type: ignore[assignment]
 
+from searchkernel.adapters.stores.postgres_epochs import (
+    _POSTGRES_EPOCH_LANE,
+    _PostgresConnectionLike,
+)
 from searchkernel.domain import (
     GraphEdge,
     GraphNeighbor,
@@ -442,221 +446,6 @@ def _create_graph_indexes(cursor) -> None:
     )
 
 
-class _PostgresSession(Protocol):
-    def cursor(self) -> Any: ...
-
-    def commit(self) -> None: ...
-
-    def rollback(self) -> None: ...
-
-
-class _PostgresConnectionLike(Protocol):
-    def get_connection(self) -> _PostgresSession: ...
-
-    def put_connection(self, conn: _PostgresSession) -> None: ...
-
-
-class _PostgresEpochLane:
-    """Own epoch SQL shared by the PostgreSQL storage lanes."""
-
-    _LANE_COLUMNS: ClassVar[dict[str, str]] = {
-        "keyword": "keyword_epoch",
-        "vector": "vector_epoch",
-        "graph": "graph_epoch",
-    }
-
-    @staticmethod
-    def bump(
-        cursor: Any,
-        *,
-        keyword: bool = False,
-        vector: bool = False,
-        graph: bool = False,
-    ) -> None:
-        if not any((keyword, vector, graph)):
-            return
-        cursor.execute(
-            """
-            UPDATE index_epoch
-            SET epoch = epoch + 1,
-                keyword_epoch = keyword_epoch + %s,
-                vector_epoch = vector_epoch + %s,
-                graph_epoch = graph_epoch + %s;
-            """,
-            (int(keyword), int(vector), int(graph)),
-        )
-
-    def read_all(self, conn_pool: _PostgresConnectionLike) -> dict[str, int]:
-        conn = conn_pool.get_connection()
-        cursor = None
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT keyword_epoch, vector_epoch, graph_epoch "
-                "FROM index_epoch LIMIT 1;"
-            )
-            row = cursor.fetchone()
-            if row is None:
-                return {lane: 0 for lane in self._LANE_COLUMNS}
-            return {
-                lane: int(row[index])
-                for index, lane in enumerate(self._LANE_COLUMNS)
-            }
-        finally:
-            if cursor is not None:
-                cursor.close()
-            conn_pool.put_connection(conn)
-
-    def read(self, conn_pool: _PostgresConnectionLike, lane: str) -> int:
-        return self.read_all(conn_pool)[lane]
-
-    @staticmethod
-    def read_total(conn_pool: _PostgresConnectionLike) -> int:
-        conn = conn_pool.get_connection()
-        cursor = None
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT epoch FROM index_epoch LIMIT 1;")
-            row = cursor.fetchone()
-            return int(row[0]) if row else 0
-        finally:
-            if cursor is not None:
-                cursor.close()
-            conn_pool.put_connection(conn)
-
-
-_POSTGRES_EPOCH_LANE = _PostgresEpochLane()
-
-
-class PostgresConnection:
-    """Thread-safe Postgres connection pool."""
-
-    def __init__(self, dsn: str, min_connections: int = 2, max_connections: int = 10):
-        """Initialize connection pool.
-
-        Args:
-            dsn: PostgreSQL connection string
-            min_connections: Minimum idle connections in pool
-            max_connections: Maximum connections in pool
-
-        Raises:
-            ImportError: If psycopg2 is not installed
-        """
-        if psycopg2 is None or psycopg2.pool is None:
-            raise ImportError(
-                "psycopg2 is required for PostgresConnection. "
-                "Install with: pip install 'andnp-searchkernel[pgvector]'"
-            )
-        self.dsn = dsn
-        self.pool = psycopg2.pool.SimpleConnectionPool(
-            min_connections, max_connections, dsn
-        )
-
-    def get_connection(self):
-        """Get a connection from the pool."""
-        return self.pool.getconn()
-
-    def put_connection(self, conn):
-        """Return a connection to the pool."""
-        try:
-            conn.rollback()
-        except psycopg2.Error:
-            pass
-        self.pool.putconn(conn)
-
-    def execute(self, sql: str, params: tuple = ()) -> Any:
-        """Execute a query and return results."""
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(sql, params)
-            result = cursor.fetchall()
-            cursor.close()
-            conn.commit()
-            return result
-        finally:
-            self.put_connection(conn)
-
-    def execute_one(self, sql: str, params: tuple = ()) -> Any | None:
-        """Execute a query and return a single result."""
-        result = self.execute(sql, params)
-        return result[0] if result else None
-
-    def close(self):
-        """Close all connections in the pool."""
-        self.pool.closeall()
-
-
-class Psycopg3Connection:
-    """Thread-safe Postgres connection pool using psycopg3.
-
-    Provides the same interface as PostgresConnection but uses psycopg3's
-    native connection pool (psycopg_pool.ConnectionPool) instead of psycopg2.
-    Defers import of psycopg/psycopg_pool until instantiation, so users who
-    only use this class don't need psycopg2 installed.
-    """
-
-    def __init__(self, dsn: str, min_connections: int = 2, max_connections: int = 10):
-        """Initialize connection pool.
-
-        Args:
-            dsn: PostgreSQL connection string
-            min_connections: Minimum idle connections in pool
-            max_connections: Maximum connections in pool
-
-        Raises:
-            ImportError: If psycopg or psycopg_pool is not installed
-        """
-        if psycopg_pool is None:
-            raise ImportError(
-                "psycopg3 and psycopg_pool are required for Psycopg3Connection. "
-                "Install with: pip install 'andnp-searchkernel[pgvector-psycopg3]'"
-            )
-
-        self.dsn = dsn
-        self.pool = psycopg_pool.ConnectionPool(
-            dsn,
-            min_size=min_connections,
-            max_size=max_connections,
-            open=True,
-            kwargs={"prepare_threshold": None},
-        )
-
-    def get_connection(self):
-        """Get a connection from the pool."""
-        return self.pool.getconn()
-
-    def put_connection(self, conn):
-        """Return a connection to the pool."""
-        try:
-            conn.rollback()
-        except psycopg.Error as e:  # pyright: ignore[union-attr]
-            logger.debug("Connection rollback failed during pool return: %s", e)
-        self.pool.putconn(conn)
-
-    def execute(self, sql: str, params: tuple = ()) -> Any:
-        """Execute a query and return results."""
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(sql, params)
-            result = cursor.fetchall() if cursor.description is not None else []
-            cursor.close()
-            conn.commit()
-            return result
-        finally:
-            self.put_connection(conn)
-
-    def execute_one(self, sql: str, params: tuple = ()) -> Any | None:
-        """Execute a query and return a single result."""
-        result = self.execute(sql, params)
-        return result[0] if result else None
-
-    def close(self):
-        """Close all connections in the pool."""
-        self.pool.close()
-
-
 def create_schema(conn_pool: _PostgresConnectionLike) -> None:
     """Create idempotent schema for vector, keyword, graph, and cache stores."""
     conn = conn_pool.get_connection()
@@ -799,6 +588,113 @@ def create_schema(conn_pool: _PostgresConnectionLike) -> None:
 
 
 _create_schema = create_schema
+
+
+class PostgresConnection:
+    """Thread-safe Postgres connection pool."""
+
+    def __init__(self, dsn: str, min_connections: int = 2, max_connections: int = 10):
+        """Initialize connection pool."""
+        if psycopg2 is None or psycopg2.pool is None:
+            raise ImportError(
+                "psycopg2 is required for PostgresConnection. "
+                "Install with: pip install 'andnp-searchkernel[pgvector]'"
+            )
+        self.dsn = dsn
+        self.pool = psycopg2.pool.SimpleConnectionPool(
+            min_connections, max_connections, dsn
+        )
+
+    def get_connection(self):
+        """Get a connection from the pool."""
+        return self.pool.getconn()
+
+    def put_connection(self, conn):
+        """Return a connection to the pool."""
+        try:
+            conn.rollback()
+        except psycopg2.Error:
+            pass
+        self.pool.putconn(conn)
+
+    def execute(self, sql: str, params: tuple = ()) -> Any:
+        """Execute a query and return results."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            result = cursor.fetchall()
+            cursor.close()
+            conn.commit()
+            return result
+        finally:
+            self.put_connection(conn)
+
+    def execute_one(self, sql: str, params: tuple = ()) -> Any | None:
+        """Execute a query and return a single result."""
+        result = self.execute(sql, params)
+        return result[0] if result else None
+
+    def close(self):
+        """Close all connections in the pool."""
+        self.pool.closeall()
+
+
+class Psycopg3Connection:
+    """Thread-safe Postgres connection pool using psycopg3."""
+
+    def __init__(self, dsn: str, min_connections: int = 2, max_connections: int = 10):
+        """Initialize connection pool."""
+        if psycopg_pool is None:
+            raise ImportError(
+                "psycopg3 and psycopg_pool are required for Psycopg3Connection. "
+                "Install with: pip install 'andnp-searchkernel[pgvector-psycopg3]'"
+            )
+
+        self.dsn = dsn
+        self.pool = psycopg_pool.ConnectionPool(
+            dsn,
+            min_size=min_connections,
+            max_size=max_connections,
+            open=True,
+            kwargs={"prepare_threshold": None},
+        )
+
+    def get_connection(self):
+        """Get a connection from the pool."""
+        return self.pool.getconn()
+
+    def put_connection(self, conn):
+        """Return a connection to the pool."""
+        try:
+            conn.rollback()
+        except psycopg.Error as e:  # pyright: ignore[union-attr]
+            logger.debug("Connection rollback failed during pool return: %s", e)
+        self.pool.putconn(conn)
+
+    def execute(self, sql: str, params: tuple = ()) -> Any:
+        """Execute a query and return results."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            result = cursor.fetchall() if cursor.description is not None else []
+            cursor.close()
+            conn.commit()
+            return result
+        finally:
+            self.put_connection(conn)
+
+    def execute_one(self, sql: str, params: tuple = ()) -> Any | None:
+        """Execute a query and return a single result."""
+        result = self.execute(sql, params)
+        return result[0] if result else None
+
+    def close(self):
+        """Close all connections in the pool."""
+        self.pool.close()
+
+
 
 
 def _sql_module_for(conn_pool: _PostgresConnectionLike):
@@ -1623,11 +1519,11 @@ class PGKeywordStore:
 class PGGraphStore:
     """Postgres implementation of GraphStore port."""
 
-    def __init__(self, conn_pool: PostgresConnection):
+    def __init__(self, conn_pool: _PostgresConnectionLike):
         """Initialize graph store.
 
         Args:
-            conn_pool: PostgresConnection pool
+            conn_pool: PostgreSQL connection pool
         """
         self.conn_pool = conn_pool
 
@@ -2068,11 +1964,11 @@ class PGGraphStore:
 class PGCacheStore:
     """Postgres implementation of CacheStore port with epoch-based invalidation."""
 
-    def __init__(self, conn_pool: PostgresConnection):
+    def __init__(self, conn_pool: _PostgresConnectionLike):
         """Initialize cache store.
 
         Args:
-            conn_pool: PostgresConnection pool
+            conn_pool: PostgreSQL connection pool
         """
         self.conn_pool = conn_pool
 

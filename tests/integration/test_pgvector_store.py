@@ -77,7 +77,10 @@ def pg_conn(pg_dsn, request):
     cursor.execute("DELETE FROM records;")
     cursor.execute("DELETE FROM graph_edges;")
     cursor.execute("DELETE FROM cache_store;")
-    cursor.execute("UPDATE index_epoch SET epoch = 0;")
+    cursor.execute(
+        "UPDATE index_epoch SET epoch = 0, keyword_epoch = 0, "
+        "vector_epoch = 0, graph_epoch = 0;"
+    )
     conn.commit()
     cursor.close()
     conn_pool.put_connection(conn)
@@ -363,19 +366,42 @@ class TestVectorStore:
         assert restored_revision == revision
 
     def test_epoch_tracking(self, pg_conn, fixture_records):
-        """Test that epoch is incremented on upsert/delete."""
-        store = PGVectorStore(pg_conn)
+        """Test each index lane increments independently and totals advance."""
+        vector_store = PGVectorStore(pg_conn)
+        keyword_store = PGKeywordStore(pg_conn)
+        graph_store = PGGraphStore(pg_conn)
+        cache_store = PGCacheStore(pg_conn)
+        initial = vector_store.epochs()
+        total = vector_store.epoch()
+        assert initial == {"keyword": 0, "vector": 0, "graph": 0}
+        assert total == 0
 
-        epoch0 = store.epoch()
-        store.upsert(fixture_records, model_name="test-model", dim=4)
-        epoch1 = store.epoch()
+        vector_store.upsert(fixture_records, model_name="test-model", dim=4)
+        after_vector = vector_store.epochs()
+        assert after_vector == {"keyword": 1, "vector": 1, "graph": 0}
+        assert vector_store.epoch() == total + 1
 
-        assert epoch1 > epoch0
+        keyword_store.index(fixture_records)
+        after_keyword = keyword_store.epochs()
+        assert after_keyword == {"keyword": 2, "vector": 1, "graph": 0}
+        assert keyword_store.epoch() == total + 2
 
-        store.delete([fixture_records[0].storage_key])
-        epoch2 = store.epoch()
+        edge = GraphEdge(
+            RecordIdentity(None, "test", "source"),
+            RecordIdentity(None, "test", "target"),
+            "related",
+            1.0,
+        )
+        graph_store.upsert_edges([edge])
+        assert graph_store.epochs() == {"keyword": 2, "vector": 1, "graph": 1}
+        assert graph_store.epochs() == keyword_store.epochs()
+        assert graph_store.graph_epoch() == 1
+        assert vector_store.epoch() == total + 3
 
-        assert epoch2 > epoch1
+        cache_store.set("epoch-check", {"ok": True}, epoch=3)
+        cache_store.invalidate_epoch(0)
+        assert vector_store.epochs() == {"keyword": 2, "vector": 1, "graph": 1}
+        assert vector_store.epoch() == total + 3
 
     def test_per_model_isolation(self, pg_conn, fixture_records):
         """Test that different embedding models are isolated."""
