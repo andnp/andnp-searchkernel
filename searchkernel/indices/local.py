@@ -2776,7 +2776,7 @@ class LocalRecordBackend:
     def vector_storage_stats(self, model_name: str, dim: int) -> tuple[int, int]:
         return self._vector_snapshot_engine.vector_storage_stats(model_name, dim)
 
-    def _iter_vector_batches(
+    def iter_vector_batches(
         self,
         model_name: str,
         dim: int,

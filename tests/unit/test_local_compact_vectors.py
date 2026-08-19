@@ -265,6 +265,41 @@ def test_vector_snapshot_arrays_are_float32_and_immutable() -> None:
         assert not array.flags.writeable
 
 
+def test_public_vector_batches_preserve_bounds_order_and_required_rows() -> None:
+    """Public vector batches stay bounded, ordered, and fully projected.
+
+    The iterator must expose the rows needed by optional index builders while
+    preserving the existing deterministic keyset pagination contract.
+    """
+    backend = LocalRecordBackend(
+        vector_snapshot_max_rows=2,
+        vector_snapshot_max_bytes=2 * 4 * 2,
+    )
+    records = [_record(f"record-{index}", [1.0, 0.0]) for index in range(5)]
+    backend.upsert(records, "model", 2)
+    backend.upsert([_record("other-model", [0.0, 1.0])], "other", 2)
+
+    batches = list(backend.iter_vector_batches("model", 2))
+    row_fields = {
+        "storage_key",
+        "workspace_id",
+        "source_kind",
+        "source_id",
+        "status",
+        "metadata",
+        "uri",
+        "embedding",
+        "format_version",
+        "normalization_policy",
+    }
+
+    assert [len(batch) for batch in batches] == [2, 2, 1]
+    assert [
+        row["storage_key"] for batch in batches for row in batch
+    ] == sorted(record.storage_key for record in records)
+    assert all(set(row.keys()) == row_fields for batch in batches for row in batch)
+
+
 def test_auto_vector_engine_reuses_selection_until_vector_epoch_changes(
     monkeypatch,
 ) -> None:
@@ -321,6 +356,10 @@ def test_snapshot_reload_corruption_and_deletion(tmp_path: Path) -> None:
 
 
 def test_optional_faiss_recall_reload_and_corruption_fallback(tmp_path: Path) -> None:
+    """FAISS rebuilds from persisted vectors when its artifact is corrupt.
+
+    A fresh store must recover searchable state from the durable vector rows.
+    """
     pytest.importorskip("faiss")
     backend = LocalRecordBackend(tmp_path / "records.db")
     records = [

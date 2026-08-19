@@ -367,7 +367,7 @@ class FAISSLocalVectorStore:
         storage_keys: list[str] = []
         id_to_storage_key: dict[int, str] = {}
         candidate_metadata: dict[str, _CandidateMetadata] = {}
-        for rows in self._backend._iter_vector_batches(model_name, dim):
+        for rows in self._backend.iter_vector_batches(model_name, dim):
             vectors = [
                 PackedVectorCodec.decode(
                     row["embedding"],
