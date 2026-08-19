@@ -46,7 +46,6 @@ from searchkernel.ports.search_results import (
 from searchkernel.runtime.canonical_cache import (
     CandidateResultCache,
     HydrationCache,
-    HydrationCacheKey,
 )
 from searchkernel.runtime.query_embedding_cache import (
     QueryEmbeddingCache,
@@ -76,6 +75,7 @@ from searchkernel.search.query_plan import (
     QueryRouter,
     QueryRouterConfig,
 )
+from searchkernel.search.record_hydration import RecordHydrationCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -389,12 +389,20 @@ class RecordSearchPipeline:
         )
         self._query_embedding_cache = query_embedding_cache or QueryEmbeddingCache()
         self._candidate_cache = candidate_cache or CandidateResultCache()
-        self._hydration_cache = hydration_cache
         self._encoder_namespace = encoder_namespace
         self._routing_fingerprint = routing_fingerprint
         self._policy_version = policy_version
-        self._hydration_version = hydration_version
-        self._hydration_version_provider = hydration_version_provider
+        self._hydration_coordinator = RecordHydrationCoordinator(
+            hydrator=hydrator,
+            hydrate_record=self._hydrate,
+            hydration_cache=hydration_cache,
+            policy_version=policy_version,
+            hydration_version=hydration_version,
+            hydration_version_provider=hydration_version_provider,
+            max_batch_size=self._config.max_hydration_batch_size,
+            max_concurrency=self._config.max_hydration_concurrency,
+            handle_error=self._handle_error,
+        )
         self._candidate_cache_policy = CandidateCachePolicy(
             self._candidate_cache,
             config=self._config,
@@ -1006,7 +1014,7 @@ class RecordSearchPipeline:
                 hydration_offset : hydration_offset + result_limit
             ]
             hydration_offset += len(hydration_batch)
-            batch_hydration = await self._hydrate_candidates(
+            batch_hydration = await self._hydration_coordinator.hydrate_candidates(
                 hydration_batch,
                 execution.failures,
                 execution.cache_diagnostics,
@@ -1029,7 +1037,7 @@ class RecordSearchPipeline:
             if _is_chunk_candidate(candidate)
         ]
         if chunk_candidates:
-            batch_hydration = await self._hydrate_candidates(
+            batch_hydration = await self._hydration_coordinator.hydrate_candidates(
                 chunk_candidates,
                 execution.failures,
                 execution.cache_diagnostics,
@@ -1588,221 +1596,6 @@ class RecordSearchPipeline:
             self._handle_error(stage, error, failures)
             return None
         return value
-
-    async def _hydrate_candidates(
-        self,
-        candidates: Sequence[RecordSearchCandidate],
-        failures: list[RecordSearchFailure],
-        diagnostics: list[str],
-    ) -> list[tuple[RecordSearchCandidate, Record | None]]:
-        if not candidates:
-            return []
-        versioned: list[
-            tuple[RecordSearchCandidate, HydrationCacheKey]
-        ] = []
-        versioned_keys: dict[str, HydrationCacheKey] = {}
-        cached: list[tuple[RecordSearchCandidate, Record | None]] = []
-        misses: list[RecordSearchCandidate] = []
-        if self._hydration_cache is not None and self._policy_version is not None:
-            hydration_versions = await self._hydration_versions_for(
-                [candidate.identity for candidate in candidates],
-                diagnostics,
-            )
-            for candidate in candidates:
-                try:
-                    if candidate.storage_key in hydration_versions:
-                        version = hydration_versions[candidate.storage_key]
-                    else:
-                        version = await self._hydration_version_for(
-                            candidate.identity
-                        )
-                except Exception as error:  # noqa: BLE001 - cache is optional
-                    misses.append(candidate)
-                    diagnostics.append(
-                        f"hydration_cache:bypass:{type(error).__name__}"
-                    )
-                    continue
-                if version is None:
-                    misses.append(candidate)
-                    continue
-                try:
-                    key = HydrationCacheKey.build(
-                        candidate.identity,
-                        record_version=version,
-                        policy_version=self._policy_version,
-                    )
-                    hit, record = self._hydration_cache.lookup(key)
-                    versioned.append((candidate, key))
-                    versioned_keys[candidate.storage_key] = key
-                except Exception as error:  # noqa: BLE001 - cache is optional
-                    misses.append(candidate)
-                    diagnostics.append(
-                        f"hydration_cache:bypass:{type(error).__name__}"
-                    )
-                    continue
-                if hit:
-                    cached.append((candidate, record))
-                    diagnostics.append("hydration_cache:hit")
-                else:
-                    try:
-                        leader, shared = await self._hydration_cache.async_wait_for_miss(
-                            key
-                        )
-                    except Exception as error:  # noqa: BLE001 - cache is optional
-                        leader, shared = True, None
-                        diagnostics.append(
-                            f"hydration_cache:bypass:{type(error).__name__}"
-                        )
-                    if leader:
-                        misses.append(candidate)
-                        diagnostics.append("hydration_cache:miss")
-                    else:
-                        cached.append((candidate, shared))
-                        diagnostics.append("hydration_cache:coalesced")
-        else:
-            misses = list(candidates)
-            if self._hydration_cache is not None:
-                diagnostics.append("hydration_cache:bypass:missing_policy_version")
-
-        if not misses:
-            return cached
-        hydrate_records = getattr(self._hydrator, "hydrate_records", None)
-        if callable(hydrate_records):
-            loaded: list[tuple[RecordSearchCandidate, Record | None]] = []
-            for offset in range(0, len(misses), self._config.max_hydration_batch_size):
-                hydration_batch = misses[
-                    offset : offset + self._config.max_hydration_batch_size
-                ]
-                result = await _capture_stage(
-                    "hydration",
-                    lambda batch=hydration_batch: _call_async(
-                        hydrate_records,
-                        [candidate.identity for candidate in batch],
-                    ),
-                )
-                if result[2] is not None:
-                    for candidate in hydration_batch:
-                        key = versioned_keys.get(candidate.storage_key)
-                        if key is not None:
-                            self._hydration_cache.fail(key, result[2])
-                records = self._consume_stage(result, failures)
-                if records is None:
-                    continue
-                records_by_key = cast(Mapping[str, Record | None], records)
-                loaded.extend(
-                    (candidate, records_by_key.get(candidate.storage_key))
-                    for candidate in hydration_batch
-                )
-            self._store_hydration_cache(
-                versioned,
-                loaded,
-                diagnostics,
-            )
-            hydrated_by_key = {
-                candidate.storage_key: record
-                for candidate, record in [*cached, *loaded]
-            }
-            return [
-                (candidate, hydrated_by_key[candidate.storage_key])
-                for candidate in candidates
-            ]
-
-        semaphore = asyncio.Semaphore(self._config.max_hydration_concurrency)
-
-        async def hydrate(
-            candidate: RecordSearchCandidate,
-        ) -> tuple[RecordSearchCandidate, Record | None, Exception | None]:
-            async with semaphore:
-                try:
-                    return candidate, await self._hydrate(candidate.identity), None
-                except Exception as error:  # noqa: BLE001 - captured per candidate
-                    return candidate, None, error
-
-        loaded = await _gather_tasks(
-            [asyncio.create_task(hydrate(candidate)) for candidate in misses]
-        )
-        hydrated: list[tuple[RecordSearchCandidate, Record | None]] = []
-        for candidate, record, error in cast(
-            list[tuple[RecordSearchCandidate, Record | None, Exception | None]],
-            loaded,
-        ):
-            if error is not None:
-                key = versioned_keys.get(candidate.storage_key)
-                if key is not None:
-                    self._hydration_cache.fail(key, error)
-                self._handle_error("hydration", error, failures)
-                continue
-            hydrated.append((candidate, record))
-        self._store_hydration_cache(versioned, hydrated, diagnostics)
-        hydrated_by_key = {
-            candidate.storage_key: record
-            for candidate, record in [*cached, *hydrated]
-        }
-        return [
-            (candidate, hydrated_by_key[candidate.storage_key])
-            for candidate in candidates
-            if candidate.storage_key in hydrated_by_key
-        ]
-
-    async def _hydration_versions_for(
-        self,
-        identities: Sequence[RecordIdentity],
-        diagnostics: list[str],
-    ) -> Mapping[str, object | None]:
-        provider = self._hydration_version_provider
-        if provider is None or self._hydration_version is not None:
-            return {}
-        batch_provider = getattr(provider, "hydration_versions", None)
-        if not callable(batch_provider):
-            return {}
-        try:
-            versions = await _call_async(batch_provider, identities)
-            if not isinstance(versions, Mapping):
-                raise TypeError("hydration_versions must return a mapping")
-            return cast(Mapping[str, object | None], versions)
-        except Exception as error:  # noqa: BLE001 - scalar fallback preserves compatibility
-            diagnostics.append(
-                f"hydration_cache:batch_version_fallback:{type(error).__name__}"
-            )
-            return {}
-
-    async def _hydration_version_for(
-        self,
-        identity: RecordIdentity,
-    ) -> object | None:
-        if self._hydration_version is not None:
-            return self._hydration_version
-        provider = self._hydration_version_provider
-        if provider is not None:
-            return await _call_async(provider, identity)
-        for name in ("record_epoch", "hydration_epoch"):
-            value = getattr(self._hydrator, name, None)
-            if callable(value):
-                return await _call_async(value)
-            if value is not None:
-                return value
-        return None
-
-    def _store_hydration_cache(
-        self,
-        versioned: Sequence[tuple[RecordSearchCandidate, HydrationCacheKey]],
-        loaded: Sequence[tuple[RecordSearchCandidate, Record | None]],
-        diagnostics: list[str],
-    ) -> None:
-        if self._hydration_cache is None:
-            return
-        keys = {candidate.storage_key: key for candidate, key in versioned}
-        for candidate, record in loaded:
-            key = keys.get(candidate.storage_key)
-            if key is None:
-                continue
-            try:
-                self._hydration_cache.set(key, record)
-            except Exception as error:  # noqa: BLE001 - cache is optional
-                self._hydration_cache.fail(key, error)
-                diagnostics.append(
-                    f"hydration_cache:error:{type(error).__name__}"
-                )
 
     def _build_candidates(
         self,
