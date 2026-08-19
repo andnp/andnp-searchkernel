@@ -16,6 +16,10 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from searchkernel.domain import Cursor, Record
+from searchkernel.indexing.batches import PreparedIndexRecord
+from searchkernel.indexing.batches import (
+    iter_prepared_index_batches as iter_record_batches,
+)
 from searchkernel.indexing.runtime_readiness import SearchAvailability
 from searchkernel.indexing.semantic import (
     EmbeddingCache,
@@ -28,9 +32,7 @@ from searchkernel.indexing.semantic import (
 from searchkernel.indexing.stages import (
     IndexStage,
     PreparedIndexBatch,
-    PreparedIndexRecord,
     StageResult,
-    iter_prepared_index_batches,
 )
 from searchkernel.ports.content_source import (
     BatchContentSource,
@@ -519,13 +521,16 @@ class ResumableSemanticCoordinator:
         availability: SearchAvailability | None = None,
     ) -> CoordinatorReceipt:
         """Bound prepared records with the existing stage batch helper."""
-        batches = iter_prepared_index_batches(
+        record_batches = iter_record_batches(
             records,
             max_records=max_records,
             max_chunks=max_chunks,
         )
         return await self.run_batches(
-            batches,
+            (
+                PreparedIndexBatch.from_records(record_batch)
+                for record_batch in record_batches
+            ),
             source_kind=source_kind,
             workspace_id=workspace_id,
             since=since,

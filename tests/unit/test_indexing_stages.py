@@ -6,13 +6,15 @@ from types import SimpleNamespace
 import pytest
 
 from searchkernel.domain import Chunk, Record, RecordStatus
+from searchkernel.indexing.batches import (
+    PreparedIndexRecord,
+    iter_prepared_index_batches,
+)
 from searchkernel.indexing.stages import (
     GraphStage,
     KeywordStage,
     PreparedIndexBatch,
-    PreparedIndexRecord,
     SemanticStage,
-    iter_prepared_index_batches,
 )
 
 
@@ -174,9 +176,7 @@ class TestIterPreparedIndexBatches:
         batches = list(iter_prepared_index_batches(prepared_records, max_records=2, max_chunks=100))
 
         assert len(batches) == 3  # 2 + 2 + 1
-        assert len(batches[0].records) == 2
-        assert len(batches[1].records) == 2
-        assert len(batches[2].records) == 1
+        assert [len(batch) for batch in batches] == [2, 2, 1]
 
     def test_batch_iterator_respects_chunk_limit(self) -> None:
         prepared_records = []
@@ -208,9 +208,11 @@ class TestIterPreparedIndexBatches:
         batches = list(iter_prepared_index_batches(prepared_records, max_records=10, max_chunks=5))
 
         assert len(batches) == 3
-        assert len(batches[0].chunks) == 3  # 1 doc * 3 chunks
-        assert len(batches[1].chunks) == 3  # 1 doc * 3 chunks
-        assert len(batches[2].chunks) == 3  # 1 doc * 3 chunks
+        assert [sum(len(record.chunks) for record in batch) for batch in batches] == [
+            3,
+            3,
+            3,
+        ]
 
     def test_batch_iterator_raises_on_zero_bounds(self) -> None:
         prepared_records = []

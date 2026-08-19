@@ -8,6 +8,7 @@ import pytest
 
 from searchkernel.domain import Chunk, Record, RecordStatus
 from searchkernel.indexing import checkpoints as checkpoints_module
+from searchkernel.indexing.batches import PreparedIndexRecord
 from searchkernel.indexing.bootstrap_checkpoint import (
     BootstrapCheckpoint,
     BootstrapFileStamp,
@@ -32,7 +33,6 @@ from searchkernel.indexing.stages import (
     IndexStage,
     KeywordStage,
     PreparedIndexBatch,
-    PreparedIndexRecord,
     StageCounters,
     StageResult,
 )

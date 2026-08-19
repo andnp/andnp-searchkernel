@@ -5,11 +5,15 @@ an architectural seam for later progressive indexing work, not a new
 readiness or scheduling system.
 """
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from searchkernel.domain import Chunk, Record, RecordIdentity, canonical_storage_key
+from searchkernel.domain import Chunk, RecordIdentity, canonical_storage_key
+from searchkernel.indexing.batches import PreparedIndexRecord
+from searchkernel.indexing.batches import (
+    iter_prepared_index_batches as iter_record_batches,
+)
 from searchkernel.indexing.semantic import SemanticInput, semantic_input_for_chunk
 from searchkernel.search.edge_types import infer_edge_type
 
@@ -23,15 +27,6 @@ class LinkExtractingParser(Protocol):
     """
 
     def extract_links_with_context(self, file_path: str) -> list: ...
-
-
-@dataclass
-class PreparedIndexRecord:
-    file_path: str
-    parser: object
-    record: Record
-    chunks: list[Chunk]
-    graph_metadata: dict
 
 
 @dataclass
@@ -121,28 +116,17 @@ def _graph_storage_key(identity: RecordIdentity, value: str) -> str:
 
 
 def iter_prepared_index_batches(
-    records: list[PreparedIndexRecord],
+    records: Iterable[PreparedIndexRecord],
     *,
     max_records: int,
     max_chunks: int,
 ) -> Iterator[PreparedIndexBatch]:
-    """Yield non-empty batches bounded by record and chunk counts."""
-    if max_records <= 0 or max_chunks <= 0:
-        raise ValueError("batch bounds must be positive")
-
-    current: list[PreparedIndexRecord] = []
-    chunk_count = 0
-    for record in records:
-        record_chunks = len(record.chunks)
-        if current and (
-            len(current) >= max_records or chunk_count + record_chunks > max_chunks
-        ):
-            yield PreparedIndexBatch.from_records(current)
-            current = []
-            chunk_count = 0
-        current.append(record)
-        chunk_count += record_chunks
-    if current:
+    """Yield prepared batches from bounded single-pass record batches."""
+    for current in iter_record_batches(
+        records,
+        max_records=max_records,
+        max_chunks=max_chunks,
+    ):
         yield PreparedIndexBatch.from_records(current)
 
 
