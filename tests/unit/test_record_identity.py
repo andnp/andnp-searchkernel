@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -8,6 +9,7 @@ from searchkernel.domain import (
     RecordIdentity,
     canonical_storage_key,
 )
+from searchkernel.domain import models as models_module
 
 
 def test_storage_key_includes_optional_workspace_and_source_kind() -> None:
@@ -26,6 +28,43 @@ def test_identity_round_trips_through_canonical_storage_key_and_mapping() -> Non
 def test_identity_rejects_non_canonical_storage_key_encoding() -> None:
     with pytest.raises(ValueError, match="not canonical"):
         RecordIdentity.from_storage_key('record:["workspace-a", "note", "same"]')
+
+
+def test_from_storage_key_rejects_missing_prefix() -> None:
+    with pytest.raises(ValueError, match="must start with"):
+        RecordIdentity.from_storage_key('["workspace-a", "note", "same"]')
+
+
+def test_from_storage_key_rejects_malformed_json() -> None:
+    with pytest.raises(ValueError, match="invalid record storage key"):
+        RecordIdentity.from_storage_key("record:not-json")
+
+
+def test_from_storage_key_rejects_wrong_shaped_payload() -> None:
+    with pytest.raises(ValueError, match="invalid record storage key"):
+        RecordIdentity.from_storage_key('record:["note", "same"]')
+
+
+def test_from_storage_key_memoizes_repeated_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repeated storage-key parse must not redo the JSON round trip."""
+    models_module._parse_storage_key.cache_clear()
+    original_loads = json.loads
+    call_count = 0
+
+    def counting_loads(*args: object, **kwargs: object) -> object:
+        nonlocal call_count
+        call_count += 1
+        return original_loads(*args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", counting_loads)
+
+    key = RecordIdentity("workspace-a", "note", "same").storage_key
+
+    first = RecordIdentity.from_storage_key(key)
+    second = RecordIdentity.from_storage_key(key)
+
+    assert first == second == RecordIdentity("workspace-a", "note", "same")
+    assert call_count == 1
 
 
 @pytest.mark.parametrize(
