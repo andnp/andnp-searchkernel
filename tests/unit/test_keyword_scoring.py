@@ -1,5 +1,6 @@
 import sqlite3
 import string
+from contextlib import closing
 
 import pytest
 
@@ -33,8 +34,7 @@ def test_sanitize_fts_query_removes_match_operators():
 
 
 def test_sanitize_fts_query_accepts_arbitrary_punctuation_for_fts5():
-    connection = sqlite3.connect(":memory:")
-    try:
+    with closing(sqlite3.connect(":memory:")) as connection:
         connection.execute("CREATE VIRTUAL TABLE search USING fts5(body)")
         connection.execute("INSERT INTO search(body) VALUES (?)", ("alpha beta",))
 
@@ -43,8 +43,6 @@ def test_sanitize_fts_query_accepts_arbitrary_punctuation_for_fts5():
             connection.execute(
                 "SELECT rowid FROM search WHERE search MATCH ?", (sanitized,)
             ).fetchall()
-    finally:
-        connection.close()
 
 
 @pytest.mark.parametrize(
