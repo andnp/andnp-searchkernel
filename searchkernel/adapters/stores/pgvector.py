@@ -67,6 +67,7 @@ DEFAULT_VECTOR_OVERFETCH_MULTIPLIER = 2.0
 DEFAULT_VECTOR_MAX_SCAN_ROUNDS = 4
 _SCHEMA_ADVISORY_LOCK_KEY = 907341005
 _ITERATIVE_SCAN_MODES = {"auto", "off", "strict_order", "relaxed_order"}
+_VECTOR_WRITE_BATCH_SIZE = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -998,15 +999,7 @@ class PGVectorStore:
                     ),
                 )
 
-            # Upsert vectors into the per-model typed table
-            upsert_vec_sql = self._sql.SQL(
-                "INSERT INTO {table} (record_id, embedding, revision) "
-                "VALUES (%s, %s::vector, %s) "
-                "ON CONFLICT (record_id) DO UPDATE SET "
-                "embedding = EXCLUDED.embedding, revision = EXCLUDED.revision, "
-                "updated_at = CURRENT_TIMESTAMP;"
-            ).format(table=self._sql.Identifier(table_name))
-
+            # Upsert only vector rows whose revision or payload differs.
             vector_rows = [
                 (
                     record.storage_key,
@@ -1015,31 +1008,62 @@ class PGVectorStore:
                 )
                 for record in records
             ]
+            table_sql = self._sql.Identifier(table_name).as_string(cursor)
+            vector_insert_sql = f"""
+                INSERT INTO {table_sql} AS existing (record_id, embedding, revision)
+                VALUES (%s, %s::vector, %s)
+                ON CONFLICT (record_id) DO UPDATE SET
+                    embedding = EXCLUDED.embedding,
+                    revision = EXCLUDED.revision,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE existing.revision IS DISTINCT FROM EXCLUDED.revision
+                   OR vector_dims(existing.embedding) IS DISTINCT FROM
+                      vector_dims(EXCLUDED.embedding)
+                   OR existing.embedding::text IS DISTINCT FROM
+                      EXCLUDED.embedding::text
+                RETURNING record_id;
+                """
+            changed_vector_ids: set[str] = set()
             if vector_rows:
                 if isinstance(self.conn_pool, Psycopg3Connection):
-                    insert_sql = (
-                        "INSERT INTO " + self._sql.Identifier(table_name).as_string(cursor)
-                        + " (record_id, embedding, revision) VALUES (%s, %s::vector, %s) "
-                        "ON CONFLICT (record_id) DO UPDATE SET "
-                        "embedding = EXCLUDED.embedding, revision = EXCLUDED.revision, "
-                        "updated_at = CURRENT_TIMESTAMP;"
-                    )
-                    cursor.executemany(insert_sql, vector_rows)
+                    for offset in range(0, len(vector_rows), _VECTOR_WRITE_BATCH_SIZE):
+                        batch = vector_rows[offset : offset + _VECTOR_WRITE_BATCH_SIZE]
+                        values = ", ".join(
+                            "(%s, %s::vector, %s)" for _ in batch
+                        )
+                        batch_sql = vector_insert_sql.replace(
+                            "VALUES (%s, %s::vector, %s)", f"VALUES {values}"
+                        )
+                        cursor.execute(
+                            batch_sql,
+                            tuple(value for row in batch for value in row),
+                        )
+                        changed_vector_ids.update(
+                            row[0] for row in cursor.fetchall()
+                        )
                 else:
-                    psycopg2.extras.execute_values(
+                    changed_rows = psycopg2.extras.execute_values(
                         cursor,
-                        upsert_vec_sql.as_string(cursor).replace(
+                        vector_insert_sql.replace(
                             "VALUES (%s, %s::vector, %s)", "VALUES %s"
                         ),
                         vector_rows,
+                        page_size=_VECTOR_WRITE_BATCH_SIZE,
+                        fetch=True,
                     )
+                    changed_vector_ids.update(row[0] for row in changed_rows)
 
             _POSTGRES_EPOCH_LANE.bump(
-                cursor, keyword=True, vector=bool(vector_rows)
+                cursor,
+                keyword=bool(records),
+                vector=bool(changed_vector_ids),
             )
 
             conn.commit()
             logger.debug(f"Upserted {len(records)} records for model {model_name}")
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             if cursor is not None:
                 cursor.close()

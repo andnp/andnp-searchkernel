@@ -7,6 +7,7 @@ against a live Postgres database with pgvector extension.
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import cast
 
 import numpy as np
 import pytest
@@ -137,6 +138,142 @@ def fixture_records():
 
 class TestVectorStore:
     """Tests for VectorStore port implementation."""
+
+    def test_repeated_upsert_skips_vector_write_but_preserves_keyword_epoch(
+        self, pg_conn, fixture_records
+    ):
+        """An identical retry preserves the vector row and vector epoch."""
+        store = PGVectorStore(pg_conn)
+        record = fixture_records[0]
+        table_name = _vector_table_name("repeat-model", 4)
+
+        store.upsert([record], model_name="repeat-model", dim=4)
+        before = store.epochs()
+        before_vector_timestamp = pg_conn.execute_one(
+            f"""
+            SELECT updated_at
+            FROM "{table_name}"
+            WHERE record_id = %s;
+            """,
+            (record.storage_key,),
+        )
+
+        store.upsert([record], model_name="repeat-model", dim=4)
+
+        assert store.epochs() == {
+            "keyword": before["keyword"] + 1,
+            "vector": before["vector"],
+            "graph": before["graph"],
+        }
+        assert pg_conn.execute_one(
+            f"""
+            SELECT updated_at
+            FROM "{table_name}"
+            WHERE record_id = %s;
+            """,
+            (record.storage_key,),
+        ) == before_vector_timestamp
+
+    def test_mixed_upsert_changes_only_changed_and_missing_vectors(
+        self, pg_conn, fixture_records
+    ):
+        """Mixed batches keep unchanged rows and write changed or missing ones."""
+        store = PGVectorStore(pg_conn)
+        initial = fixture_records[:2]
+        store.upsert(initial, model_name="mixed-model", dim=4)
+        before = store.epochs()
+        original_revision = pg_conn.execute_one(
+            f'SELECT revision FROM "{_vector_table_name("mixed-model", 4)}" '
+            "WHERE record_id = %s;",
+            (initial[1].storage_key,),
+        )[0]
+
+        changed = replace(initial[1], embedding=[0.0, 0.0, 0.0, 1.0])
+        missing = replace(
+            initial[0], source_id="test:missing", embedding=[0.0, 0.0, 1.0, 0.0]
+        )
+        store.upsert(
+            [initial[0], changed, missing],
+            model_name="mixed-model",
+            dim=4,
+        )
+
+        assert store.epochs() == {
+            "keyword": before["keyword"] + 1,
+            "vector": before["vector"] + 1,
+            "graph": before["graph"],
+        }
+        stored = pg_conn.execute_one(
+            f'SELECT embedding::text, revision FROM "{_vector_table_name("mixed-model", 4)}" '
+            "WHERE record_id = %s;",
+            (initial[1].storage_key,),
+        )
+        assert stored[0] == "[0,0,0,1]"
+        assert stored[1] == original_revision
+        assert pg_conn.execute_one(
+            f'SELECT COUNT(*) FROM "{_vector_table_name("mixed-model", 4)}";'
+        ) == (3,)
+
+    def test_upsert_repairs_payload_when_revision_matches(self, pg_conn, fixture_records):
+        """A matching revision does not hide a damaged stored vector."""
+        store = PGVectorStore(pg_conn)
+        record = fixture_records[0]
+        model_name = "repair-model"
+        table_name = _vector_table_name(model_name, 4)
+        store.upsert([record], model_name=model_name, dim=4)
+        revision = pg_conn.execute_one(
+            f'SELECT revision FROM "{table_name}" WHERE record_id = %s;',
+            (record.storage_key,),
+        )[0]
+        connection = pg_conn.get_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f'UPDATE "{table_name}" SET embedding = %s::vector, '
+                    "revision = %s WHERE record_id = %s;",
+                    ("[0,0,0,1]", revision, record.storage_key),
+                )
+            connection.commit()
+        finally:
+            pg_conn.put_connection(connection)
+        before = store.epochs()
+
+        store.upsert([record], model_name=model_name, dim=4)
+
+        assert store.epochs() == {
+            "keyword": before["keyword"] + 1,
+            "vector": before["vector"] + 1,
+            "graph": before["graph"],
+        }
+        assert pg_conn.execute_one(
+            f'SELECT embedding::text, revision FROM "{table_name}" '
+            "WHERE record_id = %s;",
+            (record.storage_key,),
+        ) == ("[1,0,0,0]", revision)
+
+    def test_failed_upsert_rolls_back_canonical_rows_and_epochs(self, pg_conn):
+        """A vector serialization failure rolls back earlier canonical writes."""
+        now = datetime.now(UTC)
+        good = replace(
+            Record(
+                source_kind="rollback",
+                source_id="good",
+                title="Good",
+                body="Good body",
+                created_at=now,
+                updated_at=now,
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            ),
+            embedding=cast(Vector, ["invalid", 0.0, 0.0, 0.0]),
+        )
+        store = PGVectorStore(pg_conn)
+
+        with pytest.raises(ValueError):
+            store.upsert([good], model_name="rollback-model", dim=4)
+
+        assert store.epochs() == {"keyword": 0, "vector": 0, "graph": 0}
+        assert pg_conn.execute_one("SELECT COUNT(*) FROM records;") == (0,)
+        assert pg_conn.execute_one("SELECT COUNT(*) FROM vector_tables;") == (0,)
 
     def test_upsert_and_search_parity(self, pg_conn, fixture_records):
         """Test that pgvector ANN search returns same top-k as brute-force cosine.

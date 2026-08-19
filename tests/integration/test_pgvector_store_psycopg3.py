@@ -5,6 +5,7 @@ with PGVectorStore, PGKeywordStore, and the connection pool protocol.
 """
 
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 
@@ -167,6 +168,28 @@ class TestPsycopg3VectorStore:
         )[0]
 
         assert revision
+
+    def test_repeated_upsert_skips_unchanged_vector_with_psycopg3(
+        self, pg_conn, fixture_records
+    ):
+        """Psycopg3 retries do not rewrite unchanged vectors or advance its epoch."""
+        store = PGVectorStore(pg_conn)
+        record = fixture_records[0]
+        model_name = "psycopg3-idempotency"
+
+        store.upsert([record], model_name=model_name, dim=4)
+        before = store.epochs()
+        changed = replace(record, embedding=[0.0, 1.0, 0.0, 0.0])
+        store.upsert([changed], model_name=model_name, dim=4)
+
+        assert store.epochs() == {
+            "keyword": before["keyword"] + 1,
+            "vector": before["vector"] + 1,
+            "graph": before["graph"],
+        }
+        vector_epoch = store.vector_epoch()
+        store.upsert([changed], model_name=model_name, dim=4)
+        assert store.vector_epoch() == vector_epoch
 
 
 class TestPsycopg3KeywordStore:
