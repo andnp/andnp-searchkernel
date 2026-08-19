@@ -34,11 +34,11 @@ short.
 
 ## Version scope
 
-These pages describe the `0.22.0` API. The supported query model is
+These pages describe the current `1.x` API. The supported query model is
 record-oriented: source adapters produce `Record` values, stores return
 complete `RecordIdentity` values, and query results are
-`RecordSearchOutcome` values. The package is still pre-1.0, so public APIs can
-change between minor releases.
+`RecordSearchOutcome` values. Public APIs may change between minor releases
+when the upgrading guide calls out a contract change.
 
 ## Where to look for an API detail
 

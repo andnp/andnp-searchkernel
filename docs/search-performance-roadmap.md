@@ -1,9 +1,9 @@
 # Search Performance and Retrieval Quality Roadmap
 
-Status: 0.20.0 canonical record architecture with batch-first performance
+Status: Current 1.x canonical record architecture with batch-first performance
 boundaries and v1 federation contracts
 
-Last reviewed: 2026-08-02
+Last reviewed: 2026-08-18
 
 ## Purpose and current conclusion
 
@@ -21,9 +21,9 @@ persistence, bounded federation workers, and opt-in progressive federation
 events. These changes improve execution cost and memory behavior without
 turning batch-oriented source APIs into per-record public concurrency.
 
-The repository still has synthetic benchmarks, backend tests, and federation
-contract tests; it does not yet have a representative, versioned, labeled
-corpus or a cross-backend latency study.
+The repository has synthetic benchmarks, a representative versioned labeled
+corpus, backend tests, and federation contract tests. Cross-backend latency
+comparisons remain an opt-in measurement rather than a default release gate.
 
 ## 1. Canonical architecture
 

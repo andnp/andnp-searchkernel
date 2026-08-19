@@ -4,7 +4,8 @@ Status: proposed
 
 Date: 2026-08-11
 
-Scope: `andnp-searchkernel` 0.22.x and the next pre-1.0 development cycle
+Scope: the current `andnp-searchkernel` 1.x release line and the next
+improvement cycle
 
 ## Summary
 
