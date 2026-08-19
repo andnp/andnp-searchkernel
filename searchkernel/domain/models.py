@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
+from functools import lru_cache
 from typing import Any
 
 # ===== Supporting types =====
@@ -124,19 +125,29 @@ class RecordIdentity:
 
     @classmethod
     def from_storage_key(cls, storage_key: str) -> "RecordIdentity":
-        if not storage_key.startswith("record:"):
-            raise ValueError("storage key must start with 'record:'")
-        try:
-            value = json.loads(storage_key.removeprefix("record:"))
-        except json.JSONDecodeError as exc:
-            raise ValueError("invalid record storage key") from exc
-        if not isinstance(value, list) or len(value) != 3:
-            raise ValueError("invalid record storage key")
-        workspace_id, source_kind, source_id = value
-        identity = cls(workspace_id, source_kind, source_id)
-        if identity.storage_key != storage_key:
-            raise ValueError("record storage key is not canonical")
-        return identity
+        return _parse_storage_key(storage_key)
+
+
+@lru_cache(maxsize=32_768)
+def _parse_storage_key(storage_key: str) -> RecordIdentity:
+    # Bounded because a long-lived daemon re-parses the same storage keys
+    # across graph edges, hydration, and search hits every rebuild; a
+    # whole-corpus rebuild touches on the order of 10^4 distinct keys, so
+    # this comfortably covers the working set. lru_cache does not cache
+    # exceptions, so malformed/non-canonical keys still raise every call.
+    if not storage_key.startswith("record:"):
+        raise ValueError("storage key must start with 'record:'")
+    try:
+        value = json.loads(storage_key.removeprefix("record:"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid record storage key") from exc
+    if not isinstance(value, list) or len(value) != 3:
+        raise ValueError("invalid record storage key")
+    workspace_id, source_kind, source_id = value
+    identity = RecordIdentity(workspace_id, source_kind, source_id)
+    if identity.storage_key != storage_key:
+        raise ValueError("record storage key is not canonical")
+    return identity
 
 
 @dataclass(frozen=True, slots=True)
