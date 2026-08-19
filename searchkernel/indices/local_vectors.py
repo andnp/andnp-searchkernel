@@ -140,7 +140,7 @@ class VectorSnapshot:
         dim: int,
         epoch: int,
     ) -> VectorSnapshot:
-        vectors: list[np.ndarray] = []
+        matrix = np.empty((len(rows), dim), dtype="<f4")
         storage_keys: list[str] = []
         source_ids: list[str] = []
         workspace_ids: list[str | None] = []
@@ -148,18 +148,16 @@ class VectorSnapshot:
         statuses: list[str] = []
         metadata: list[dict[str, Any]] = []
         uris: list[str | None] = []
-        for row in rows:
+        for row_index, row in enumerate(rows):
             if (
                 row["format_version"] != VECTOR_FORMAT_VERSION
                 or row["normalization_policy"] != NORMALIZATION_POLICY
             ):
                 raise ValueError(f"unsupported vector format for {row['storage_key']}")
-            vectors.append(
-                PackedVectorCodec.decode(
-                    row["embedding"],
-                    dim,
-                    context=f"stored embedding for {row['storage_key']}",
-                )
+            matrix[row_index] = PackedVectorCodec.decode(
+                row["embedding"],
+                dim,
+                context=f"stored embedding for {row['storage_key']}",
             )
             storage_keys.append(row["storage_key"])
             source_ids.append(row["source_id"])
@@ -168,11 +166,6 @@ class VectorSnapshot:
             statuses.append(row["status"])
             metadata.append(dict(metadata_mapping(row["metadata"])))
             uris.append(row["uri"])
-        matrix = (
-            np.ascontiguousarray(np.vstack(vectors), dtype="<f4")
-            if vectors
-            else np.empty((0, dim), dtype="<f4")
-        )
         arrays = [
             np.asarray(values, dtype=object)
             for values in (source_ids, workspace_ids, source_kinds, statuses)

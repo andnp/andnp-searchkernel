@@ -240,6 +240,31 @@ def test_vector_metadata_and_snapshot_cache_follow_vector_epoch() -> None:
     connection.set_trace_callback(None)
 
 
+def test_vector_snapshot_arrays_are_float32_and_immutable() -> None:
+    """Snapshot arrays keep exact-search state contiguous and read-only."""
+    backend = LocalRecordBackend()
+    backend.upsert([_record("one", [3.0, 4.0])], "model", 2)
+
+    backend.search_vector([3.0, 4.0], 1, model_name="model", dim=2)
+    snapshot = backend._vector_snapshots[("model", 2)]
+
+    assert snapshot.matrix.shape == (1, 2)
+    assert snapshot.matrix.dtype == np.dtype("<f4")
+    assert snapshot.matrix.flags.c_contiguous
+    assert not snapshot.matrix.flags.writeable
+    with pytest.raises(ValueError):
+        snapshot.matrix[0, 0] = 0.0
+
+    for array in (
+        snapshot.source_ids,
+        snapshot.workspace_ids,
+        snapshot.source_kinds,
+        snapshot.statuses,
+    ):
+        assert array.dtype == np.dtype(object)
+        assert not array.flags.writeable
+
+
 def test_auto_vector_engine_reuses_selection_until_vector_epoch_changes(
     monkeypatch,
 ) -> None:
