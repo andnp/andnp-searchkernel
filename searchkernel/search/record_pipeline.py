@@ -1375,7 +1375,7 @@ class RecordSearchPipeline:
                 if parent_record is None:
                     missing_record_ids.append(parent_identity.source_id)
                     continue
-                best = max(matches, key=lambda item: (-item.score, item.storage_key))
+                best = min(matches, key=lambda item: (-item.score, item.storage_key))
                 parent = RecordSearchResult(
                     record=parent_record,
                     score=best.score,

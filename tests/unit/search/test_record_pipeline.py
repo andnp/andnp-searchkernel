@@ -793,6 +793,7 @@ def _chunk_result(
     chunk_id: str,
     score: float,
     start_pos: int,
+    strategies: tuple[str, ...] = ("vector",),
 ) -> RecordSearchResult:
     """Build a hydrated chunk result for direct aggregation tests."""
     chunk = Record(
@@ -813,7 +814,7 @@ def _chunk_result(
         record=chunk,
         score=score,
         provenance=SearchResultProvenance(
-            strategies=("vector",), record_identity=chunk.identity
+            strategies=strategies, record_identity=chunk.identity
         ),
     )
 
@@ -848,7 +849,9 @@ async def test_chunk_aggregation_indexes_existing_and_synthesized_parents() -> N
     )
 
     assert [result.record_id for result in aggregated] == ["parent-a", "parent-b"]
+    assert aggregated[0].score == 0.9
     assert aggregated[0].provenance.strategies == ("keyword",)
+    assert aggregated[0].provenance.record_identity == parent_a.identity
     assert [match.chunk_id for match in aggregated[0].chunk_matches] == ["a-2"]
     assert aggregated[1].provenance.strategies == ("vector",)
     assert [match.chunk_id for match in aggregated[1].chunk_matches] == ["b-1"]
@@ -858,6 +861,45 @@ async def test_chunk_aggregation_indexes_existing_and_synthesized_parents() -> N
             [ordinary, *chunks], [], [], limit=1
         )
     ] == ["parent-a"]
+
+
+async def test_synthesized_parent_uses_strongest_chunk_provenance() -> None:
+    """Use the strongest chunk for synthesized score and provenance.
+
+    Equal scores choose the lexicographically earliest chunk identity so the
+    selected provenance is deterministic regardless of retrieval order.
+    """
+    parent = _record("parent")
+    weaker = _chunk_result(
+        parent,
+        "z-weaker",
+        0.7,
+        1,
+        ("keyword",),
+    )
+    strongest = _chunk_result(
+        parent,
+        "b-strongest",
+        0.9,
+        2,
+        ("vector",),
+    )
+    tied = _chunk_result(
+        parent,
+        "a-tied",
+        0.9,
+        3,
+        ("graph",),
+    )
+    pipeline = RecordSearchPipeline(hydrator=_hydrator({parent.source_id: parent}))
+
+    aggregated = await pipeline._aggregate_chunk_results(
+        [weaker, tied, strongest], [], [], limit=1
+    )
+
+    assert aggregated[0].score == 0.9
+    assert aggregated[0].provenance.strategies == ("graph",)
+    assert aggregated[0].provenance.record_identity == tied.record.identity
 
 
 async def test_chunk_aggregation_batches_distinct_missing_parents() -> None:
