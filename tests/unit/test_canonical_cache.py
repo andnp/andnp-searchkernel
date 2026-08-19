@@ -282,8 +282,12 @@ def test_candidate_cache_is_bounded_and_defensive() -> None:
     value = ["a"]
     cache.set(key, value)
     value.append("changed")
+    returned = cache.get(key)
+    assert returned == ["a"]
+    assert returned is not None
+    returned.append("returned mutation")
     assert cache.get(key) == ["a"]
-    assert cache.metrics.hits == 1
+    assert cache.metrics.hits == 2
 
 
 def test_candidate_cache_isolates_mutable_candidate_provenance() -> None:
@@ -313,14 +317,63 @@ def test_candidate_cache_isolates_mutable_candidate_provenance() -> None:
             ),
         ),
     )
-
-    cached = cache.get(key)
-    assert cached is not None
-    cached[0].provenance.add_strategy("mutated", 2, 0.5)
+    provenance.add_strategy("producer-mutated", 2, 0.5)
 
     stored = cache.get(key)
     assert stored is not None
-    assert "mutated" not in stored[0].provenance.strategies
+    assert stored[0].provenance.strategies == ("keyword",)
+
+    cached = cache.get(key)
+    assert cached is not None
+    cached[0].provenance.strategy_details.clear()
+
+    stored = cache.get(key)
+    assert stored is not None
+    assert stored[0].provenance.strategies == ("keyword",)
+    assert stored[0].provenance.strategy_details["keyword"].rank == 1
+
+
+@pytest.mark.asyncio
+async def test_candidate_cache_single_flight_results_are_independently_isolated() -> None:
+    """Keep leader and coalesced waiter candidate results independent."""
+    cache: CandidateResultCache[tuple[RecordSearchCandidate, ...]] = CandidateResultCache()
+    key = _candidate_key("single-flight-isolation")
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+    identity = RecordIdentity("workspace", "note", "single-flight")
+
+    async def compute() -> tuple[RecordSearchCandidate, ...]:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return (
+            RecordSearchCandidate(
+                identity=identity,
+                score=1.0,
+                provenance=SearchResultProvenance(
+                    record_identity=identity,
+                    strategies=("keyword",),
+                ),
+            ),
+        )
+
+    leader_task = asyncio.create_task(cache.async_get_or_compute(key, compute))
+    await started.wait()
+    waiter_task = asyncio.create_task(cache.async_get_or_compute(key, compute))
+    release.set()
+    leader, waiter = await asyncio.gather(leader_task, waiter_task)
+
+    leader[0].provenance.strategy_details.clear()
+    waiter[0].provenance.add_strategy("waiter-mutated", 2, 0.5)
+
+    assert leader[0].provenance.strategies == ("keyword",)
+    assert waiter[0].provenance.strategies == ("keyword", "waiter-mutated")
+    assert (
+        await cache.async_get_or_compute(key, compute)
+    )[0].provenance.strategies == ("keyword",)
+    assert calls == 1
 
 
 def test_hydration_cache_requires_version_in_key_and_expires_missing() -> None:
