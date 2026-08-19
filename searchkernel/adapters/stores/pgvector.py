@@ -930,6 +930,7 @@ class PGVectorStore:
                     f"Embedding dimension mismatch for record {record.storage_key}: "
                     f"expected {dim}, got {len(record.embedding)}"
                 )
+        records = list({record.storage_key: record for record in records}.values())
 
         conn = self.conn_pool.get_connection()
         cursor = None

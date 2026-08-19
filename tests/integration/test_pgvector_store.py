@@ -182,6 +182,11 @@ class TestVectorStore:
         initial = fixture_records[:2]
         store.upsert(initial, model_name="mixed-model", dim=4)
         before = store.epochs()
+        unchanged_vector_timestamp = pg_conn.execute_one(
+            f'SELECT updated_at FROM "{_vector_table_name("mixed-model", 4)}" '
+            "WHERE record_id = %s;",
+            (initial[0].storage_key,),
+        )
         original_revision = pg_conn.execute_one(
             f'SELECT revision FROM "{_vector_table_name("mixed-model", 4)}" '
             "WHERE record_id = %s;",
@@ -211,8 +216,39 @@ class TestVectorStore:
         assert stored[0] == "[0,0,0,1]"
         assert stored[1] == original_revision
         assert pg_conn.execute_one(
+            f'SELECT updated_at FROM "{_vector_table_name("mixed-model", 4)}" '
+            "WHERE record_id = %s;",
+            (initial[0].storage_key,),
+        ) == unchanged_vector_timestamp
+        assert pg_conn.execute_one(
             f'SELECT COUNT(*) FROM "{_vector_table_name("mixed-model", 4)}";'
         ) == (3,)
+
+    def test_duplicate_storage_keys_keep_last_record_and_vector(
+        self, pg_conn, fixture_records
+    ):
+        """Duplicate storage keys use the final record without a cardinality error."""
+        store = PGVectorStore(pg_conn)
+        first = fixture_records[0]
+        last = replace(
+            first,
+            title="Final title",
+            body="Final body",
+            embedding=[0.0, 0.0, 0.0, 1.0],
+        )
+
+        store.upsert([first, last], model_name="duplicate-model", dim=4)
+
+        assert pg_conn.execute_one(
+            "SELECT title, body FROM records WHERE record_id = %s;",
+            (first.storage_key,),
+        ) == ("Final title", "Final body")
+        assert pg_conn.execute_one(
+            f'SELECT embedding::text FROM "{_vector_table_name("duplicate-model", 4)}" '
+            "WHERE record_id = %s;",
+            (first.storage_key,),
+        ) == ("[0,0,0,1]",)
+        assert pg_conn.execute_one("SELECT COUNT(*) FROM records;") == (1,)
 
     def test_upsert_repairs_payload_when_revision_matches(self, pg_conn, fixture_records):
         """A matching revision does not hide a damaged stored vector."""
