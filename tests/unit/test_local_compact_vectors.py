@@ -108,8 +108,8 @@ def test_record_embedding_revision_tracks_identity_content_model_and_dimension()
     assert changed_revision != base_revision
 
 
-def test_local_vector_schema_adds_revision_to_legacy_rows(tmp_path: Path) -> None:
-    """Legacy vector rows remain searchable while their revision stays null."""
+def test_local_vector_schema_repairs_legacy_rows_on_replacement(tmp_path: Path) -> None:
+    """A replacement embedding repairs a legacy row's missing revision."""
     db_path = tmp_path / "legacy-vectors.db"
     backend = LocalRecordBackend(db_path)
     record = _record("legacy", [1.0, 0.0])
@@ -164,6 +164,16 @@ def test_local_vector_schema_adds_revision_to_legacy_rows(tmp_path: Path) -> Non
     assert "revision" in columns
     assert revision is None
     assert restored.search_vector([1.0, 0.0], 1, model_name="model", dim=2)
+
+    restored.upsert([record], "model", 2)
+
+    row = restored.db_manager.get_connection().execute(
+        """
+        SELECT revision, format_version, normalization_policy
+        FROM local_vectors_v2
+        """
+    ).fetchone()
+    assert tuple(row) == (record_embedding_revision(record, "model", 2), 2, "l2")
 
 
 def test_exact_search_has_cosine_parity_deterministic_ties_and_filters() -> None:
@@ -237,6 +247,68 @@ def test_vector_metadata_and_snapshot_cache_follow_vector_epoch() -> None:
     assert stats_query_count() == 3
     assert backend._vector_snapshots[("model", 2)] is not snapshot
     assert vector.search([0.0, 1.0], 1, model_name="model", dim=2) == []
+    connection.set_trace_callback(None)
+
+
+def test_large_mixed_vector_upsert_writes_only_changed_rows(tmp_path: Path) -> None:
+    """Large batches skip unchanged rows while repairing changed vector state."""
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [_record(f"record-{index}", [1.0, 0.0]) for index in range(901)]
+    backend.upsert(records, "model", 2)
+    before = backend.vector_epoch()
+
+    original_revision = record_embedding_revision(records[0], "model", 2)
+    records[0].body = "changed semantic input"
+    records[1].embedding = [0.0, 1.0]
+    connection = backend.db_manager.get_connection()
+    connection.execute(
+        """
+        UPDATE local_vectors_v2
+        SET embedding = ?, revision = ?, format_version = ?,
+            normalization_policy = ?
+        WHERE storage_key = ?
+        """,
+        (
+            b"corrupt",
+            record_embedding_revision(records[2], "model", 2),
+            1,
+            "legacy",
+            records[2].storage_key,
+        ),
+    )
+    connection.commit()
+    queries: list[str] = []
+    connection.set_trace_callback(queries.append)
+
+    backend.upsert(records, "model", 2)
+
+    vector_writes = [
+        query for query in queries if "local_vectors_v2" in query and "INSERT" in query
+    ]
+    assert len(vector_writes) == 3
+    assert backend.vector_epoch() == before + 1
+    assert backend.search_vector(
+        [0.0, 1.0], 1, model_name="model", dim=2
+    )[0].source_id == "record-1"
+    changed_revision = connection.execute(
+        "SELECT revision FROM local_vectors_v2 WHERE storage_key = ?",
+        (records[0].storage_key,),
+    ).fetchone()[0]
+    assert changed_revision != original_revision
+    repaired = connection.execute(
+        """
+        SELECT embedding, revision, format_version, normalization_policy
+        FROM local_vectors_v2
+        WHERE storage_key = ?
+        """,
+        (records[2].storage_key,),
+    ).fetchone()
+    assert tuple(repaired) == (
+        PackedVectorCodec.encode(records[2].embedding, 2),
+        record_embedding_revision(records[2], "model", 2),
+        2,
+        "l2",
+    )
     connection.set_trace_callback(None)
 
 
@@ -346,6 +418,9 @@ def test_snapshot_reload_corruption_and_deletion(tmp_path: Path) -> None:
 
     restored = LocalRecordBackend(db_path)
     restored.upsert([records[0]], "model", 2)
+    assert restored.search_vector(
+        [1.0, 0.0], 1, model_name="model", dim=2
+    )[0].source_id == "one"
     restored.delete([records[0].storage_key])
     assert [
         hit.source_id

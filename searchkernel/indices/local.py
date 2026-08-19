@@ -2326,21 +2326,53 @@ class LocalRecordBackend:
                         f"Dimension mismatch for model {model_name!r}: "
                         f"expected {existing_dim}, got {dim}"
                     )
-                packed_vectors: list[tuple[str, bytes, str]] = []
+                packed_vectors_by_key: dict[str, tuple[str, bytes, str]] = {}
                 for record in rows:
                     if record.embedding is not None:
-                        packed_vectors.append(
-                            (
-                                record.storage_key,
-                                PackedVectorCodec.encode(
-                                    record.embedding,
-                                    dim,
-                                    context=f"embedding for {record.storage_key}",
-                                ),
-                                record_embedding_revision(record, model_name, dim),
-                            )
+                        packed_vectors_by_key[record.storage_key] = (
+                            record.storage_key,
+                            PackedVectorCodec.encode(
+                                record.embedding,
+                                dim,
+                                context=f"embedding for {record.storage_key}",
+                            ),
+                            record_embedding_revision(record, model_name, dim),
                         )
-                vector_affected = bool(packed_vectors)
+                packed_vectors = list(packed_vectors_by_key.values())
+                existing_vectors: dict[str, sqlite3.Row] = {}
+                for key_chunk in iter_ordered_key_chunks(
+                    packed_vectors_by_key, limit=DEFAULT_KEY_CHUNK_LIMIT
+                ):
+                    placeholders = ",".join("?" for _ in key_chunk)
+                    existing_vectors.update(
+                        {
+                            row["storage_key"]: row
+                            for row in conn.execute(
+                                f"""
+                                SELECT storage_key, dim, embedding, revision,
+                                       format_version, normalization_policy
+                                FROM local_vectors_v2
+                                WHERE encoder_namespace = ?
+                                  AND storage_key IN ({placeholders})
+                                """,
+                                (model_name, *key_chunk),
+                            ).fetchall()
+                        }
+                    )
+                changed_vectors = [
+                    vector
+                    for vector in packed_vectors
+                    if (
+                        (existing := existing_vectors.get(vector[0])) is None
+                        or existing["dim"] != dim
+                        or existing["revision"] != vector[2]
+                        or existing["embedding"] != vector[1]
+                        or len(existing["embedding"]) != dim * _VECTOR_EMBEDDING_BYTES
+                        or existing["format_version"] != VECTOR_FORMAT_VERSION
+                        or existing["normalization_policy"] != NORMALIZATION_POLICY
+                    )
+                ]
+                vector_affected = bool(changed_vectors)
                 _, keyword_changed = self._record_writer._write_records(conn, rows)
                 conn.executemany(
                     """
@@ -2364,7 +2396,7 @@ class LocalRecordBackend:
                             VECTOR_FORMAT_VERSION,
                             NORMALIZATION_POLICY,
                         )
-                        for storage_key, embedding, revision in packed_vectors
+                        for storage_key, embedding, revision in changed_vectors
                     ],
                 )
                 self._epoch_lane.bump(

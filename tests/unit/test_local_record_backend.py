@@ -157,11 +157,20 @@ def test_repeated_canonical_sync_preserves_results_without_keyword_epoch_changes
 
     vector.upsert([record], "test", 2)
     before = backend.epochs()
+    before_record_epoch = backend.epoch()
+    queries: list[str] = []
+    connection = backend.db_manager.get_connection()
+    connection.set_trace_callback(queries.append)
     vector.upsert([record], "test", 2)
+    connection.set_trace_callback(None)
     after_vector = backend.epochs()
     backend.index([record])
 
-    assert after_vector["vector"] == before["vector"] + 1
+    assert backend.epoch() == before_record_epoch + 1
+    assert after_vector["vector"] == before["vector"]
+    assert not any(
+        "local_vectors_v2" in query and "INSERT" in query for query in queries
+    )
     assert backend.epochs() == after_vector
     assert [hit.source_id for hit in backend.search_keyword("findable", 10)] == [
         "repeat"
