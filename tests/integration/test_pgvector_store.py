@@ -313,6 +313,23 @@ class TestVectorStore:
             """
         ) == (None,)
 
+    def test_schema_declares_graph_identity_indexes(self, pg_conn):
+        """Graph edges have identity indexes for both traversal directions."""
+        assert pg_conn.execute_one(
+            """
+            SELECT array_agg(indexname ORDER BY indexname)
+            FROM pg_indexes
+            WHERE tablename = 'graph_edges'
+              AND indexname IN (
+                  'idx_graph_edges_source_identity',
+                  'idx_graph_edges_target_identity'
+              );
+            """
+        ) == ([
+            "idx_graph_edges_source_identity",
+            "idx_graph_edges_target_identity",
+        ],)
+
     def test_vector_revision_persists_and_legacy_tables_are_initialized(
         self, pg_conn, fixture_records
     ):

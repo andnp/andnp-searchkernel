@@ -436,6 +436,10 @@ def _create_graph_indexes(cursor) -> None:
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_identity "
         "ON graph_edges (source_workspace_id, source_kind, source_id);"
     )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_target_identity "
+        "ON graph_edges (target_workspace_id, target_kind, target_id);"
+    )
 
 
 class _PostgresSession(Protocol):
