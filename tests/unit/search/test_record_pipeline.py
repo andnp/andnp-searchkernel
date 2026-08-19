@@ -13,11 +13,13 @@ from searchkernel.domain import (
     Record,
     RecordHit,
     RecordIdentity,
+    SearchResultProvenance,
 )
 from searchkernel.ports import KeywordStore, VectorStore
 from searchkernel.ports.search_results import (
     MAX_FAILURE_DETAIL_LENGTH,
     RecordSearchOutcome,
+    RecordSearchResult,
 )
 from searchkernel.runtime import (
     CandidateResultCache,
@@ -722,6 +724,170 @@ async def test_missing_chunk_parent_is_reported_without_reordering_results() -> 
     assert outcome.diagnostic_evidence is not None
     assert outcome.diagnostic_evidence.missing_record_ids == ("missing-parent",)
     assert outcome.diagnostic_evidence.degraded
+
+
+async def test_chunk_aggregation_combines_matches_and_truncates_excerpts() -> None:
+    """Combine chunks for one parent while preserving best-score semantics.
+
+    The aggregate keeps the highest parent score and returns only the
+    configured number of deterministically ordered chunk matches.
+    """
+    parent = _record("parent")
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    chunks = [
+        Record(
+            source_kind="fake",
+            source_id=f"{parent.storage_key}#chunk:{chunk_id}",
+            title=f"chunk-{chunk_id}",
+            body=f"body-{chunk_id}",
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                "_searchkernel_chunk": True,
+                "_chunk_id": chunk_id,
+                "_chunk_parent_storage_key": parent.storage_key,
+                "_chunk_metadata": {"start_pos": start_pos},
+            },
+        )
+        for chunk_id, start_pos in (("a", 20), ("b", 10), ("c", 0))
+    ]
+    provenance = SearchResultProvenance(strategies=("vector",))
+
+    class BatchHydrator:
+        async def hydrate_records(
+            self, identities: Sequence[RecordIdentity]
+        ) -> dict[str, Record]:
+            assert identities == [parent.identity]
+            return {parent.storage_key: parent}
+
+    pipeline = RecordSearchPipeline(
+        hydrator=BatchHydrator(),
+        config=RecordSearchConfig(max_chunk_matches=2),
+    )
+    results = [
+        RecordSearchResult(
+            record=chunk,
+            score=score,
+            provenance=provenance,
+        )
+        for chunk, score in zip(chunks, (0.9, 0.8, 0.7), strict=True)
+    ]
+
+    aggregated = await pipeline._aggregate_chunk_results(
+        results, [], [], limit=1
+    )
+
+    assert len(aggregated) == 1
+    assert aggregated[0].record_id == "parent"
+    assert aggregated[0].score == 0.9
+    assert [match.chunk_id for match in aggregated[0].chunk_matches] == [
+        "a",
+        "b",
+    ]
+    assert aggregated[0].provenance is not provenance
+    assert aggregated[0].provenance.strategies == ("vector",)
+
+
+def _chunk_result(
+    parent: Record,
+    chunk_id: str,
+    score: float,
+    start_pos: int,
+) -> RecordSearchResult:
+    """Build a hydrated chunk result for direct aggregation tests."""
+    chunk = Record(
+        source_kind=parent.source_kind,
+        source_id=f"{parent.storage_key}#chunk:{chunk_id}",
+        title=f"chunk {chunk_id}",
+        body=f"chunk body {chunk_id}",
+        created_at=parent.created_at,
+        updated_at=parent.updated_at,
+        metadata={
+            "_searchkernel_chunk": True,
+            "_chunk_id": chunk_id,
+            "_chunk_parent_storage_key": parent.storage_key,
+            "_chunk_metadata": {"start_pos": start_pos},
+        },
+    )
+    return RecordSearchResult(
+        record=chunk,
+        score=score,
+        provenance=SearchResultProvenance(
+            strategies=("vector",), record_identity=chunk.identity
+        ),
+    )
+
+
+async def test_chunk_aggregation_indexes_existing_and_synthesized_parents() -> None:
+    """Aggregate several parents while preserving matches and provenance.
+
+    Existing parents retain ordinary-result provenance, synthesized parents
+    are added after ordinary results, and both match and result limits apply.
+    """
+    parent_a = _record("parent-a")
+    parent_b = _record("parent-b")
+    ordinary = RecordSearchResult(
+        record=parent_a,
+        score=0.4,
+        provenance=SearchResultProvenance(
+            strategies=("keyword",), record_identity=parent_a.identity
+        ),
+    )
+    chunks = [
+        _chunk_result(parent_a, "a-2", 0.9, 2),
+        _chunk_result(parent_a, "a-1", 0.8, 1),
+        _chunk_result(parent_b, "b-1", 0.7, 1),
+    ]
+    pipeline = RecordSearchPipeline(
+        hydrator=_hydrator({parent_b.source_id: parent_b}),
+        config=RecordSearchConfig(max_chunk_matches=1),
+    )
+
+    aggregated = await pipeline._aggregate_chunk_results(
+        [ordinary, *chunks], [], [], limit=3
+    )
+
+    assert [result.record_id for result in aggregated] == ["parent-a", "parent-b"]
+    assert aggregated[0].provenance.strategies == ("keyword",)
+    assert [match.chunk_id for match in aggregated[0].chunk_matches] == ["a-2"]
+    assert aggregated[1].provenance.strategies == ("vector",)
+    assert [match.chunk_id for match in aggregated[1].chunk_matches] == ["b-1"]
+    assert [
+        result.record_id
+        for result in await pipeline._aggregate_chunk_results(
+            [ordinary, *chunks], [], [], limit=1
+        )
+    ] == ["parent-a"]
+
+
+async def test_chunk_aggregation_batches_distinct_missing_parents() -> None:
+    """Report each missing parent while using the existing batch capability."""
+    parent_a = RecordIdentity(None, "fake", "missing-a")
+    parent_b = RecordIdentity(None, "fake", "missing-b")
+    chunks = [
+        _chunk_result(_record(parent_a.source_id), "a", 0.9, 1),
+        _chunk_result(_record(parent_b.source_id), "b", 0.8, 1),
+    ]
+
+    class BatchHydrator:
+        async def hydrate_records(
+            self, identities: Sequence[RecordIdentity]
+        ) -> dict[str, Record | None]:
+            assert identities == [parent_a, parent_b]
+            return {}
+
+        def hydrate_record(self, identity: RecordIdentity) -> Record | None:
+            raise AssertionError("scalar hydration should not run")
+
+    pipeline = RecordSearchPipeline(hydrator=BatchHydrator())
+    missing: list[str] = []
+
+    aggregated = await pipeline._aggregate_chunk_results(
+        chunks, [], missing, limit=2
+    )
+
+    assert aggregated == []
+    assert missing == ["missing-a", "missing-b"]
 
 
 async def test_policy_can_adjust_scores_reject_results_and_post_process() -> None:

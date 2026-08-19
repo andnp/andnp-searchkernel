@@ -1320,24 +1320,59 @@ class RecordSearchPipeline:
         if not grouped:
             return list(results)
 
-        by_parent = {result.storage_key: result for result in ordinary}
         aggregated = list(ordinary)
+        parent_positions = {
+            result.storage_key: position
+            for position, result in enumerate(aggregated)
+        }
+        missing_parent_identities: dict[str, RecordIdentity] = {}
+        for parent_key in grouped:
+            if parent_key in parent_positions:
+                continue
+            try:
+                missing_parent_identities[parent_key] = (
+                    RecordIdentity.from_storage_key(parent_key)
+                )
+            except Exception as error:  # noqa: BLE001 - staged hydration failure
+                self._handle_error("hydration", error, failures)
+
+        hydrated_parents: dict[str, Record | None] = {}
+        hydrate_records = getattr(self._hydrator, "hydrate_records", None)
+        if missing_parent_identities and callable(hydrate_records):
+            result = await _capture_stage(
+                "hydration",
+                lambda: _call_async(
+                    hydrate_records,
+                    list(missing_parent_identities.values()),
+                ),
+            )
+            records = self._consume_stage(result, failures)
+            if records is not None:
+                hydrated_parents.update(
+                    cast(Mapping[str, Record | None], records)
+                )
+
         for parent_key, matches in grouped.items():
-            parent = by_parent.get(parent_key)
+            parent_position = parent_positions.get(parent_key)
+            parent = (
+                aggregated[parent_position]
+                if parent_position is not None
+                else None
+            )
             if parent is None:
-                parent_identity: RecordIdentity | None = None
-                try:
-                    parent_identity = RecordIdentity.from_storage_key(parent_key)
-                    parent_record = await self._hydrate(
-                        parent_identity
-                    )
-                except Exception as error:  # noqa: BLE001 - staged hydration failure
-                    self._handle_error("hydration", error, failures)
-                    if parent_identity is not None:
-                        missing_record_ids.append(parent_identity.source_id)
+                parent_identity = missing_parent_identities.get(parent_key)
+                if parent_identity is None:
                     continue
+                if callable(hydrate_records):
+                    parent_record = hydrated_parents.get(parent_key)
+                else:
+                    try:
+                        parent_record = await self._hydrate(parent_identity)
+                    except Exception as error:  # noqa: BLE001 - staged hydration failure
+                        self._handle_error("hydration", error, failures)
+                        missing_record_ids.append(parent_identity.source_id)
+                        continue
                 if parent_record is None:
-                    assert parent_identity is not None
                     missing_record_ids.append(parent_identity.source_id)
                     continue
                 best = max(matches, key=lambda item: (-item.score, item.storage_key))
@@ -1347,6 +1382,8 @@ class RecordSearchPipeline:
                     provenance=best.provenance.clone(),
                 )
                 aggregated.append(parent)
+                parent_position = len(aggregated) - 1
+                parent_positions[parent_key] = parent_position
 
             chunk_matches = [
                 ChunkResult(
@@ -1383,10 +1420,8 @@ class RecordSearchPipeline:
                 provenance=parent.provenance,
                 chunk_matches=combined,
             )
-            aggregated = [
-                replacement if item.storage_key == parent.storage_key else item
-                for item in aggregated
-            ]
+            assert parent_position is not None
+            aggregated[parent_position] = replacement
 
         aggregated.sort(
             key=lambda item: (
