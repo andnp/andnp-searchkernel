@@ -320,7 +320,7 @@ class TestVectorStore:
         """Graph edges have identity indexes for both traversal directions."""
         assert pg_conn.execute_one(
             """
-            SELECT array_agg(indexname ORDER BY indexname)
+            SELECT array_agg(DISTINCT indexname ORDER BY indexname)
             FROM pg_indexes
             WHERE tablename = 'graph_edges'
               AND indexname IN (
