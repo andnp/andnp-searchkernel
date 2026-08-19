@@ -1,6 +1,8 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from threading import Event, Thread
 from typing import Any
 
 import pytest
@@ -32,6 +34,20 @@ class _Clock:
 
     def __call__(self) -> float:
         return self.value
+
+
+def _candidate_key(query: str = "query") -> CandidateCacheKey:
+    return CandidateCacheKey.build(
+        query=query,
+        filters={},
+        requested_limit=1,
+        acquisition_limit=1,
+        adaptive_limit=None,
+        routing_fingerprint="r",
+        encoder_namespace=None,
+        epochs=SearchEpochs(),
+        policy_version=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -395,24 +411,148 @@ async def test_candidate_cache_single_flight_isolates_failures() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_wait_does_not_starve_a_single_worker_executor() -> None:
+    """A follower must complete while the default executor is occupied."""
+    cache: CandidateResultCache[list[str]] = CandidateResultCache()
+    key = _candidate_key("executor-starvation")
+    assert await cache.async_wait_for_miss(key) == (True, None)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(executor)
+    blocker_started = Event()
+    release_blocker = Event()
+
+    def block_executor() -> None:
+        blocker_started.set()
+        release_blocker.wait()
+
+    blocker = loop.run_in_executor(None, block_executor)
+    assert blocker_started.wait(timeout=1.0)
+    follower = asyncio.create_task(cache.async_wait_for_miss(key))
+    loop.call_soon(cache.set, key, ["candidate"])
+    try:
+        assert await asyncio.wait_for(follower, timeout=1.0) == (
+            False,
+            ["candidate"],
+        )
+    finally:
+        release_blocker.set()
+        await blocker
+        executor.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_follower_does_not_cancel_shared_completion() -> None:
+    """Cancelling one follower leaves another follower able to receive data."""
+    cache: CandidateResultCache[list[str]] = CandidateResultCache()
+    key = _candidate_key("follower-cancellation")
+    assert await cache.async_wait_for_miss(key) == (True, None)
+
+    cancelled = asyncio.create_task(cache.async_wait_for_miss(key))
+    survivor = asyncio.create_task(cache.async_wait_for_miss(key))
+    loop = asyncio.get_running_loop()
+    loop.call_soon(cancelled.cancel)
+    loop.call_soon(cache.set, key, ["candidate"])
+    cancelled_result, survivor_result = await asyncio.gather(
+        cancelled,
+        survivor,
+        return_exceptions=True,
+    )
+
+    assert isinstance(cancelled_result, asyncio.CancelledError)
+    assert survivor_result == (False, ["candidate"])
+
+
+@pytest.mark.asyncio
+async def test_cross_thread_completion_reaches_another_event_loop() -> None:
+    """A synchronous completion in one thread wakes a waiter on another loop."""
+    cache: CandidateResultCache[list[str]] = CandidateResultCache()
+    key = _candidate_key("cross-thread")
+    owner_started = Event()
+    release_owner = Event()
+    owner_errors: list[BaseException] = []
+
+    def run_owner() -> None:
+        async def owner() -> None:
+            try:
+                assert await cache.async_wait_for_miss(key) == (True, None)
+                owner_started.set()
+                if not release_owner.wait(timeout=1.0):
+                    raise AssertionError("owner release was not signaled")
+                cache.set(key, ["cross-thread"])
+            except AssertionError as error:
+                owner_errors.append(error)
+
+        asyncio.run(owner())
+
+    owner_thread = Thread(target=run_owner)
+    owner_thread.start()
+    assert owner_started.wait(timeout=1.0)
+    follower = asyncio.create_task(cache.async_wait_for_miss(key))
+    asyncio.get_running_loop().call_soon(release_owner.set)
+    try:
+        assert await asyncio.wait_for(follower, timeout=1.0) == (
+            False,
+            ["cross-thread"],
+        )
+    finally:
+        owner_thread.join(timeout=1.0)
+    assert not owner_thread.is_alive()
+    assert owner_errors == []
+
+
+@pytest.mark.asyncio
+async def test_stale_owner_failure_does_not_remove_new_flight() -> None:
+    """A delayed old-owner failure cannot release a newer single flight."""
+    cache: CandidateResultCache[list[str]] = CandidateResultCache()
+    key = _candidate_key("stale-flight")
+    claimed = asyncio.Event()
+    release = asyncio.Event()
+
+    async def old_owner() -> None:
+        assert await cache.async_wait_for_miss(key) == (True, None)
+        claimed.set()
+        await release.wait()
+        raise RuntimeError("old owner failed")
+
+    old_owner_task = asyncio.create_task(old_owner())
+    await claimed.wait()
+    cache.fail(key, RuntimeError("external failure"))
+    assert await cache.async_wait_for_miss(key) == (True, None)
+    release.set()
+    with pytest.raises(RuntimeError, match="old owner failed"):
+        await old_owner_task
+
+    follower = asyncio.create_task(cache.async_wait_for_miss(key))
+    asyncio.get_running_loop().call_soon(cache.set, key, ["new flight"])
+    assert await follower == (False, ["new flight"])
+
+
+@pytest.mark.asyncio
 async def test_hydration_cache_single_flight_caches_missing_records() -> None:
+    """Concurrent missing-record hydration runs once and caches ``None``."""
     cache: HydrationCache[Record] = HydrationCache()
     key = HydrationCacheKey.build(
         RecordIdentity("workspace", "note", "missing"),
         record_version=1,
         policy_version="policy/v1",
     )
+    started = asyncio.Event()
+    release = asyncio.Event()
     calls = 0
 
     async def compute() -> None:
         nonlocal calls
         calls += 1
-        await asyncio.sleep(0)
+        started.set()
+        await release.wait()
 
-    assert await asyncio.gather(
-        cache.async_get_or_compute(key, compute),
-        cache.async_get_or_compute(key, compute),
-    ) == [None, None]
+    first = asyncio.create_task(cache.async_get_or_compute(key, compute))
+    await started.wait()
+    second = asyncio.create_task(cache.async_get_or_compute(key, compute))
+    release.set()
+    assert await asyncio.gather(first, second) == [None, None]
     assert calls == 1
     assert cache.lookup(key) == (True, None)
     assert cache.metrics.coalesced_waiters == 1
@@ -436,9 +576,12 @@ async def test_cache_failure_releases_single_flight_waiters() -> None:
     candidate_waiter = asyncio.create_task(
         candidate_cache.async_wait_for_miss(candidate_key)
     )
-    await asyncio.sleep(0)
     candidate_error = RuntimeError("candidate failure")
-    candidate_cache.fail(candidate_key, candidate_error)
+    asyncio.get_running_loop().call_soon(
+        candidate_cache.fail,
+        candidate_key,
+        candidate_error,
+    )
     with pytest.raises(RuntimeError, match="candidate failure"):
         await candidate_waiter
 
@@ -452,9 +595,12 @@ async def test_cache_failure_releases_single_flight_waiters() -> None:
     hydration_waiter = asyncio.create_task(
         hydration_cache.async_wait_for_miss(hydration_key)
     )
-    await asyncio.sleep(0)
     hydration_error = RuntimeError("hydration failure")
-    hydration_cache.fail(hydration_key, hydration_error)
+    asyncio.get_running_loop().call_soon(
+        hydration_cache.fail,
+        hydration_key,
+        hydration_error,
+    )
     with pytest.raises(RuntimeError, match="hydration failure"):
         await hydration_waiter
 
@@ -486,8 +632,7 @@ async def test_owner_failure_releases_unfinished_single_flight_waiters() -> None
     first = asyncio.create_task(owner())
     await claimed.wait()
     second = asyncio.create_task(cache.async_wait_for_miss(key))
-    await asyncio.sleep(0)
-    release.set()
+    asyncio.get_running_loop().call_soon(release.set)
     with pytest.raises(RuntimeError, match="owner failed"):
         await first
     with pytest.raises(RuntimeError, match="owner failed"):

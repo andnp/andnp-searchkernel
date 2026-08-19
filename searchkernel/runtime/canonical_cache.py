@@ -10,10 +10,11 @@ import math
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
-from threading import Event, Lock, RLock
+from threading import Lock, RLock
 from typing import TypeVar
 
 from searchkernel.domain import RecordIdentity
@@ -117,6 +118,7 @@ class HydrationCacheKey:
 
 
 ValueT = TypeVar("ValueT")
+KeyT = TypeVar("KeyT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,14 +131,9 @@ class BoundedCacheMetrics:
     coalesced_waiters: int = 0
 
 
-_MISSING = object()
-
-
 @dataclass(slots=True)
 class _InFlight[ValueT]:
-    completed: Event = field(default_factory=Event)
-    value: object = _MISSING
-    error: BaseException | None = None
+    completed: Future[ValueT] = field(default_factory=Future)
 
 
 class _BoundedCache[ValueT]:
@@ -247,8 +244,7 @@ class CandidateResultCache[ValueT]:
                 inflight,
             )
             return True, None
-        await asyncio.to_thread(inflight.completed.wait)
-        return False, _finish_waiter(inflight)
+        return False, await _wait_for_inflight(inflight)
 
     async def async_get_or_compute(
         self,
@@ -261,8 +257,7 @@ class CandidateResultCache[ValueT]:
             return cached
         inflight, leader = self._start_or_join(key)
         if not leader:
-            await asyncio.to_thread(inflight.completed.wait)
-            return _finish_waiter(inflight)
+            return await _wait_for_inflight(inflight)
         try:
             value = await _maybe_await(compute())
             self.set(key, value)
@@ -284,7 +279,9 @@ class CandidateResultCache[ValueT]:
         error: BaseException,
     ) -> None:
         with self._flight_lock:
-            self._inflight.pop(key, None)
+            if self._inflight.get(key) is not inflight:
+                return
+            self._inflight.pop(key)
         _complete_failure(inflight, error)
 
     def _start_or_join(
@@ -307,7 +304,7 @@ class CandidateResultCache[ValueT]:
         inflight: _InFlight[ValueT],
         error: BaseException,
     ) -> None:
-        self.fail(key, error)
+        self._fail_inflight(key, inflight, error)
 
 
 class HydrationCache[ValueT]:
@@ -385,8 +382,7 @@ class HydrationCache[ValueT]:
                 inflight,
             )
             return True, None
-        await asyncio.to_thread(inflight.completed.wait)
-        return False, _finish_waiter(inflight)
+        return False, await _wait_for_inflight(inflight)
 
     async def async_get_or_compute(
         self,
@@ -399,17 +395,26 @@ class HydrationCache[ValueT]:
             return value
         inflight, leader = self._start_or_join(key)
         if not leader:
-            await asyncio.to_thread(inflight.completed.wait)
-            return _finish_waiter(inflight)
+            return await _wait_for_inflight(inflight)
         try:
             value = await _maybe_await(compute())
             self.set(key, value)
             return copy.deepcopy(value)
         except BaseException as error:
-            with self._flight_lock:
-                self._inflight.pop(key, None)
-            _complete_failure(inflight, error)
+            self._fail_inflight(key, inflight, error)
             raise
+
+    def _fail_inflight(
+        self,
+        key: HydrationCacheKey,
+        inflight: _InFlight[ValueT | None],
+        error: BaseException,
+    ) -> None:
+        with self._flight_lock:
+            if self._inflight.get(key) is not inflight:
+                return
+            self._inflight.pop(key)
+        _complete_failure(inflight, error)
 
     def _start_or_join(
         self, key: HydrationCacheKey
@@ -431,22 +436,20 @@ class HydrationCache[ValueT]:
         inflight: _InFlight[ValueT | None],
         error: BaseException,
     ) -> None:
-        self.fail(key, error)
+        self._fail_inflight(key, inflight, error)
 
 
 def _complete_success[T](inflight: _InFlight[T], value: T) -> None:
-    inflight.value = copy.deepcopy(value)
-    inflight.completed.set()
+    inflight.completed.set_result(copy.deepcopy(value))
 
 
 def _complete_failure[T](inflight: _InFlight[T], error: BaseException) -> None:
-    inflight.error = error
-    inflight.completed.set()
+    inflight.completed.set_exception(error)
 
 
-def _watch_single_flight_owner[ValueT](
-    fail: Callable[[object, _InFlight[ValueT], BaseException], None],
-    key: object,
+def _watch_single_flight_owner[KeyT, ValueT](
+    fail: Callable[[KeyT, _InFlight[ValueT], BaseException], None],
+    key: KeyT,
     inflight: _InFlight[ValueT],
 ) -> None:
     owner = asyncio.current_task()
@@ -464,12 +467,9 @@ def _watch_single_flight_owner[ValueT](
     owner.add_done_callback(owner_done)
 
 
-def _finish_waiter[T](inflight: _InFlight[T]) -> T:
-    if inflight.value is not _MISSING:
-        return copy.deepcopy(inflight.value)  # type: ignore[return-value]
-    if inflight.error is not None:
-        raise inflight.error
-    raise RuntimeError("cache coalescing completed without a result")
+async def _wait_for_inflight[T](inflight: _InFlight[T]) -> T:
+    await asyncio.shield(asyncio.wrap_future(inflight.completed))
+    return copy.deepcopy(inflight.completed.result())
 
 
 async def _maybe_await[T](value: T | Awaitable[T]) -> T:
