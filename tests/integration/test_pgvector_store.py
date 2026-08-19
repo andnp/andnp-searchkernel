@@ -1164,6 +1164,115 @@ class TestKeywordStore:
         top_record = next(r for r in fixture_records if r.source_id == top_id)
         assert "machine" in top_record.body.lower()
 
+    def test_repeated_keyword_index_skips_unchanged_projection(
+        self, pg_conn, fixture_records
+    ):
+        """Repeated keyword indexing preserves the projection and epoch.
+
+        The stored record timestamp is also unchanged by the clean skip.
+        """
+        vector_store = PGVectorStore(pg_conn)
+        keyword_store = PGKeywordStore(pg_conn)
+        record = fixture_records[0]
+
+        vector_store.upsert([record], model_name="keyword-idempotency", dim=4)
+        keyword_store.index([record])
+        before = (
+            keyword_store.keyword_epoch(),
+            pg_conn.execute_one(
+                "SELECT tsvector_body::text, updated_at FROM records "
+                "WHERE record_id = %s;",
+                (record.storage_key,),
+            ),
+        )
+
+        keyword_store.index([record])
+
+        assert keyword_store.keyword_epoch() == before[0]
+        assert pg_conn.execute_one(
+            "SELECT tsvector_body::text, updated_at FROM records "
+            "WHERE record_id = %s;",
+            (record.storage_key,),
+        ) == before[1]
+
+    def test_keyword_index_updates_changed_and_missing_projections(
+        self, pg_conn, fixture_records
+    ):
+        """Mixed keyword batches update changed fields and missing rows.
+
+        Title, body, URI, metadata, and an unchanged projection are covered.
+        """
+        vector_store = PGVectorStore(pg_conn)
+        keyword_store = PGKeywordStore(pg_conn)
+        unchanged = fixture_records[0]
+        original = fixture_records[1]
+        vector_store.upsert([unchanged, original], model_name="keyword-mixed", dim=4)
+        keyword_store.index([unchanged, original])
+        unchanged_projection = pg_conn.execute_one(
+            "SELECT tsvector_body::text FROM records WHERE record_id = %s;",
+            (unchanged.storage_key,),
+        )
+
+        changed = replace(
+            original,
+            title="changedtitleterm",
+            body="changedbodyterm",
+            uri="docs/changeduripath",
+            metadata={"marker": "changedmetadataterm"},
+        )
+        missing = replace(
+            unchanged,
+            source_id="keyword-missing",
+            title="missingtitleterm",
+            body="missingbodyterm",
+            uri="docs/missinguripath",
+            metadata={"marker": "missingmetadataterm"},
+        )
+        vector_store.upsert(
+            [unchanged, changed, missing], model_name="keyword-mixed", dim=4
+        )
+        before = keyword_store.keyword_epoch()
+
+        keyword_store.index([unchanged, changed, missing])
+
+        assert keyword_store.keyword_epoch() == before + 1
+        assert pg_conn.execute_one(
+            "SELECT tsvector_body::text FROM records WHERE record_id = %s;",
+            (unchanged.storage_key,),
+        ) == unchanged_projection
+        for term, expected_id in (
+            ("changedtitleterm", "test:2"),
+            ("changedbodyterm", "test:2"),
+            ("docs/changeduripath", "test:2"),
+            ("changedmetadataterm", "test:2"),
+            ("missingtitleterm", "keyword-missing"),
+            ("missingbodyterm", "keyword-missing"),
+            ("docs/missinguripath", "keyword-missing"),
+            ("missingmetadataterm", "keyword-missing"),
+        ):
+            assert [hit.source_id for hit in keyword_store.search(term, 10)] == [
+                expected_id
+            ]
+
+    def test_keyword_index_duplicate_storage_keys_keep_last_projection(
+        self, pg_conn, fixture_records
+    ):
+        """Duplicate keyword identities use the final record in the batch."""
+        first = fixture_records[0]
+        last = replace(first, title="lastkeywordterm", body="lastbodyterm")
+        vector_store = PGVectorStore(pg_conn)
+        keyword_store = PGKeywordStore(pg_conn)
+
+        vector_store.upsert([first, last], model_name="keyword-duplicates", dim=4)
+        before = keyword_store.keyword_epoch()
+        keyword_store.index([first, last])
+
+        assert keyword_store.keyword_epoch() == before + 1
+        assert [hit.source_id for hit in keyword_store.search("lastkeywordterm", 10)] == [
+            first.source_id
+        ]
+        assert keyword_store.search("machine", 10) == []
+
     @pytest.mark.parametrize("keyword_first", [True, False])
     def test_vector_upsert_preserves_weighted_keyword_projection(
         self, pg_conn, keyword_first
@@ -1355,7 +1464,7 @@ class TestKeywordStore:
         assert [hit.source_id for hit in results] == ["title-match", "body-match"]
 
     def test_keyword_index_ignores_missing_records(self, pg_conn):
-        """Test indexing an unknown record does not create searchable data."""
+        """Unknown records do not create searchable data or epoch changes."""
         record = Record(
             source_kind="missing",
             source_id="missing:1",
@@ -1365,9 +1474,11 @@ class TestKeywordStore:
             updated_at=datetime.now(UTC),
         )
         keyword_store = PGKeywordStore(pg_conn)
+        before = keyword_store.keyword_epoch()
 
         keyword_store.index([record])
 
+        assert keyword_store.keyword_epoch() == before
         assert keyword_store.search("missing", k=10) == []
 
 

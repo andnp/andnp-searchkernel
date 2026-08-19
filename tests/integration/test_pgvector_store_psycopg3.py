@@ -268,6 +268,69 @@ class TestPsycopg3KeywordStore:
         top_record = next(r for r in fixture_records if r.source_id == top_id)
         assert "machine" in top_record.body.lower()
 
+    def test_repeated_keyword_index_skips_unchanged_projection_with_psycopg3(
+        self, pg_conn, fixture_records
+    ):
+        """Psycopg3 retries preserve the projection and keyword epoch.
+
+        The persisted record timestamp remains unchanged on the clean skip.
+        """
+        vector_store = PGVectorStore(pg_conn)
+        keyword_store = PGKeywordStore(pg_conn)
+        record = fixture_records[0]
+
+        vector_store.upsert([record], model_name="psycopg3-keyword", dim=4)
+        keyword_store.index([record])
+        before = (
+            keyword_store.keyword_epoch(),
+            pg_conn.execute_one(
+                "SELECT tsvector_body::text, updated_at FROM records "
+                "WHERE record_id = %s;",
+                (record.storage_key,),
+            ),
+        )
+
+        keyword_store.index([record])
+
+        assert keyword_store.keyword_epoch() == before[0]
+        assert pg_conn.execute_one(
+            "SELECT tsvector_body::text, updated_at FROM records "
+            "WHERE record_id = %s;",
+            (record.storage_key,),
+        ) == before[1]
+
+    def test_psycopg3_keyword_index_updates_changed_fields_and_duplicates(
+        self, pg_conn, fixture_records
+    ):
+        """Psycopg3 updates changed lexical fields using the final duplicate."""
+        vector_store = PGVectorStore(pg_conn)
+        keyword_store = PGKeywordStore(pg_conn)
+        original = fixture_records[0]
+        vector_store.upsert([original], model_name="psycopg3-keyword", dim=4)
+        keyword_store.index([original])
+        changed = replace(
+            original,
+            title="psycopg3changedtitle",
+            body="psycopg3changedbody",
+            uri="docs/psycopg3changeduri",
+            metadata={"marker": "psycopg3changedmetadata"},
+        )
+        vector_store.upsert([changed], model_name="psycopg3-keyword", dim=4)
+        before = keyword_store.keyword_epoch()
+
+        keyword_store.index([original, changed])
+
+        assert keyword_store.keyword_epoch() == before + 1
+        for term in (
+            "psycopg3changedtitle",
+            "psycopg3changedbody",
+            "docs/psycopg3changeduri",
+            "psycopg3changedmetadata",
+        ):
+            assert [hit.source_id for hit in keyword_store.search(term, 10)] == [
+                original.source_id
+            ]
+
 
 class TestPsycopg3GraphStore:
     """Behavioral tests for graph writes through Psycopg3Connection."""

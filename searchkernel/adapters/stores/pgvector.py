@@ -68,6 +68,7 @@ DEFAULT_VECTOR_MAX_SCAN_ROUNDS = 4
 _SCHEMA_ADVISORY_LOCK_KEY = 907341005
 _ITERATIVE_SCAN_MODES = {"auto", "off", "strict_order", "relaxed_order"}
 _VECTOR_WRITE_BATCH_SIZE = 100
+_KEYWORD_WRITE_BATCH_SIZE = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -1421,6 +1422,7 @@ class PGKeywordStore:
         try:
             cursor = conn.cursor()
 
+            records = list({record.storage_key: record for record in records}.values())
             rows = [
                 (
                     record.storage_key,
@@ -1438,35 +1440,48 @@ class PGKeywordStore:
                 setweight(to_tsvector('english', {body}), 'B') ||
                 setweight(to_tsvector('english', {rest}), 'D')
             """
+            projection_sql = weighted_tsvector.format(
+                title="data.title", body="data.body", rest="data.rest"
+            )
+            update_sql = f"""
+                UPDATE records AS r
+                SET tsvector_body = projection.tsvector_body
+                FROM (VALUES %s) AS data(record_id, title, body, rest)
+                CROSS JOIN LATERAL (
+                    SELECT {projection_sql} AS tsvector_body
+                ) AS projection
+                WHERE r.record_id = data.record_id
+                  AND r.tsvector_body IS DISTINCT FROM projection.tsvector_body
+                RETURNING r.record_id;
+                """
 
+            changed_keyword_ids: set[str] = set()
             if isinstance(self.conn_pool, Psycopg3Connection):
-                cursor.executemany(
-                    f"""
-                    UPDATE records AS r
-                    SET tsvector_body = {weighted_tsvector.format(title="%s", body="%s", rest="%s")}
-                    WHERE r.record_id = %s;
-                    """,
-                    [(title, body, rest, record_id) for record_id, title, body, rest in rows],
-                )
+                for offset in range(0, len(rows), _KEYWORD_WRITE_BATCH_SIZE):
+                    batch = rows[offset : offset + _KEYWORD_WRITE_BATCH_SIZE]
+                    values = ", ".join("(%s, %s, %s, %s)" for _ in batch)
+                    batch_sql = update_sql.replace("VALUES %s", f"VALUES {values}")
+                    cursor.execute(
+                        batch_sql,
+                        tuple(value for row in batch for value in row),
+                    )
+                    changed_keyword_ids.update(row[0] for row in cursor.fetchall())
             else:
-                psycopg2.extras.execute_values(
+                changed_rows = psycopg2.extras.execute_values(
                     cursor,
-                    f"""
-                    UPDATE records AS r
-                    SET tsvector_body = {
-                        weighted_tsvector.format(
-                            title="data.title", body="data.body", rest="data.rest"
-                        )
-                    }
-                    FROM (VALUES %s) AS data(record_id, title, body, rest)
-                    WHERE r.record_id = data.record_id;
-                    """,
+                    update_sql,
                     rows,
+                    page_size=_KEYWORD_WRITE_BATCH_SIZE,
+                    fetch=True,
                 )
+                changed_keyword_ids.update(row[0] for row in changed_rows)
 
-            _POSTGRES_EPOCH_LANE.bump(cursor, keyword=True)
+            _POSTGRES_EPOCH_LANE.bump(cursor, keyword=bool(changed_keyword_ids))
             conn.commit()
             logger.debug(f"Indexed {len(records)} records for keyword search")
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             if cursor is not None:
                 cursor.close()
