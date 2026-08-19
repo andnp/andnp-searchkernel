@@ -1968,6 +1968,22 @@ class _HydrationEngine:
         conn.row_factory = sqlite3.Row
         return conn.execute("SELECT * FROM local_records").fetchall()
 
+    @staticmethod
+    def _record_from_row(row: sqlite3.Row) -> Record:
+        return Record(
+            workspace_id=row["workspace_id"],
+            source_kind=row["source_kind"],
+            source_id=row["source_id"],
+            title=row["title"],
+            body=row["body"],
+            indexed_text=row["indexed_text"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+            metadata=json.loads(row["metadata"]),
+            uri=row["uri"],
+            status=RecordStatus(row["status"]),
+        )
+
     def hydrate_record(
         self,
         record_id: RecordIdentity | str,
@@ -2008,19 +2024,7 @@ class _HydrationEngine:
                 if len(candidates) != 1:
                     return None
                 row = candidates[0]
-            return Record(
-                workspace_id=row["workspace_id"],
-                source_kind=row["source_kind"],
-                source_id=row["source_id"],
-                title=row["title"],
-                body=row["body"],
-                indexed_text=row["indexed_text"],
-                created_at=datetime.fromisoformat(row["created_at"]),
-                updated_at=datetime.fromisoformat(row["updated_at"]),
-                metadata=json.loads(row["metadata"]),
-                uri=row["uri"],
-                status=RecordStatus(row["status"]),
-            )
+            return self._record_from_row(row)
 
     def hydrate_records(
         self,
@@ -2044,22 +2048,7 @@ class _HydrationEngine:
                         key_chunk,
                     ).fetchall()
                 )
-        records = {
-            row["storage_key"]: Record(
-                workspace_id=row["workspace_id"],
-                source_kind=row["source_kind"],
-                source_id=row["source_id"],
-                title=row["title"],
-                body=row["body"],
-                indexed_text=row["indexed_text"],
-                created_at=datetime.fromisoformat(row["created_at"]),
-                updated_at=datetime.fromisoformat(row["updated_at"]),
-                metadata=json.loads(row["metadata"]),
-                uri=row["uri"],
-                status=RecordStatus(row["status"]),
-            )
-            for row in rows
-        }
+        records = {row["storage_key"]: self._record_from_row(row) for row in rows}
         return {key: records.get(key) for key in keys}
 
     def chunk_parent(self, record_id: RecordIdentity | str) -> RecordIdentity | None:
