@@ -283,3 +283,30 @@ async def test_cache_bypass_diagnostic_and_missing_or_none_records_are_preserved
         ("none", None),
     ]
     assert diagnostics == ["hydration_cache:bypass:missing_policy_version"]
+
+
+async def test_lenient_batch_failure_returns_without_missing_result_key() -> None:
+    """A lenient batch failure records the error without raising a key error."""
+
+    class FailingBatchHydrator:
+        async def hydrate_records(
+            self, identities: Sequence[RecordIdentity]
+        ) -> Mapping[str, Record]:
+            raise RuntimeError("batch hydration unavailable")
+
+    failures: list[RecordSearchFailure] = []
+    coordinator = _coordinator(
+        FailingBatchHydrator(),
+        hydrate_record=lambda identity: pytest.fail("batch hydrator expected"),
+    )
+
+    result = await coordinator.hydrate_candidates(
+        [_candidate("broken")], failures, []
+    )
+
+    assert result == []
+    assert failures == [
+        RecordSearchFailure(
+            "hydration", "batch hydration unavailable", "RuntimeError"
+        )
+    ]

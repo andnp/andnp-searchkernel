@@ -169,6 +169,7 @@ class RecordHydrationCoordinator:
             return [
                 (candidate, hydrated_by_key[candidate.storage_key])
                 for candidate in candidates
+                if candidate.storage_key in hydrated_by_key
             ]
 
         semaphore = asyncio.Semaphore(self._max_concurrency)
