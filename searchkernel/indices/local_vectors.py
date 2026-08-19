@@ -10,12 +10,28 @@ from typing import Any
 import numpy as np
 
 from searchkernel.domain.vector_filters import (
+    CompiledVectorFilter,
     compile_vector_filters,
     metadata_mapping,
 )
 
 VECTOR_FORMAT_VERSION = 2
 NORMALIZATION_POLICY = "l2"
+_SCALAR_FILTER_NAMES = frozenset(
+    {
+        "candidate_ids",
+        "candidate_storage_keys",
+        "include_inactive",
+        "lifecycle_status",
+        "lifecycle_statuses",
+        "source_filter",
+        "source_kind",
+        "source_kinds",
+        "status",
+        "statuses",
+        "workspace_id",
+    }
+)
 
 
 class PackedVectorCodec:
@@ -195,6 +211,20 @@ class VectorSnapshot:
         filter_values: Any,
     ) -> np.ndarray:
         predicate = compile_vector_filters(filters)
+        if self._can_prefilter_scalars(filters, predicate):
+            eligible = np.isin(self.statuses, tuple(predicate.statuses))
+            if predicate.workspace_id is not None:
+                eligible &= self.workspace_ids == predicate.workspace_id
+            if predicate.source_kinds is not None:
+                eligible &= np.isin(
+                    self.source_kinds, tuple(predicate.source_kinds)
+                )
+            if predicate.candidate_keys is not None:
+                eligible &= np.isin(
+                    np.asarray(self.storage_keys, dtype=object),
+                    tuple(predicate.candidate_keys),
+                )
+            return np.asarray(eligible, dtype=bool)
         return np.asarray(
             [
                 predicate.matches(
@@ -220,4 +250,26 @@ class VectorSnapshot:
                 )
             ],
             dtype=bool,
+        )
+
+    @staticmethod
+    def _can_prefilter_scalars(
+        filters: dict[str, Any] | None,
+        predicate: CompiledVectorFilter,
+    ) -> bool:
+        filter_names = set(filters or {})
+        return (
+            filter_names.issubset(_SCALAR_FILTER_NAMES)
+            and (
+                predicate.workspace_id is None
+                or isinstance(predicate.workspace_id, str)
+            )
+            and predicate.project_values is None
+            and predicate.excluded_projects is None
+            and predicate.included_paths is None
+            and predicate.excluded_paths is None
+            and predicate.document_values is None
+            and predicate.excluded_documents is None
+            and predicate.metadata_equals is None
+            and not predicate.source_scoped_filters
         )

@@ -8,14 +8,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from searchkernel.domain import Record, RecordStatus
+from searchkernel.domain import Record, RecordIdentity, RecordStatus
+from searchkernel.domain.vector_filters import compile_vector_filters
 from searchkernel.indices import (
     FAISSLocalVectorStore,
     LocalRecordBackend,
     LocalVectorStore,
 )
 from searchkernel.indices.faiss_local import FAISSConfiguration
-from searchkernel.indices.local_vectors import PackedVectorCodec
+from searchkernel.indices.local_vectors import PackedVectorCodec, VectorSnapshot
 from searchkernel.indices.vector_revision import record_embedding_revision
 
 
@@ -203,6 +204,175 @@ def test_exact_search_has_cosine_parity_deterministic_ties_and_filters() -> None
         dim=2,
         filters={"statuses": ["archived"]},
     )[0].source_id == "archived"
+
+
+def _generic_snapshot_mask(
+    snapshot: VectorSnapshot,
+    filters: dict[str, object] | None,
+) -> np.ndarray:
+    predicate = compile_vector_filters(filters)
+    return np.asarray(
+        [
+            predicate.matches(
+                storage_key=storage_key,
+                source_id=str(source_id),
+                workspace_id=(
+                    str(workspace_id) if workspace_id is not None else None
+                ),
+                source_kind=str(source_kind),
+                status=str(status),
+                metadata=metadata,
+                uri=uri,
+            )
+            for storage_key, source_id, workspace_id, source_kind, status, metadata, uri in zip(
+                snapshot.storage_keys,
+                snapshot.source_ids,
+                snapshot.workspace_ids,
+                snapshot.source_kinds,
+                snapshot.statuses,
+                snapshot.metadata,
+                snapshot.uris,
+                strict=True,
+            )
+        ],
+        dtype=bool,
+    )
+
+
+def _filter_snapshot() -> VectorSnapshot:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = []
+    for index, (workspace_id, source_kind, status) in enumerate(
+        [
+            ("workspace-a", "note", "active"),
+            ("workspace-a", "commit", "stale"),
+            ("workspace-b", "note", "active"),
+            ("workspace-b", "note", "archived"),
+        ]
+    ):
+        record = Record(
+            workspace_id=workspace_id,
+            source_kind=source_kind,
+            source_id=f"record-{index}",
+            title=f"record-{index}",
+            body="body",
+            created_at=timestamp,
+            updated_at=timestamp,
+            status=RecordStatus(status),
+            metadata={"project_id": workspace_id},
+            uri=f"/docs/{index}.md",
+            embedding=[1.0, 0.0],
+        )
+        rows.append(
+            {
+                "storage_key": record.storage_key,
+                "source_id": record.source_id,
+                "workspace_id": record.workspace_id,
+                "source_kind": record.source_kind,
+                "status": record.status.value,
+                "metadata": record.metadata,
+                "uri": record.uri,
+                "embedding": PackedVectorCodec.encode(record.embedding, 2),
+                "format_version": 2,
+                "normalization_policy": "l2",
+            }
+        )
+    return VectorSnapshot.from_rows(
+        rows,
+        encoder_namespace="model",
+        dim=2,
+        epoch=1,
+    )
+
+
+@pytest.mark.parametrize(
+    "filters",
+    [
+        None,
+        {},
+        {"status": RecordStatus.ACTIVE},
+        {"statuses": ["active", "stale"]},
+        {"workspace_id": "workspace-a"},
+        {"source_kinds": ["note"]},
+        {
+            "candidate_ids": [
+                RecordIdentity("workspace-a", "note", "record-0")
+            ]
+        },
+        {
+            "statuses": ["active"],
+            "workspace_id": "workspace-a",
+            "source_kind": "note",
+            "candidate_storage_keys": [
+                RecordIdentity("workspace-a", "note", "record-0").storage_key
+            ],
+        },
+        {"candidate_ids": []},
+    ],
+)
+def test_snapshot_scalar_filter_mask_matches_generic_filter(
+    filters: dict[str, object] | None,
+) -> None:
+    """Scalar filters preserve the generic predicate's eligibility mask."""
+    snapshot = _filter_snapshot()
+
+    actual = snapshot.filter_mask(
+        filters,
+        status_values=set(),
+        filter_values=None,
+    )
+
+    assert actual.tolist() == _generic_snapshot_mask(snapshot, filters).tolist()
+
+
+@pytest.mark.parametrize(
+    "filters",
+    [
+        {"metadata_equals": {"project_id": "workspace-a"}},
+        {"paths": ["1.md"]},
+        {"excluded_files": ["2.md"]},
+        {
+            "source_scoped_filters": {
+                "note": {"workspace_ids": ["workspace-a"]}
+            }
+        },
+        {"statuses": ["active"], "metadata_equals": {"project_id": "workspace-a"}},
+        {"regex": "record-[01]"},
+    ],
+)
+def test_snapshot_custom_filter_mask_matches_generic_filter(
+    filters: dict[str, object],
+) -> None:
+    """Custom and mixed filters retain generic metadata and authorization semantics."""
+    snapshot = _filter_snapshot()
+
+    actual = snapshot.filter_mask(
+        filters,
+        status_values=set(),
+        filter_values=None,
+    )
+
+    assert actual.tolist() == _generic_snapshot_mask(snapshot, filters).tolist()
+
+
+def test_snapshot_filter_mask_preserves_empty_results_and_storage_order() -> None:
+    """Filtering an empty snapshot stays empty and matches remain deterministic."""
+    snapshot = _filter_snapshot()
+    empty = VectorSnapshot.from_rows(
+        [],
+        encoder_namespace="model",
+        dim=2,
+        epoch=1,
+    )
+
+    assert empty.filter_mask(None, status_values=set(), filter_values=None).tolist() == []
+    assert np.flatnonzero(
+        snapshot.filter_mask(
+            {"statuses": ["active", "stale"]},
+            status_values=set(),
+            filter_values=None,
+        )
+    ).tolist() == [0, 1, 2]
 
 
 def test_vector_metadata_and_snapshot_cache_follow_vector_epoch() -> None:
