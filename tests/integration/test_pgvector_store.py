@@ -991,6 +991,62 @@ class TestKeywordStore:
         top_record = next(r for r in fixture_records if r.source_id == top_id)
         assert "machine" in top_record.body.lower()
 
+    @pytest.mark.parametrize("keyword_first", [True, False])
+    def test_vector_upsert_preserves_weighted_keyword_projection(
+        self, pg_conn, keyword_first
+    ):
+        """Vector writes preserve the keyword projection in either order.
+
+        The initial vector write creates the records before either index lane
+        updates the shared row.
+        """
+        timestamp = datetime.now(UTC)
+        records = [
+            Record(
+                source_kind="test",
+                source_id="title-match",
+                title="projection-token",
+                body="ordinary body",
+                uri="docs/uniquepath.md",
+                metadata={"marker": "uniquemetadata"},
+                created_at=timestamp,
+                updated_at=timestamp,
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            ),
+            Record(
+                source_kind="test",
+                source_id="body-match",
+                title="ordinary title",
+                body="projection-token",
+                created_at=timestamp,
+                updated_at=timestamp,
+                embedding=[0.0, 1.0, 0.0, 0.0],
+            ),
+        ]
+        vector_store = PGVectorStore(pg_conn)
+        keyword_store = PGKeywordStore(pg_conn)
+
+        vector_store.upsert(records, model_name="test-model", dim=4)
+        if keyword_first:
+            keyword_store.index(records)
+            vector_store.upsert(records, model_name="test-model", dim=4)
+        else:
+            vector_store.upsert(records, model_name="test-model", dim=4)
+            keyword_store.index(records)
+
+        projection_hits = keyword_store.search("projection-token", 10)
+        assert [hit.source_id for hit in projection_hits] == [
+            "title-match",
+            "body-match",
+        ]
+        assert [
+            hit.source_id
+            for hit in keyword_store.search("docs/uniquepath.md", 10)
+        ] == ["title-match"]
+        assert [hit.source_id for hit in keyword_store.search("marker", 10)] == [
+            "title-match"
+        ]
+
     def test_keyword_search_uses_indexed_text_with_raw_body_persisted(self, pg_conn):
         """Search uses the override while records retain citation text."""
         timestamp = datetime.now(UTC)
@@ -1025,7 +1081,7 @@ class TestKeywordStore:
         pg_conn.put_connection(conn)
 
     def test_upsert_preserves_body_fallback_for_empty_indexed_text(self, pg_conn):
-        """Insert and conflict upsert both use body when indexed text is empty."""
+        """Keyword indexing owns body fallback across vector upserts."""
         timestamp = datetime.now(UTC)
 
         def make_record(
@@ -1054,6 +1110,7 @@ class TestKeywordStore:
         keyword_store = PGKeywordStore(pg_conn)
 
         vector_store.upsert(initial, model_name="test-model", dim=4)
+        keyword_store.index(initial)
         matching = lambda query: {
             hit.source_id for hit in keyword_store.search(query, 10)
         }
@@ -1062,6 +1119,12 @@ class TestKeywordStore:
         assert matching("gamma") == {"override"}
 
         vector_store.upsert(updated, model_name="test-model", dim=4)
+        assert matching("alpha") == {"empty"}
+        assert matching("delta") == set()
+        assert matching("gamma") == {"override"}
+        assert matching("zeta") == set()
+
+        keyword_store.index(updated)
         assert matching("delta") == {"empty"}
         assert matching("epsilon") == set()
         assert matching("zeta") == {"override"}

@@ -975,11 +975,6 @@ class PGVectorStore:
                     title = EXCLUDED.title,
                     body = EXCLUDED.body,
                     indexed_text = EXCLUDED.indexed_text,
-                    tsvector_body = to_tsvector(
-                        'english',
-                        EXCLUDED.title || ' ' ||
-                        COALESCE(NULLIF(EXCLUDED.indexed_text, ''), EXCLUDED.body)
-                    ),
                     created_at = EXCLUDED.created_at,
                     updated_at = EXCLUDED.updated_at,
                     metadata = EXCLUDED.metadata,
