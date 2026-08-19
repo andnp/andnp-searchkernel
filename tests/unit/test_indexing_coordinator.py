@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,7 +17,10 @@ from searchkernel.indexing.bootstrap_checkpoint import (
     save_bootstrap_checkpoint,
 )
 from searchkernel.indexing.checkpoints import JsonCheckpointStore
-from searchkernel.indexing.coordinator import ResumableSemanticCoordinator
+from searchkernel.indexing.coordinator import (
+    CoordinatorProgress,
+    ResumableSemanticCoordinator,
+)
 from searchkernel.indexing.embedding_cache import SQLiteEmbeddingCache
 from searchkernel.indexing.runtime_readiness import SearchAvailability
 from searchkernel.indexing.semantic import (
@@ -333,6 +336,65 @@ async def test_prepared_records_are_bounded_and_stage_progress_is_ordered(
         if event.stage == "checkpoint"
     )
     assert cache.metrics.writes == 5
+
+
+@pytest.mark.asyncio
+async def test_prepared_records_accept_a_single_pass_generator(
+    tmp_path: Path,
+) -> None:
+    """
+    Process records from a generator once while preserving their order.
+    """
+    coordinator, cache, _, _ = _coordinator(tmp_path, stages=(_NoopStage(),))
+    consumed: list[str] = []
+
+    def records() -> Iterator[PreparedIndexRecord]:
+        for index in range(3):
+            record = _prepared(_record(f"doc-{index}"))
+            consumed.append(record.record.source_id)
+            yield record
+
+    receipt = await coordinator.run_prepared_records(
+        records(),
+        source_kind="notes",
+        max_records=2,
+    )
+
+    assert consumed == ["doc-0", "doc-1", "doc-2"]
+    assert [record.source_id for record in receipt.records] == consumed
+    cache.close()
+
+
+@pytest.mark.asyncio
+async def test_prepared_generator_consumption_is_bounded_before_first_batch(
+    tmp_path: Path,
+) -> None:
+    """
+    Pull only one bounded lookahead before the first batch completes.
+    """
+    coordinator, cache, _, _ = _coordinator(tmp_path, stages=(_NoopStage(),))
+    consumed = 0
+
+    def records() -> Iterator[PreparedIndexRecord]:
+        nonlocal consumed
+        for index in range(100):
+            consumed += 1
+            yield _prepared(_record(f"doc-{index}"))
+
+    def observe_progress(event: CoordinatorProgress) -> None:
+        if event.batch_index == 0:
+            assert consumed <= 3
+
+    receipt = await coordinator.run_prepared_records(
+        records(),
+        source_kind="notes",
+        max_records=2,
+        progress=observe_progress,
+    )
+
+    assert receipt.attempted == 100
+    assert consumed == 100
+    cache.close()
 
 
 @pytest.mark.asyncio

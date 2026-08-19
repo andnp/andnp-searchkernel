@@ -520,7 +520,7 @@ class ResumableSemanticCoordinator:
     ) -> CoordinatorReceipt:
         """Bound prepared records with the existing stage batch helper."""
         batches = iter_prepared_index_batches(
-            list(records),
+            records,
             max_records=max_records,
             max_chunks=max_chunks,
         )
