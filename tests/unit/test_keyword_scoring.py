@@ -1,6 +1,8 @@
 import sqlite3
 import string
 
+import pytest
+
 from searchkernel.adapters.keyword_scoring.filesystem import (
     looks_like_artifact_query,
     normalize_artifact_value,
@@ -15,6 +17,7 @@ from searchkernel.indices.keyword_scoring import sanitize_fts_query
 
 
 def test_sanitize_fts_query_removes_match_operators():
+    """Sanitization removes syntax while preserving supported query intent."""
     assert sanitize_fts_query('worker.enabled - "debug"') == "worker enabled debug"
     assert sanitize_fts_query('"alpha beta"') == '"alpha beta"'
     assert sanitize_fts_query("alph*") == "alph*"
@@ -31,14 +34,51 @@ def test_sanitize_fts_query_removes_match_operators():
 
 def test_sanitize_fts_query_accepts_arbitrary_punctuation_for_fts5():
     connection = sqlite3.connect(":memory:")
-    connection.execute("CREATE VIRTUAL TABLE search USING fts5(body)")
-    connection.execute("INSERT INTO search(body) VALUES (?)", ("alpha beta",))
+    try:
+        connection.execute("CREATE VIRTUAL TABLE search USING fts5(body)")
+        connection.execute("INSERT INTO search(body) VALUES (?)", ("alpha beta",))
 
-    for punctuation in string.punctuation:
-        sanitized = sanitize_fts_query(f"alpha{punctuation}beta")
+        for punctuation in string.punctuation:
+            sanitized = sanitize_fts_query(f"alpha{punctuation}beta")
+            connection.execute(
+                "SELECT rowid FROM search WHERE search MATCH ?", (sanitized,)
+            ).fetchall()
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("position", "operator"),
+    [
+        (position, operator)
+        for position in ("leading", "intermediate", "trailing")
+        for operator in ("AND", "OR", "NOT", "NEAR")
+    ],
+)
+def test_sanitize_fts_query_quotes_punctuation_separated_operators(
+    position: str, operator: str
+):
+    """Sanitized operator-like tokens remain valid in real FTS5 MATCH queries."""
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.execute("CREATE VIRTUAL TABLE search USING fts5(body)")
         connection.execute(
-            "SELECT rowid FROM search WHERE search MATCH ?", (sanitized,)
+            "INSERT INTO search(body) VALUES (?)", (f"alpha {operator} beta",)
+        )
+        query = {
+            "leading": f"{operator}.alpha",
+            "intermediate": f"alpha.{operator}.beta",
+            "trailing": f"alpha.{operator}",
+        }[position]
+
+        rows = connection.execute(
+            "SELECT rowid FROM search WHERE search MATCH ?",
+            (sanitize_fts_query(query),),
         ).fetchall()
+
+        assert rows == [(1,)]
+    finally:
+        connection.close()
 
 
 def test_looks_like_artifact_query_detects_path_like_values():

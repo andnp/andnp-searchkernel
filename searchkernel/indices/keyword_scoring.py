@@ -26,12 +26,13 @@ def sanitize_fts_query(query: str) -> str:
         if quoted and len(words) > 1:
             terms.append(f'"{" ".join(words)}"')
         else:
-            terms.extend(words[:-1])
-            word = words[-1]
-            if word.upper() in _FTS_OPERATORS:
-                terms.append(f'"{word}"')
-            else:
-                terms.append(word + "*" if prefix else word)
+            for index, word in enumerate(words):
+                if word.upper() in _FTS_OPERATORS:
+                    terms.append(f'"{word}"')
+                elif index == len(words) - 1 and prefix:
+                    terms.append(word + "*")
+                else:
+                    terms.append(word)
     if not terms:
         return '""'
     return " ".join(terms)
