@@ -1,6 +1,7 @@
 """Local/Postgres parity checks for canonical record retrieval."""
 
 import os
+import re
 from datetime import UTC, datetime
 
 import pytest
@@ -14,6 +15,30 @@ from searchkernel.adapters.stores.pgvector import (
 from searchkernel.domain import Record, RecordIdentity, RecordStatus
 from searchkernel.indices import LocalRecordBackend
 from tests.integration.conftest import pg_dsn_for_schema, pg_worker_schema
+
+
+class _StubIdentifierScorer:
+    """Recognizes Jira-key-shaped queries (e.g. PROJ-1234), not file paths."""
+
+    _PATTERN = re.compile(r"^[A-Za-z]+-\d+$")
+
+    def looks_like_identifier_query(self, query: str) -> bool:
+        return bool(self._PATTERN.match(query.strip()))
+
+    def identifier_tokens(self, query: str) -> list[str]:
+        return [query.strip()] if self.looks_like_identifier_query(query) else []
+
+    def score(
+        self,
+        query: str,
+        *,
+        title: str,
+        body: str,
+        indexed_text: str | None,
+        headers: str,
+        uri: str,
+    ) -> float:
+        return 100.0 if query.strip().lower() in headers.lower() else 0.0
 
 
 @pytest.fixture
@@ -170,3 +195,55 @@ def test_vector_retrieval_preserves_candidate_identity_parity(
     assert _keys(pg_hits) == {candidate.storage_key}
     assert local_hits[0].identity == RecordIdentity("workspace-a", "commit", "shared")
     assert pg_hits[0].identity == local_hits[0].identity
+
+
+def test_keyword_artifact_scorer_boosts_identifier_query_in_parity(
+    parity_backends,
+) -> None:
+    """A shared identifier scorer reorders both backends the same way.
+
+    Base relevance alone would rank the record with more raw term
+    occurrences first; the scorer instead promotes the record whose
+    metadata carries the identifier as a tag, and both backends must agree.
+    """
+    _local, pg_keyword, _pg_vector = parity_backends
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    records = [
+        Record(
+            workspace_id="workspace-a",
+            source_kind="note",
+            source_id="ranked-higher-by-relevance",
+            title="Deployment notes",
+            body="PROJ-1234 " * 20,
+            created_at=timestamp,
+            updated_at=timestamp,
+            embedding=[1.0, 0.0],
+        ),
+        Record(
+            workspace_id="workspace-a",
+            source_kind="note",
+            source_id="tagged-with-identifier",
+            title="Unrelated note",
+            body="proj-1234 mentioned once",
+            metadata={"tags": ["PROJ-1234"]},
+            created_at=timestamp,
+            updated_at=timestamp,
+            embedding=[0.9, 0.1],
+        ),
+    ]
+
+    scorer = _StubIdentifierScorer()
+    local = LocalRecordBackend(keyword_artifact_scorer=scorer)
+    pg_scored = PGKeywordStore(pg_keyword.conn_pool, artifact_scorer=scorer)
+
+    local.index(records)
+    PGVectorStore(pg_keyword.conn_pool).upsert(records, "parity-artifact-scorer", 2)
+    pg_scored.index(records)
+
+    local_hits = local.search_keyword("PROJ-1234", 1)
+    pg_hits = pg_scored.search("PROJ-1234", 1)
+
+    assert len(local_hits) == 1
+    assert len(pg_hits) == 1
+    assert local_hits[0].source_id == "tagged-with-identifier"
+    assert pg_hits[0].source_id == local_hits[0].source_id
