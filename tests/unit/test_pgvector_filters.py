@@ -46,6 +46,39 @@ def test_pgvector_filter_sql_rejects_empty_candidate_filter() -> None:
     assert parameters == []
 
 
+def test_pgvector_exclude_storage_keys_excludes_canonical_identity() -> None:
+    identity = RecordIdentity("workspace", "note", "dropped")
+    clauses, parameters = build_pgvector_filter_sql(
+        {"exclude_storage_keys": [identity]}
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert "r.record_id <> ALL(%s)" in sql_text
+    assert [identity.storage_key] in parameters
+
+
+def test_pgvector_exclude_storage_keys_accepts_prefixed_string() -> None:
+    identity = RecordIdentity("workspace", "note", "dropped")
+    clauses, parameters = build_pgvector_filter_sql(
+        {"exclude_storage_keys": [identity.storage_key]}
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert "r.record_id <> ALL(%s)" in sql_text
+    assert [identity.storage_key] in parameters
+
+
+def test_pgvector_exclude_storage_keys_silently_ignores_bare_ids() -> None:
+    """Bare, non-canonical ids are dropped, matching candidate_storage_keys."""
+    clauses, parameters = build_pgvector_filter_sql(
+        {"exclude_storage_keys": ["ENG-123"]}
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert "record_id <> ALL" not in sql_text
+    assert parameters == [["active"]]
+
+
 def test_pgvector_filter_sql_supports_single_metadata_field() -> None:
     clauses, parameters = build_pgvector_filter_sql(
         {"metadata_equals": {"issue_type": "Bug"}}
