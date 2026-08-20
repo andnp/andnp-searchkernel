@@ -145,6 +145,63 @@ def test_compiled_vector_filter_reuses_normalized_constraints() -> None:
     )
 
 
+def test_compiled_vector_filter_metadata_in_matches_any_allowed_value() -> None:
+    record = _record(
+        "guide/setup",
+        project_id="keep",
+        file_path="/docs/guide/setup.md",
+    )
+    predicate = compile_vector_filters(
+        {"metadata_in": {"project_id": ["keep", "other"]}}
+    )
+
+    assert predicate.matches(
+        storage_key=record.storage_key,
+        source_id=record.source_id,
+        workspace_id=record.workspace_id,
+        source_kind=record.source_kind,
+        status=record.status,
+        metadata=record.metadata,
+        uri=record.uri,
+    )
+    assert not predicate.matches(
+        storage_key=record.storage_key,
+        source_id=record.source_id,
+        workspace_id=record.workspace_id,
+        source_kind=record.source_kind,
+        status=record.status,
+        metadata={**record.metadata, "project_id": "dropped"},
+        uri=record.uri,
+    )
+
+
+def test_local_vector_filters_support_metadata_in(tmp_path) -> None:
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    included = _record(
+        "guide/setup",
+        project_id="keep",
+        file_path="/docs/guide/setup.md",
+    )
+    excluded = _record(
+        "guide/other",
+        project_id="drop",
+        file_path="/docs/guide/other.md",
+    )
+    for record in (included, excluded):
+        record.embedding = [1.0, 0.0]
+    backend.upsert([included, excluded], "model", 2)
+
+    hits = backend.search_vector(
+        [1.0, 0.0],
+        5,
+        model_name="model",
+        dim=2,
+        filters={"metadata_in": {"project_id": ["keep", "other"]}},
+    )
+
+    assert [hit.storage_key for hit in hits] == [included.storage_key]
+
+
 def test_source_scoped_filter_requires_array_overlap_and_passes_unscoped_sources() -> None:
     """Scoped sources require an authorized metadata-array overlap only."""
     predicate = compile_vector_filters(
