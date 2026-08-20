@@ -103,6 +103,62 @@ def test_pgvector_filter_sql_metadata_equals_with_project_id() -> None:
     assert "api" in parameters
 
 
+def test_pgvector_filter_sql_supports_metadata_in_single_field() -> None:
+    clauses, parameters = build_pgvector_filter_sql(
+        {"metadata_in": {"status_name": ["Done", "Closed"]}}
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert "metadata->>'status_name' = ANY(%s)" in sql_text
+    assert ["Done", "Closed"] in parameters
+
+
+def test_pgvector_filter_sql_metadata_in_multiple_fields_are_anded() -> None:
+    clauses, parameters = build_pgvector_filter_sql(
+        {
+            "metadata_in": {
+                "status_name": ["Done", "Closed"],
+                "issue_type": ["Bug"],
+            }
+        }
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert sql_text.count("= ANY(%s)") >= 2
+    assert "metadata->>'status_name' = ANY(%s)" in sql_text
+    assert "metadata->>'issue_type' = ANY(%s)" in sql_text
+    assert ["Done", "Closed"] in parameters
+    assert ["Bug"] in parameters
+
+
+def test_pgvector_filter_sql_rejects_empty_metadata_in_value_list() -> None:
+    clauses, parameters = build_pgvector_filter_sql(
+        {"metadata_in": {"status_name": []}}
+    )
+
+    assert clauses == ["FALSE"]
+    assert parameters == []
+
+
+def test_pgvector_filter_sql_rejects_unsafe_metadata_in_field_name() -> None:
+    with pytest.raises(ValueError, match="metadata_in field"):
+        build_pgvector_filter_sql(
+            {"metadata_in": {"a'; DROP TABLE records; --": ["x"]}}
+        )
+
+
+def test_pgvector_filter_sql_metadata_in_parameterizes_values() -> None:
+    """Values must travel as bound parameters, never interpolated into SQL."""
+    dangerous = "Done'); DROP TABLE records; --"
+    clauses, parameters = build_pgvector_filter_sql(
+        {"metadata_in": {"status_name": [dangerous]}}
+    )
+
+    sql_text = " AND ".join(clauses)
+    assert dangerous not in sql_text
+    assert [dangerous] in parameters
+
+
 def test_pgvector_filter_sql_metadata_equals_ignores_none_values() -> None:
     clauses, parameters = build_pgvector_filter_sql(
         {"metadata_equals": {"issue_type": "Bug", "component": None}}
