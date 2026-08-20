@@ -2167,15 +2167,15 @@ class LocalRecordBackend:
             status_values=self._status_values,
             filter_values=self._filter_values,
             matches=self._matches,
-            metadata_keyword_text=self._metadata_keyword_text,
-            metadata_uri=self._metadata_uri,
+            metadata_keyword_text=_keyword_scoring.metadata_keyword_text,
+            metadata_uri=_keyword_scoring.metadata_uri,
             keyword_overfetch_multiplier=self._keyword_overfetch_multiplier,
             artifact_scorer=self._keyword_artifact_scorer,
         )
         self._record_writer = _RecordWriter(
             self._access,
-            metadata_keyword_text=self._metadata_keyword_text,
-            metadata_uri=self._metadata_uri,
+            metadata_keyword_text=_keyword_scoring.metadata_keyword_text,
+            metadata_uri=_keyword_scoring.metadata_uri,
             fts5_available=lambda: self._keyword_engine._fts5_available,
             epoch_bump=self._epoch_lane.bump,
         )
@@ -2211,72 +2211,6 @@ class LocalRecordBackend:
         """Record that the store has been rebuilt under the current identity scheme."""
         self._schema_manager.mark_record_identity_current()
 
-    @staticmethod
-    def _metadata_keyword_text(metadata: dict[str, Any]) -> str:
-        values: list[str] = []
-        for key in (
-            "tags",
-            "keywords",
-            "source_keywords",
-            "aliases",
-            "header_path",
-            "headers",
-            "file_path",
-            "source_file",
-            "path",
-            "filename",
-            "file_name",
-            "paths",
-            "filenames",
-            "files_changed",
-            "symbols",
-            "symbol",
-            "symbol_path",
-            "symbol_paths",
-            "file_tokens",
-            "commit_file_tokens",
-            "path_tokens",
-            "symbol_tokens",
-            "tokens",
-            "exact_tokens",
-        ):
-            value = metadata.get(key)
-            if value is None:
-                continue
-            values.extend(LocalRecordBackend._metadata_keyword_values(value))
-        return " ".join(" ".join(value.strip().lower().split()) for value in values if value)
-
-    @staticmethod
-    def _metadata_keyword_values(value: Any) -> list[str]:
-        if isinstance(value, Mapping):
-            return [
-                item
-                for key in sorted(value, key=str)
-                for item in LocalRecordBackend._metadata_keyword_values(value[key])
-            ]
-        if isinstance(value, (list, tuple, set, frozenset)):
-            items = sorted(value, key=str) if isinstance(value, (set, frozenset)) else value
-            return [
-                item
-                for nested in items
-                for item in LocalRecordBackend._metadata_keyword_values(nested)
-            ]
-        return [str(value)]
-
-    @staticmethod
-    def _metadata_uri(metadata: dict[str, Any]) -> str:
-        for key in (
-            "uri",
-            "source_file",
-            "file_path",
-            "path",
-            "filename",
-            "file_name",
-        ):
-            value = metadata.get(key)
-            if value:
-                return str(value)
-        return ""
 
     def index(self, records: list[Record]) -> None:
         """Index records for keyword retrieval."""

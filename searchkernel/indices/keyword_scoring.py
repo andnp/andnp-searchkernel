@@ -1,8 +1,84 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
+from typing import Any
 
 _FTS_OPERATORS = frozenset({"AND", "NEAR", "NOT", "OR"})
+
+_METADATA_KEYWORD_KEYS = (
+    "tags",
+    "keywords",
+    "source_keywords",
+    "aliases",
+    "header_path",
+    "headers",
+    "file_path",
+    "source_file",
+    "path",
+    "filename",
+    "file_name",
+    "paths",
+    "filenames",
+    "files_changed",
+    "symbols",
+    "symbol",
+    "symbol_path",
+    "symbol_paths",
+    "file_tokens",
+    "commit_file_tokens",
+    "path_tokens",
+    "symbol_tokens",
+    "tokens",
+    "exact_tokens",
+)
+
+_METADATA_URI_KEYS = (
+    "uri",
+    "source_file",
+    "file_path",
+    "path",
+    "filename",
+    "file_name",
+)
+
+
+def metadata_keyword_text(metadata: dict[str, Any]) -> str:
+    """Derive artifact-scorer ``headers`` text from a record's metadata.
+
+    Scrapes identifier-shaped fields (tags, paths, symbols, ...) out of a
+    metadata dict so keyword artifact scorers can rerank against them without
+    every store having to know the metadata schema itself.
+    """
+    values: list[str] = []
+    for key in _METADATA_KEYWORD_KEYS:
+        value = metadata.get(key)
+        if value is None:
+            continue
+        values.extend(_metadata_keyword_values(value))
+    return " ".join(" ".join(value.strip().lower().split()) for value in values if value)
+
+
+def _metadata_keyword_values(value: Any) -> list[str]:
+    if isinstance(value, Mapping):
+        return [
+            item
+            for key in sorted(value, key=str)
+            for item in _metadata_keyword_values(value[key])
+        ]
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = sorted(value, key=str) if isinstance(value, (set, frozenset)) else value
+        return [item for nested in items for item in _metadata_keyword_values(nested)]
+    return [str(value)]
+
+
+def metadata_uri(metadata: dict[str, Any]) -> str:
+    """Derive a fallback URI from a record's metadata when the row has none."""
+    for key in _METADATA_URI_KEYS:
+        value = metadata.get(key)
+        if value:
+            return str(value)
+    return ""
 
 
 def sanitize_fts_query(query: str) -> str:
