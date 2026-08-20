@@ -239,6 +239,7 @@ class CompiledVectorFilter:
     document_values: frozenset[str] | None
     excluded_documents: frozenset[str] | None
     metadata_equals: tuple[tuple[str, str], ...] | None
+    metadata_in: tuple[tuple[str, frozenset[str]], ...] | None
     source_scoped_filters: tuple[SourceScopedFilter, ...]
 
     def matches(
@@ -307,6 +308,10 @@ class CompiledVectorFilter:
             for field, value in self.metadata_equals:
                 if str(metadata.get(field)) != value:
                     return False
+        if self.metadata_in is not None:
+            for field, allowed_values in self.metadata_in:
+                if str(metadata.get(field)) not in allowed_values:
+                    return False
         return True
 
 
@@ -362,6 +367,15 @@ def compile_vector_filters(
         if metadata_equals is not None
         else None
     )
+    metadata_in = filters.get("metadata_in")
+    compiled_metadata_in = (
+        tuple(
+            (field, frozenset(str(value) for value in values))
+            for field, values in metadata_in.items()
+        )
+        if metadata_in is not None
+        else None
+    )
     candidate_value = filters.get("candidate_ids")
     if candidate_value is None:
         candidate_value = filters.get("candidate_storage_keys")
@@ -384,6 +398,7 @@ def compile_vector_filters(
             frozenset(excluded_documents) if excluded_documents is not None else None
         ),
         metadata_equals=compiled_metadata,
+        metadata_in=compiled_metadata_in,
         source_scoped_filters=source_scoped_filters,
     )
 
