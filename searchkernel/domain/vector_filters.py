@@ -232,6 +232,7 @@ class CompiledVectorFilter:
     workspace_id: Any
     source_kinds: frozenset[str] | None
     candidate_keys: frozenset[str] | None
+    excluded_storage_keys: frozenset[str] | None
     project_values: frozenset[str] | None
     excluded_projects: frozenset[str] | None
     included_paths: frozenset[str] | None
@@ -263,6 +264,11 @@ class CompiledVectorFilter:
         if self.source_kinds is not None and source_kind not in self.source_kinds:
             return False
         if self.candidate_keys is not None and storage_key not in self.candidate_keys:
+            return False
+        if (
+            self.excluded_storage_keys is not None
+            and storage_key in self.excluded_storage_keys
+        ):
             return False
 
         metadata = metadata_mapping(metadata)
@@ -384,11 +390,18 @@ def compile_vector_filters(
         if candidate_value is not None
         else None
     )
+    exclude_value = filters.get("exclude_storage_keys")
+    excluded_storage_keys = (
+        frozenset(candidate_storage_keys(exclude_value))
+        if exclude_value is not None
+        else None
+    )
     return CompiledVectorFilter(
         statuses=frozenset(status_values(filters)),
         workspace_id=filters.get("workspace_id"),
         source_kinds=string_set("source_kinds", "source_kind", "source_filter"),
         candidate_keys=candidate_keys,
+        excluded_storage_keys=excluded_storage_keys,
         project_values=project_values,
         excluded_projects=string_set("excluded_projects", "excluded_project_ids"),
         included_paths=path_set(included_paths),
