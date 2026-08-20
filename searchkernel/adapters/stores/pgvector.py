@@ -181,7 +181,10 @@ def build_pgvector_filter_sql(
     """Build SQL predicates for the canonical vector filter contract.
 
     Supports generic metadata field filtering via the 'metadata_equals' dict,
-    where each key-value pair becomes a metadata->>'key' = value filter.
+    where each key-value pair becomes a metadata->>'key' = value filter, and
+    via the 'metadata_in' dict, where each key maps to a list of allowed
+    values (metadata->>'key' = ANY(values)); fields in 'metadata_in' are
+    ANDed together, while the values for a single field are ORed.
     """
     filters = filters or {}
     clauses: list[str] = []
@@ -284,6 +287,21 @@ def build_pgvector_filter_sql(
                 field_expr = f"{record_alias}.metadata->>'{field}'"
                 clauses.append(f"{field_expr} = %s")
                 parameters.append(str(value))
+
+    metadata_in = filters.get("metadata_in")
+    if metadata_in is not None:
+        for field, values in metadata_in.items():
+            if not _METADATA_FIELD_RE.match(field):
+                raise ValueError(
+                    f"metadata_in field {field!r} must match "
+                    f"{_METADATA_FIELD_RE.pattern!r}"
+                )
+            allowed_values = [str(value) for value in values]
+            if not allowed_values:
+                return ["FALSE"], []
+            field_expr = f"{record_alias}.metadata->>'{field}'"
+            clauses.append(f"{field_expr} = ANY(%s)")
+            parameters.append(allowed_values)
 
     path_expr = (
         f"COALESCE(NULLIF({record_alias}.metadata->>'file_path', ''), "
