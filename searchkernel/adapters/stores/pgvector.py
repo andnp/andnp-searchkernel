@@ -51,7 +51,9 @@ from searchkernel.domain.vector_filters import (
     filter_values,
     status_values,
 )
+from searchkernel.indices import keyword_scoring as _keyword_scoring
 from searchkernel.indices.vector_revision import record_embedding_revision
+from searchkernel.ports.keyword_scoring import KeywordArtifactScorer
 
 logger = logging.getLogger(__name__)
 
@@ -1435,13 +1437,30 @@ def _postgres_tsquery(query: str) -> tuple[str, str]:
 class PGKeywordStore:
     """Postgres full-text search implementation of KeywordStore port."""
 
-    def __init__(self, conn_pool: _PostgresConnectionLike):
+    def __init__(
+        self,
+        conn_pool: _PostgresConnectionLike,
+        *,
+        artifact_scorer: KeywordArtifactScorer | None = None,
+        keyword_overfetch_multiplier: float = 4.0,
+    ):
         """Initialize keyword store.
 
         Args:
             conn_pool: PostgresConnection or Psycopg3Connection pool
+            artifact_scorer: Optional identifier-aware reranker. Unlike
+                LocalRecordBackend, this deliberately has no filesystem
+                default -- generic Postgres consumers may want a scorer
+                tuned to their own identifier shape (e.g. Jira keys) rather
+                than file paths.
+            keyword_overfetch_multiplier: How much to widen the base-relevance
+                SQL LIMIT when a scorer identifies the query, so a row that
+                the scorer would boost outside the base top-k can still
+                surface. Mirrors LocalRecordBackend's default of the same name.
         """
         self.conn_pool = conn_pool
+        self._artifact_scorer = artifact_scorer
+        self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
 
     def index(self, records: list[Record]) -> None:
         """Index records for full-text search.
@@ -1554,6 +1573,14 @@ class PGKeywordStore:
             )
             where_clause = "AND " + " AND ".join(where_parts)
 
+            needs_artifact_rerank = (
+                self._artifact_scorer is not None
+                and self._artifact_scorer.looks_like_identifier_query(query)
+            )
+            limit = k
+            if needs_artifact_rerank:
+                limit = max(k, math.ceil(k * self._keyword_overfetch_multiplier))
+
             query_expression, query_value = _postgres_tsquery(query)
             sql = f"""
                 WITH search_query AS (
@@ -1561,7 +1588,7 @@ class PGKeywordStore:
                 )
                 SELECT r.workspace_id, r.source_kind, r.source_id,
                        ts_rank(r.tsvector_body, search_query.query) AS relevance,
-                       r.record_id
+                       r.record_id, r.title, r.body, r.indexed_text, r.uri, r.metadata
                 FROM records AS r
                 CROSS JOIN search_query
                 WHERE r.tsvector_body @@ search_query.query
@@ -1569,17 +1596,34 @@ class PGKeywordStore:
                 ORDER BY relevance DESC, r.record_id ASC
                 LIMIT %s;
             """
-            params = [query_value, *filter_params, k]
+            params = [query_value, *filter_params, limit]
 
             cursor.execute(sql, params)
             results = cursor.fetchall()
-            return [
+            hits = [
                 RecordHit(
                     RecordIdentity(row[0], row[1], row[2]),
                     float(row[3]),
                 )
                 for row in results
             ]
+            if needs_artifact_rerank:
+                assert self._artifact_scorer is not None
+                boosted: list[RecordHit] = []
+                for row, hit in zip(results, hits, strict=True):
+                    metadata = row[9] or {}
+                    boost = self._artifact_scorer.score(
+                        query,
+                        title=row[5],
+                        body=row[6],
+                        indexed_text=row[7],
+                        headers=_keyword_scoring.metadata_keyword_text(metadata),
+                        uri=row[8] or _keyword_scoring.metadata_uri(metadata),
+                    )
+                    boosted.append(RecordHit(hit.identity, hit.score + boost))
+                boosted.sort(key=lambda item: (-item.score, item.storage_key))
+                hits = boosted[:k]
+            return hits
         finally:
             if cursor is not None:
                 cursor.close()
