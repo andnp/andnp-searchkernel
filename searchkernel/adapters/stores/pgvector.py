@@ -185,6 +185,16 @@ def build_pgvector_filter_sql(
     via the 'metadata_in' dict, where each key maps to a list of allowed
     values (metadata->>'key' = ANY(values)); fields in 'metadata_in' are
     ANDed together, while the values for a single field are ORed.
+
+    'exclude_storage_keys' (symmetric to 'candidate_ids'/
+    'candidate_storage_keys') REQUIRES its values to already be canonical
+    `record:`-prefixed storage keys, or `RecordIdentity` instances - a bare
+    external id (e.g. an issue key like "ENG-123") is NOT canonicalized by
+    this function and is silently dropped, exactly like the existing
+    'candidate_ids'/'candidate_storage_keys' inclusion filter. Callers must
+    build the canonical storage key themselves (e.g. via
+    `RecordIdentity(workspace_id, source_kind, source_id).storage_key`)
+    before passing it in.
     """
     filters = filters or {}
     clauses: list[str] = []
@@ -256,6 +266,13 @@ def build_pgvector_filter_sql(
             return ["FALSE"], []
         clauses.append(f"{record_alias}.record_id = ANY(%s)")
         parameters.append(sorted(candidate_keys))
+
+    exclude_value = filters.get("exclude_storage_keys")
+    if exclude_value is not None:
+        excluded_keys = sorted(candidate_storage_keys(exclude_value))
+        if excluded_keys:
+            clauses.append(f"{record_alias}.record_id <> ALL(%s)")
+            parameters.append(excluded_keys)
 
     project_expr = f"{record_alias}.metadata->>'project_id'"
     project_values = _string_filter_values(
