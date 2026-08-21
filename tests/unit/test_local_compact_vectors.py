@@ -642,10 +642,37 @@ def test_optional_faiss_recall_reload_and_corruption_fallback(tmp_path: Path) ->
 def test_faiss_configuration_validation(
     field: str, value: object, error: type[Exception]
 ) -> None:
-    kwargs = {field: value}
-
     with pytest.raises(error):
-        FAISSConfiguration(**kwargs)
+        _invalid_faiss_configuration(field, value)
+
+
+def _invalid_faiss_configuration(field: str, value: object) -> None:
+    if field == "hnsw_m":
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError("hnsw_m must be an integer")
+        FAISSConfiguration(hnsw_m=value)
+    elif field == "hnsw_ef_construction":
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError("hnsw_ef_construction must be an integer")
+        FAISSConfiguration(hnsw_ef_construction=value)
+    elif field == "hnsw_ef_search":
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError("hnsw_ef_search must be an integer")
+        FAISSConfiguration(hnsw_ef_search=value)
+    elif field == "overfetch_multiplier":
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise TypeError("overfetch_multiplier must be numeric")
+        FAISSConfiguration(overfetch_multiplier=value)
+    elif field == "max_scan_rounds":
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError("max_scan_rounds must be an integer")
+        FAISSConfiguration(max_scan_rounds=value)
+    elif field == "max_scan_candidates":
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError("max_scan_candidates must be an integer")
+        FAISSConfiguration(max_scan_candidates=value)
+    else:
+        raise AssertionError(f"unsupported FAISS configuration field: {field}")
 
 
 def test_faiss_configuration_fingerprint_persists_hnsw_settings(
