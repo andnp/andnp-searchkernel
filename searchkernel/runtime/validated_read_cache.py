@@ -7,7 +7,7 @@ import copy
 import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from threading import Lock
 from typing import Protocol, TypeVar, cast
 
@@ -110,13 +110,39 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
         self._clock = clock
         self._inflight: dict[KeyT, _InFlight[ValueT]] = {}
         self._lock = Lock()
-        self._metrics = ValidatedReadThroughCacheMetrics()
+        self._requests = 0
+        self._fresh_hits = 0
+        self._misses = 0
+        self._validation_mismatches = 0
+        self._validation_failures = 0
+        self._stale_fallbacks = 0
+        self._coalesced_waiters = 0
+        self._loads = 0
+        self._load_failures = 0
+        self._writes = 0
+        self._write_failures = 0
+        self._cache_read_failures = 0
+        self._load_time_seconds = 0.0
 
     @property
     def metrics(self) -> ValidatedReadThroughCacheMetrics:
         """Return a consistent snapshot of cache metrics."""
         with self._lock:
-            return self._metrics
+            return ValidatedReadThroughCacheMetrics(
+                requests=self._requests,
+                fresh_hits=self._fresh_hits,
+                misses=self._misses,
+                validation_mismatches=self._validation_mismatches,
+                validation_failures=self._validation_failures,
+                stale_fallbacks=self._stale_fallbacks,
+                coalesced_waiters=self._coalesced_waiters,
+                loads=self._loads,
+                load_failures=self._load_failures,
+                writes=self._writes,
+                write_failures=self._write_failures,
+                cache_read_failures=self._cache_read_failures,
+                load_time_seconds=self._load_time_seconds,
+            )
 
     def get_or_load(
         self,
@@ -234,10 +260,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
         with self._lock:
             inflight = self._inflight.get(key)
             if inflight is not None:
-                self._metrics = replace(
-                    self._metrics,
-                    coalesced_waiters=self._metrics.coalesced_waiters + 1,
-                )
+                self._coalesced_waiters += 1
                 return inflight, False
             inflight = _InFlight()
             self._inflight[key] = inflight
@@ -366,15 +389,35 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
             raise inflight.error
         raise RuntimeError("validated read-through coalescing completed without a result")
 
-    def _record(self, **increments: float) -> None:
+    def _record(
+        self,
+        *,
+        requests: int = 0,
+        fresh_hits: int = 0,
+        misses: int = 0,
+        validation_mismatches: int = 0,
+        validation_failures: int = 0,
+        stale_fallbacks: int = 0,
+        loads: int = 0,
+        load_failures: int = 0,
+        writes: int = 0,
+        write_failures: int = 0,
+        cache_read_failures: int = 0,
+        load_time_seconds: float = 0.0,
+    ) -> None:
         with self._lock:
-            values = {
-                field: getattr(self._metrics, field)
-                for field in self._metrics.__dataclass_fields__
-            }
-            for field, amount in increments.items():
-                values[field] += amount
-            self._metrics = ValidatedReadThroughCacheMetrics(**values)
+            self._requests += requests
+            self._fresh_hits += fresh_hits
+            self._misses += misses
+            self._validation_mismatches += validation_mismatches
+            self._validation_failures += validation_failures
+            self._stale_fallbacks += stale_fallbacks
+            self._loads += loads
+            self._load_failures += load_failures
+            self._writes += writes
+            self._write_failures += write_failures
+            self._cache_read_failures += cache_read_failures
+            self._load_time_seconds += load_time_seconds
 
     @staticmethod
     def _copy_value(value: ValueT) -> ValueT:
