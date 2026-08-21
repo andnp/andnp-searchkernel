@@ -90,7 +90,7 @@ class FakeKeywordStore:
         query: str,
         k: int,
         filters: SearchFilters | None = None,
-    ) -> list[RecordHit]:
+    ) -> Sequence[RecordHit]:
         self.queries.append((query, k, filters))
         return self.results
 
@@ -111,7 +111,7 @@ class FakeVectorStore:
         model_name: str,
         dim: int,
         filters: SearchFilters | None = None,
-    ) -> list[RecordHit]:
+    ) -> Sequence[RecordHit]:
         assert query_vector == [1.0, 0.0]
         assert (model_name, dim) == ("fake-model", 2)
         self.filters.append(filters)
@@ -417,19 +417,21 @@ async def test_vector_candidate_acquisition_supports_async_store_adapter() -> No
         def epoch(self) -> int:
             return 0
 
-        async def async_search(
+        async def search(
             self,
             query_vector: list[float],
             k: int,
             *,
             model_name: str,
             dim: int,
-            filters: dict[str, object] | None = None,
-        ) -> list[RecordHit | tuple[str, float]]:
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
             assert query_vector == [1.0, 0.0]
             assert (model_name, dim) == ("fake-model", 2)
             assert filters == {"statuses": ["active"]}
             return _hits([("a", 0.9)])
+
+        async_search = search
 
     pipeline = RecordSearchPipeline(
         vector_store=AsyncVectorStore(),
@@ -1146,8 +1148,8 @@ async def test_store_errors_raise_by_default() -> None:
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
-        ) -> list[RecordHit | tuple[str, float]]:
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
             raise RuntimeError("backend unavailable")
 
     pipeline = RecordSearchPipeline(
@@ -1166,8 +1168,8 @@ async def test_store_errors_can_be_explicitly_returned_as_degraded() -> None:
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
-        ) -> list[RecordHit | tuple[str, float]]:
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
             raise RuntimeError("backend unavailable")
 
     pipeline = RecordSearchPipeline(
@@ -1193,7 +1195,7 @@ async def test_malformed_candidate_data_keeps_other_lane_results_in_lenient_mode
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[object]:
             return [object()]
 
@@ -1228,7 +1230,7 @@ async def test_unavailable_provider_failure_detail_is_bounded() -> None:
             *,
             model_name: str,
             dim: int,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             raise RuntimeError("provider unavailable: " + "x" * 1000)
 
@@ -1259,7 +1261,7 @@ async def test_malformed_candidate_data_preserves_strict_failure_behavior() -> N
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[object]:
             return [object()]
 
@@ -1313,8 +1315,8 @@ async def test_composite_identity_reaches_async_hydrator() -> None:
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
-        ) -> list[RecordHit | tuple[str, float]]:
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
             return [RecordHit(identity, 1.0)]
 
     pipeline = RecordSearchPipeline(
@@ -1361,8 +1363,8 @@ async def test_graph_neighbors_preserve_canonical_identity() -> None:
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
-        ) -> list[RecordHit | tuple[str, float]]:
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
             return [RecordHit(seed, 1.0)]
 
     class Graph:
@@ -1430,7 +1432,7 @@ async def test_graph_expansion_preserves_scoped_neighbor_provenance(
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             return [RecordHit(seed, 1.0)]
 
@@ -1441,7 +1443,7 @@ async def test_graph_expansion_preserves_scoped_neighbor_provenance(
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[GraphNeighbor]:
             assert record_id == seed
             assert filters == {
@@ -1527,7 +1529,7 @@ async def test_relationship_target_resolver_selects_canonical_neighbors(
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             return [RecordHit(seed, 1.0)]
 
@@ -1541,7 +1543,7 @@ async def test_relationship_target_resolver_selects_canonical_neighbors(
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[GraphNeighbor]:
             self.calls.append(record_id)
             assert filters == {
@@ -1688,7 +1690,7 @@ async def test_relationship_resolver_keeps_direct_target_as_graph_seed(
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             return [
                 RecordHit(explanation.identity, 1.0),
@@ -1702,7 +1704,7 @@ async def test_relationship_resolver_keeps_direct_target_as_graph_seed(
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[GraphNeighbor]:
             calls.append(record_id)
             assert filters == {
@@ -1780,7 +1782,7 @@ async def test_relationship_target_resolver_uses_incoming_graph_direction() -> N
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[GraphNeighbor]:
             calls.append(record_id.source_id)
             assert filters == {
@@ -1798,7 +1800,7 @@ async def test_relationship_target_resolver_uses_incoming_graph_direction() -> N
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             return [RecordHit(seed.identity, 1.0)]
 
@@ -1885,7 +1887,7 @@ async def test_chunk_target_hits_normalize_to_document_graph_neighbors() -> None
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             return [RecordHit(seed, 1.0)]
 
@@ -1896,7 +1898,7 @@ async def test_chunk_target_hits_normalize_to_document_graph_neighbors() -> None
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[GraphNeighbor]:
             graph_calls.append(record_id)
             assert filters == {
@@ -2037,8 +2039,8 @@ async def test_keyword_and_embedding_work_overlap_without_candidate_gating() -> 
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
-        ) -> list[RecordHit | tuple[str, float]]:
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
             keyword_started.set()
             await release.wait()
             return _hits([("a", 1.0)])
@@ -2060,8 +2062,8 @@ async def test_keyword_and_embedding_work_overlap_without_candidate_gating() -> 
             *,
             model_name: str,
             dim: int,
-            filters: dict[str, object] | None = None,
-        ) -> list[RecordHit | tuple[str, float]]:
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
             vector_started.set()
             return _hits([("a", 1.0)])
 
@@ -2094,8 +2096,8 @@ async def test_candidate_gating_delays_vector_lookup_until_keyword_ids_arrive() 
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
-        ) -> list[RecordHit | tuple[str, float]]:
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
             keyword_started.set()
             await release_keyword.wait()
             keyword_finished.set()
@@ -2117,8 +2119,8 @@ async def test_candidate_gating_delays_vector_lookup_until_keyword_ids_arrive() 
             *,
             model_name: str,
             dim: int,
-            filters: dict[str, object] | None = None,
-        ) -> list[RecordHit | tuple[str, float]]:
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
             assert keyword_finished.is_set()
             vector_started.set()
             return _hits([("a", 1.0)])
@@ -2272,7 +2274,7 @@ async def test_exact_artifact_query_keeps_empty_keyword_candidates_bounded() -> 
             *,
             model_name: str,
             dim: int,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             assert keyword_store.queries
             return super().search(
@@ -2460,8 +2462,8 @@ async def test_conditional_expansion_is_called_once_after_weak_first_pass() -> N
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
-        ) -> list[RecordHit | tuple[str, float]]:
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
             self.queries.append((query, k, filters))
             return (
                 _hits([("a", 1.0)])
@@ -2698,7 +2700,7 @@ async def test_batch_graph_and_hydration_use_canonical_keys_once() -> None:
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             return [RecordHit(seed, 1.0)]
 
@@ -3170,8 +3172,8 @@ async def test_cancelling_overlapped_lanes_cancels_both_tasks() -> None:
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
-        ) -> list[RecordHit | tuple[str, float]]:
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
             keyword_started.set()
             try:
                 await wait_forever.wait()
@@ -3259,7 +3261,7 @@ async def test_exact_identifier_matches_keep_their_relative_order() -> None:
             self,
             query: str,
             k: int,
-            filters: dict[str, object] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             # w2 is the better match but sorts second by storage key.
             return [
