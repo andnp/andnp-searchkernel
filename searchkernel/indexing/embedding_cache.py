@@ -47,13 +47,21 @@ class SQLiteEmbeddingCache:
         self.encoder_namespace = encoder_namespace
         self.dimension = dimension
         self._lock = threading.RLock()
-        self._metrics = EmbeddingCacheMetrics()
+        self._hits = 0
+        self._misses = 0
+        self._writes = 0
+        self._invalidations = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = self._open_or_recover(validate=validate)
 
     @property
     def metrics(self) -> EmbeddingCacheMetrics:
-        return self._metrics
+        return EmbeddingCacheMetrics(
+            hits=self._hits,
+            misses=self._misses,
+            writes=self._writes,
+            invalidations=self._invalidations,
+        )
 
     def get_many(self, content_hashes: Sequence[str]) -> Mapping[str, Sequence[float]]:
         """Return valid vectors for this encoder namespace."""
@@ -268,14 +276,18 @@ class SQLiteEmbeddingCache:
             )
         return packed
 
-    def _add_metrics(self, **increments: int) -> None:
-        values = {
-            field: getattr(self._metrics, field)
-            for field in self._metrics.__dataclass_fields__
-        }
-        for field, amount in increments.items():
-            values[field] += amount
-        self._metrics = EmbeddingCacheMetrics(**values)
+    def _add_metrics(
+        self,
+        *,
+        hits: int = 0,
+        misses: int = 0,
+        writes: int = 0,
+        invalidations: int = 0,
+    ) -> None:
+        self._hits += hits
+        self._misses += misses
+        self._writes += writes
+        self._invalidations += invalidations
 
     @staticmethod
     def _is_malformed(error: sqlite3.DatabaseError) -> bool:
