@@ -365,6 +365,13 @@ class Record:
     indexed_text: str | None = None
     """Optional text override used for indexing while retaining ``body``."""
 
+    _identity: RecordIdentity | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
     def __post_init__(self) -> None:
         """Keep persisted timestamps comparable across source adapters."""
         self.created_at = _as_utc(self.created_at)
@@ -373,12 +380,20 @@ class Record:
     @property
     def storage_key(self) -> str:
         """Canonical storage identity used by stores, fusion, and hydration."""
-        return canonical_storage_key(self.workspace_id, self.source_kind, self.source_id)
+        return self.identity.storage_key
 
     @property
     def identity(self) -> RecordIdentity:
         """Return the canonical identity carried by this record."""
-        return RecordIdentity(self.workspace_id, self.source_kind, self.source_id)
+        identity = self._identity
+        if identity is None or (
+            identity.workspace_id != self.workspace_id
+            or identity.source_kind != self.source_kind
+            or identity.source_id != self.source_id
+        ):
+            identity = RecordIdentity(self.workspace_id, self.source_kind, self.source_id)
+            self._identity = identity
+        return identity
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary for storage or RPC."""

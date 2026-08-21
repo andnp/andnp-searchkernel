@@ -18,11 +18,41 @@ def test_storage_key_includes_optional_workspace_and_source_kind() -> None:
     )
 
 
+def test_storage_key_has_exact_canonical_encoding() -> None:
+    """The stable key format remains the public storage identity contract."""
+    assert RecordIdentity("workspace-a", "note", "same/id").storage_key == (
+        'record:["workspace-a","note","same/id"]'
+    )
+
+
+def test_storage_key_is_collision_resistant_across_identity_parts() -> None:
+    """Workspace, source kind, and source ID all remain distinct key parts."""
+    identities = (
+        RecordIdentity("workspace-a", "note", "same/id"),
+        RecordIdentity("workspace-a", "note/same", "id"),
+        RecordIdentity("workspace-b", "note", "same/id"),
+        RecordIdentity("workspace-a", "commit", "same/id"),
+    )
+
+    assert len({identity.storage_key for identity in identities}) == len(identities)
+
+
 def test_identity_round_trips_through_canonical_storage_key_and_mapping() -> None:
     identity = RecordIdentity("workspace-a", "note", "same/id")
 
     assert RecordIdentity.from_storage_key(identity.storage_key) == identity
     assert RecordIdentity.from_dict(identity.to_dict()) == identity
+
+
+def test_identity_equality_and_hash_ignore_cached_storage_key() -> None:
+    """Caching the key does not change immutable identity value semantics."""
+    first = RecordIdentity("workspace-a", "note", "same/id")
+    second = RecordIdentity("workspace-a", "note", "same/id")
+
+    _ = first.storage_key
+
+    assert first == second
+    assert hash(first) == hash(second)
 
 
 def test_identity_rejects_non_canonical_storage_key_encoding() -> None:
@@ -43,6 +73,57 @@ def test_from_storage_key_rejects_malformed_json() -> None:
 def test_from_storage_key_rejects_wrong_shaped_payload() -> None:
     with pytest.raises(ValueError, match="invalid record storage key"):
         RecordIdentity.from_storage_key('record:["note", "same"]')
+
+
+def test_record_reuses_identity_key_without_repeating_canonical_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated record identity views reuse one canonical JSON serialization."""
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    record = Record(
+        workspace_id="workspace-a",
+        source_kind="note",
+        source_id="same/id",
+        title="Title",
+        body="Body",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    original_dumps = json.dumps
+    call_count = 0
+
+    def counting_dumps(*args: object, **kwargs: object) -> str:
+        nonlocal call_count
+        call_count += 1
+        return original_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(json, "dumps", counting_dumps)
+
+    expected = 'record:["workspace-a","note","same/id"]'
+    assert record.storage_key == expected
+    assert record.identity.storage_key == expected
+    assert record.storage_key == expected
+    assert call_count == 1
+
+
+def test_record_identity_cache_tracks_mutated_identity_fields() -> None:
+    """Mutable records refresh cached identity after a source field changes."""
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    record = Record(
+        workspace_id="workspace-a",
+        source_kind="note",
+        source_id="same/id",
+        title="Title",
+        body="Body",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    original = record.storage_key
+
+    record.workspace_id = "workspace-b"
+
+    assert original != record.storage_key
+    assert record.identity == RecordIdentity("workspace-b", "note", "same/id")
 
 
 def test_from_storage_key_memoizes_repeated_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
