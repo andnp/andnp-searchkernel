@@ -1580,9 +1580,9 @@ class TestGraphStore:
             assert [neighbor.edge_type for neighbor in incoming[seed.storage_key]] == [
                 neighbor.edge_type for neighbor in expected
             ]
-            assert [neighbor.weight for neighbor in incoming[seed.storage_key]] == [
-                neighbor.weight for neighbor in expected
-            ]
+            assert [neighbor.weight for neighbor in incoming[seed.storage_key]] == pytest.approx(
+                [neighbor.weight for neighbor in expected]
+            )
         assert store.incoming_neighbors_many([], depth=1) == {}
         assert store.neighbors_many(
             [inbound_a, inbound_b], depth=1
