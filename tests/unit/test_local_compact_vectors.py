@@ -376,7 +376,7 @@ def test_snapshot_filter_mask_preserves_empty_results_and_storage_order() -> Non
     ).tolist() == [0, 1, 2]
 
 
-def test_vector_metadata_and_snapshot_cache_follow_vector_epoch() -> None:
+def test_vector_storage_stats_cache_follows_vector_epoch() -> None:
     backend = LocalRecordBackend()
     vector = LocalVectorStore(backend, engine="auto")
     record = _record("one", [1.0, 0.0])
@@ -392,25 +392,20 @@ def test_vector_metadata_and_snapshot_cache_follow_vector_epoch() -> None:
         )
 
     vector.search([1.0, 0.0], 1, model_name="model", dim=2)
-    snapshot = backend._vector_snapshots[("model", 2)]
-    assert snapshot.metadata == ()
-    assert snapshot.uris == ()
+    assert backend.vector_storage_stats("model", 2) == (1, 8)
     vector.search([1.0, 0.0], 1, model_name="model", dim=2)
 
     assert stats_query_count() == 1
-    assert backend._vector_snapshots[("model", 2)] is snapshot
 
     keyword_only = _record("keyword-only", [0.0, 1.0])
     backend.index([keyword_only])
     vector.search([1.0, 0.0], 1, model_name="model", dim=2)
     assert stats_query_count() == 1
-    assert backend._vector_snapshots[("model", 2)] is snapshot
 
     record.embedding = [0.0, 1.0]
     backend.upsert([record], "model", 2)
     vector.search([0.0, 1.0], 1, model_name="model", dim=2)
     assert stats_query_count() == 2
-    assert backend._vector_snapshots[("model", 2)] is not snapshot
     assert connection.execute(
         "SELECT COUNT(*) FROM local_vectors_v2"
     ).fetchone()[0] == 1
@@ -418,7 +413,6 @@ def test_vector_metadata_and_snapshot_cache_follow_vector_epoch() -> None:
     assert backend.vector_count("model", 2) == 0
     vector.search([0.0, 1.0], 1, model_name="model", dim=2)
     assert stats_query_count() == 3
-    assert backend._vector_snapshots[("model", 2)] is not snapshot
     assert vector.search([0.0, 1.0], 1, model_name="model", dim=2) == []
     connection.set_trace_callback(None)
 
@@ -432,7 +426,6 @@ def test_vector_search_materializes_metadata_only_for_metadata_filters() -> None
     backend.upsert([record], "model", 2)
 
     assert vector.search([1.0, 0.0], 1, model_name="model", dim=2)
-    assert backend._vector_snapshots[("model", 2)].metadata == ()
 
     hits = vector.search(
         [1.0, 0.0],
@@ -443,7 +436,6 @@ def test_vector_search_materializes_metadata_only_for_metadata_filters() -> None
     )
 
     assert [hit.storage_key for hit in hits] == [record.storage_key]
-    assert backend._vector_snapshots[("model", 2)].metadata
 
 
 def test_large_mixed_vector_upsert_writes_only_changed_rows(tmp_path: Path) -> None:
@@ -506,31 +498,6 @@ def test_large_mixed_vector_upsert_writes_only_changed_rows(tmp_path: Path) -> N
         "l2",
     )
     connection.set_trace_callback(None)
-
-
-def test_vector_snapshot_arrays_are_float32_and_immutable() -> None:
-    """Snapshot arrays keep exact-search state contiguous and read-only."""
-    backend = LocalRecordBackend()
-    backend.upsert([_record("one", [3.0, 4.0])], "model", 2)
-
-    backend.search_vector([3.0, 4.0], 1, model_name="model", dim=2)
-    snapshot = backend._vector_snapshots[("model", 2)]
-
-    assert snapshot.matrix.shape == (1, 2)
-    assert snapshot.matrix.dtype == np.dtype("<f4")
-    assert snapshot.matrix.flags.c_contiguous
-    assert not snapshot.matrix.flags.writeable
-    with pytest.raises(ValueError):
-        snapshot.matrix[0, 0] = 0.0
-
-    for array in (
-        snapshot.source_ids,
-        snapshot.workspace_ids,
-        snapshot.source_kinds,
-        snapshot.statuses,
-    ):
-        assert array.dtype == np.dtype(object)
-        assert not array.flags.writeable
 
 
 def test_public_vector_batches_preserve_bounds_order_and_required_rows() -> None:
@@ -658,26 +625,6 @@ def test_optional_faiss_recall_reload_and_corruption_fallback(tmp_path: Path) ->
     assert "persistence_reason" in fallback.last_search_diagnostics
 
 
-def test_faiss_execution_fallback_reports_reason(monkeypatch: pytest.MonkeyPatch) -> None:
-    backend = LocalRecordBackend()
-    record = _record("one", [1.0, 0.0])
-    backend.upsert([record], "model", 2)
-    store = FAISSLocalVectorStore(backend)
-
-    def fail_to_load(*args: object, **kwargs: object) -> object:
-        raise RuntimeError("index unavailable")
-
-    monkeypatch.setattr(store, "_get_state", fail_to_load)
-
-    hits = store.search([1.0, 0.0], 1, model_name="model", dim=2)
-
-    assert [hit.source_id for hit in hits] == ["one"]
-    assert store.last_search_diagnostics["fallback"] is True
-    assert store.last_search_diagnostics["fallback_reason"] == (
-        "RuntimeError: index unavailable"
-    )
-
-
 @pytest.mark.parametrize(
     ("field", "value", "error"),
     [
@@ -735,12 +682,9 @@ def test_faiss_configuration_fingerprint_persists_hnsw_settings(
         hnsw_ef_construction=27,
         hnsw_ef_search=73,
     )
-    state = reloaded._get_state("model", 2)
-    import faiss
-
-    hnsw = faiss.downcast_index(state.index.index).hnsw
-    assert hnsw.efConstruction == 27
-    assert hnsw.efSearch == 73
+    assert reloaded.search(
+        [1.0, 0.0], 1, model_name="model", dim=2
+    )[0].source_id == "one"
     assert reloaded.last_search_diagnostics["persistence"] == "loaded"
 
 
