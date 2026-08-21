@@ -1,6 +1,7 @@
 """Focused batching tests for the HuggingFace reranker adapter."""
 
 import math
+from collections.abc import ItemsView
 
 import pytest
 import torch
@@ -8,8 +9,20 @@ import torch
 from searchkernel.adapters.rerank import HuggingFaceReranker
 
 
-class FakeTokenizedInputs(dict[str, torch.Tensor]):
+class FakeTokenizedInputs:
+    def __init__(self, **values: torch.Tensor) -> None:
+        self.values: dict[str, object] = {
+            key: value for key, value in values.items()
+        }
+
+    def items(self) -> ItemsView[str, object]:
+        return self.values.items()
+
+    def __getitem__(self, key: str) -> object:
+        return self.values[key]
+
     def to(self, device: str, /) -> "FakeTokenizedInputs":
+        del device
         return self
 
 
@@ -19,7 +32,7 @@ class FakeTokenizer:
 
     def __call__(
         self,
-        texts: list[str],
+        text: str | list[str],
         *,
         return_tensors: str,
         padding: bool,
@@ -27,14 +40,24 @@ class FakeTokenizer:
         max_length: int,
     ) -> FakeTokenizedInputs:
         del return_tensors, padding, truncation, max_length
-        self.calls.append(texts)
-        lengths = torch.tensor([len(text) % 4 + 1 for text in texts])
+        text_batch = [text] if isinstance(text, str) else text
+        self.calls.append(text_batch)
+        lengths = torch.tensor([len(text) % 4 + 1 for text in text_batch])
         max_length = int(lengths.max().item())
-        input_ids = torch.zeros((len(texts), max_length), dtype=torch.long)
-        for index, text in enumerate(texts):
-            input_ids[index, : lengths[index]] = len(text) % 10
-        attention_mask = torch.arange(max_length).expand(len(texts), -1) < lengths[:, None]
+        input_ids = torch.zeros((len(text_batch), max_length), dtype=torch.long)
+        for index, document in enumerate(text_batch):
+            input_ids[index, : lengths[index]] = len(document) % 10
+        attention_mask = torch.arange(max_length).expand(len(text_batch), -1) < lengths[:, None]
         return FakeTokenizedInputs(input_ids=input_ids, attention_mask=attention_mask)
+
+    def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
+        del text, add_special_tokens
+        return [1]
+
+
+class FakeModelOutput:
+    def __init__(self, logits: torch.Tensor) -> None:
+        self.logits = logits
 
 
 class FakeModel:
@@ -43,7 +66,7 @@ class FakeModel:
         self.no_token_id = no_token_id
         self.batch_sizes: list[int] = []
 
-    def __call__(self, **inputs: object) -> object:
+    def __call__(self, **inputs: object) -> FakeModelOutput:
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
         assert isinstance(input_ids, torch.Tensor)
@@ -55,7 +78,14 @@ class FakeModel:
         final_values = input_ids[row_indices, final_positions].float()
         logits[:, :, self.yes_token_id] = final_values[:, None]
         logits[:, :, self.no_token_id] = 0
-        return type("FakeOutput", (), {"logits": logits})()
+        return FakeModelOutput(logits)
+
+    def to(self, device: str, /) -> "FakeModel":
+        del device
+        return self
+
+    def eval(self) -> "FakeModel":
+        return self
 
 
 def make_reranker(tokenizer: FakeTokenizer, model: FakeModel) -> HuggingFaceReranker:
