@@ -420,6 +420,29 @@ def test_vector_metadata_and_snapshot_cache_follow_vector_epoch() -> None:
     connection.set_trace_callback(None)
 
 
+def test_vector_search_materializes_metadata_only_for_metadata_filters() -> None:
+    """Normal searches defer row metadata while metadata filters stay exact."""
+    backend = LocalRecordBackend()
+    vector = LocalVectorStore(backend)
+    record = _record("metadata", [1.0, 0.0])
+    record.metadata = {"category": "keep"}
+    backend.upsert([record], "model", 2)
+
+    assert vector.search([1.0, 0.0], 1, model_name="model", dim=2)
+    assert backend._vector_snapshots[("model", 2)].metadata == ()
+
+    hits = vector.search(
+        [1.0, 0.0],
+        1,
+        model_name="model",
+        dim=2,
+        filters={"metadata_equals": {"category": "keep"}},
+    )
+
+    assert [hit.storage_key for hit in hits] == [record.storage_key]
+    assert backend._vector_snapshots[("model", 2)].metadata
+
+
 def test_large_mixed_vector_upsert_writes_only_changed_rows(tmp_path: Path) -> None:
     """Large batches skip unchanged rows while repairing changed vector state."""
     backend = LocalRecordBackend(tmp_path / "records.db")

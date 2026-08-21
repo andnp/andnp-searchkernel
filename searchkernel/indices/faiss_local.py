@@ -552,8 +552,8 @@ class FAISSLocalVectorStore:
                     "epoch": state.epoch,
                     "ids": list(state.ids),
                     "storage_keys": list(state.storage_keys),
-                    "candidate_metadata": {
-                        storage_key: {
+                    "candidate_metadata": [
+                        {
                             "source_id": metadata.source_id,
                             "workspace_id": metadata.workspace_id,
                             "source_kind": metadata.source_kind,
@@ -561,8 +561,9 @@ class FAISSLocalVectorStore:
                             "metadata": metadata.metadata,
                             "uri": metadata.uri,
                         }
-                        for storage_key, metadata in state.candidate_metadata.items()
-                    },
+                        for storage_key in state.storage_keys
+                        for metadata in (state.candidate_metadata[storage_key],)
+                    ],
                     "tombstones": [],
                 },
             )
@@ -603,6 +604,11 @@ class FAISSLocalVectorStore:
             storage_keys = tuple(metadata["storage_keys"])
             if len(ids) != len(storage_keys) or len(set(ids)) != len(ids):
                 return None
+            candidate_metadata_values = metadata["candidate_metadata"]
+            if not isinstance(candidate_metadata_values, list) or len(
+                candidate_metadata_values
+            ) != len(storage_keys):
+                return None
             candidate_metadata = {
                 storage_key: _CandidateMetadata(
                     source_id=value["source_id"],
@@ -612,10 +618,10 @@ class FAISSLocalVectorStore:
                     metadata=dict(metadata_mapping(value["metadata"])),
                     uri=value["uri"],
                 )
-                for storage_key, value in metadata["candidate_metadata"].items()
+                for storage_key, value in zip(
+                    storage_keys, candidate_metadata_values, strict=True
+                )
             }
-            if set(candidate_metadata) != set(storage_keys):
-                return None
             index = faiss.deserialize_index(np.frombuffer(index_path.read_bytes(), dtype=np.uint8))
             if index.d != dim or index.ntotal != len(ids):
                 return None
