@@ -32,6 +32,24 @@ except ImportError:
     psycopg = None  # type: ignore[assignment]
     psycopg_pool = None  # type: ignore[assignment]
 
+
+def _require_psycopg2():
+    if psycopg2 is None:
+        raise ImportError(
+            "psycopg2 is required for PostgreSQL operations. "
+            "Install with: pip install 'andnp-searchkernel[pgvector]'"
+        )
+    return psycopg2
+
+
+def _require_psycopg3():
+    if psycopg is None:
+        raise ImportError(
+            "psycopg3 is required for PostgreSQL operations. "
+            "Install with: pip install 'andnp-searchkernel[pgvector-psycopg3]'"
+        )
+    return psycopg
+
 from searchkernel.adapters.stores.postgres_epochs import (
     _POSTGRES_EPOCH_LANE,
     _PostgresConnectionLike,
@@ -431,7 +449,7 @@ def _delete_graph_edges_for_identities(
         (identity.workspace_id or "", identity.source_kind, identity.source_id)
         for identity in identities
     ]
-    psycopg2.extras.execute_values(
+    _require_psycopg2().extras.execute_values(
         cursor,
         """
         DELETE FROM graph_edges AS edge
@@ -652,7 +670,7 @@ class PostgresConnection:
         """Return a connection to the pool."""
         try:
             conn.rollback()
-        except psycopg2.Error:
+        except _require_psycopg2().Error:
             pass
         self.pool.putconn(conn)
 
@@ -707,7 +725,7 @@ class Psycopg3Connection:
         """Return a connection to the pool."""
         try:
             conn.rollback()
-        except psycopg.Error as e:  # pyright: ignore[union-attr]
+        except _require_psycopg3().Error as e:
             logger.debug("Connection rollback failed during pool return: %s", e)
         self.pool.putconn(conn)
 
@@ -1041,7 +1059,7 @@ class PGVectorStore:
             if isinstance(self.conn_pool, Psycopg3Connection):
                 cursor.executemany(record_insert_sql, record_rows)
             else:
-                psycopg2.extras.execute_values(
+                _require_psycopg2().extras.execute_values(
                     cursor,
                     record_insert_sql.replace(
                         "VALUES (%s, %s, %s, %s, %s, %s, %s,\n"
@@ -1098,7 +1116,7 @@ class PGVectorStore:
                             row[0] for row in cursor.fetchall()
                         )
                 else:
-                    changed_rows = psycopg2.extras.execute_values(
+                    changed_rows = _require_psycopg2().extras.execute_values(
                         cursor,
                         vector_insert_sql.replace(
                             "VALUES (%s, %s::vector, %s)", "VALUES %s"
@@ -1554,7 +1572,7 @@ class PGKeywordStore:
                     )
                     changed_keyword_ids.update(row[0] for row in cursor.fetchall())
             else:
-                changed_rows = psycopg2.extras.execute_values(
+                changed_rows = _require_psycopg2().extras.execute_values(
                     cursor,
                     update_sql,
                     rows,
@@ -1721,7 +1739,7 @@ class PGGraphStore:
                     rows,
                 )
             else:
-                psycopg2.extras.execute_values(cursor, statement, rows)
+                _require_psycopg2().extras.execute_values(cursor, statement, rows)
 
             _POSTGRES_EPOCH_LANE.bump(cursor, graph=True)
             conn.commit()
