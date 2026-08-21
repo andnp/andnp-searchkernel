@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import UTC, datetime
 
 import pytest
@@ -33,7 +34,7 @@ def _ids(results: list[RecordSearchResult]) -> list[str]:
 
 
 def _embedding_lookup(
-    embeddings: dict[str, list[float] | None],
+    embeddings: Mapping[str, list[float] | None],
 ):
     def _embedding_of(result: RecordSearchResult) -> list[float] | None:
         return embeddings[result.record_id]
