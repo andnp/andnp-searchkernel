@@ -44,7 +44,10 @@ from searchkernel.domain.vector_filters import (
     record_matches_vector_filters,
 )
 from searchkernel.indices import keyword_scoring as _keyword_scoring
-from searchkernel.indices.faiss_local import FAISSLocalVectorStore
+from searchkernel.indices.faiss_local import (
+    FAISSLocalVectorStore,
+    FAISSSearchStrategy,
+)
 from searchkernel.indices.local_records import _LOCAL_FTS_TABLE, _RecordWriter
 from searchkernel.indices.local_vectors import (
     NORMALIZATION_POLICY,
@@ -2670,12 +2673,14 @@ class LocalVectorStore:
         *,
         engine: str | None = None,
         faiss_path: Path | None = None,
+        faiss_search_strategy: FAISSSearchStrategy = "exact",
     ):
         self._backend = backend
         self._engine = engine or backend.vector_engine
         if self._engine not in {"exact", "faiss", "auto"}:
             raise ValueError("engine must be exact, faiss, or auto")
         self._faiss_path = faiss_path
+        self._faiss_search_strategy = faiss_search_strategy
         self._faiss_store: Any | None = None
         self._last_engine_name = (
             "faiss" if self._engine == "faiss" else "sqlite-exact"
@@ -2687,6 +2692,10 @@ class LocalVectorStore:
     @property
     def engine_name(self) -> str:
         return self._last_engine_name
+
+    @property
+    def faiss_search_strategy(self) -> FAISSSearchStrategy:
+        return self._faiss_search_strategy
 
     def _selected_store(
         self,
@@ -2721,6 +2730,7 @@ class LocalVectorStore:
             self._faiss_store = FAISSLocalVectorStore(
                 self._backend,
                 index_path=self._faiss_path,
+                search_strategy=self._faiss_search_strategy,
             )
         return self._faiss_store
 

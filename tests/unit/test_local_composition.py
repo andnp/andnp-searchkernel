@@ -77,3 +77,19 @@ def test_local_composition_closes_owned_database(tmp_path) -> None:
 
     with pytest.raises(sqlite3.ProgrammingError):
         connection.execute("SELECT 1")
+
+
+def test_public_local_composition_accepts_faiss_search_strategy(tmp_path) -> None:
+    """The public builder carries approximate FAISS policy.
+
+    The selected policy must reach the vector store used by the composition.
+    """
+    composition = build_local_record_kernel(
+        tmp_path / "records.db",
+        embedding_provider=_FakeEmbeddingProvider(),
+        vector_engine="faiss",
+        faiss_search_strategy="approximate",
+    )
+
+    assert composition.vector_store.faiss_search_strategy == "approximate"
+    composition.close()
