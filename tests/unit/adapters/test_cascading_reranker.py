@@ -40,6 +40,10 @@ class _FakeRecordReranker:
         self.calls.append([record.source_id for record in records])
         return list(self._scores)
 
+    def rerank(self, query: str, documents: list[str]) -> list[float]:
+        del query, documents
+        return list(self._scores)
+
 
 class _RaisingReranker:
     model_name = "raising"
