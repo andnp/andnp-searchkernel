@@ -876,6 +876,20 @@ class _Psycopg3Fragment:
         return _psycopg3_composable(self.value).as_string(cursor)
 
 
+def _execute(
+    cursor,
+    statement: str | _SQLFragment,
+    params: object | None = None,
+) -> None:
+    statement_value: object = statement
+    if isinstance(statement, (_Psycopg2Fragment, _Psycopg3Fragment)):
+        statement_value = statement.value
+    if params is None:
+        cursor.execute(statement_value)
+    else:
+        cursor.execute(statement_value, params)
+
+
 class _Psycopg2SQLBuilder:
     def SQL(self, value: LiteralString) -> _SQLFragment:
         return _Psycopg2Fragment(_require_psycopg2_sql().SQL(value))
@@ -1060,7 +1074,8 @@ class PGVectorStore:
                     f"Dimension mismatch for model {model_name}: "
                     f"expected {existing_dim}, got {dim}"
                 )
-            cursor.execute(
+            _execute(
+                cursor,
                 self._sql.SQL(
                     "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS revision TEXT;"
                 ).format(table=self._sql.Identifier(existing_table))
@@ -1078,7 +1093,8 @@ class PGVectorStore:
                     f"Dimension mismatch for model {model_name}: "
                     f"expected {existing_dim}, got {dim}"
                 )
-            cursor.execute(
+            _execute(
+                cursor,
                 self._sql.SQL(
                     "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS revision TEXT;"
                 ).format(table=self._sql.Identifier(existing_table))
@@ -1087,7 +1103,8 @@ class PGVectorStore:
 
         table_name = _vector_table_name(model_name, dim)
 
-        cursor.execute(
+        _execute(
+            cursor,
             self._sql.SQL(
                 "CREATE TABLE IF NOT EXISTS {table} ("
                 "record_id TEXT PRIMARY KEY, "
@@ -1100,13 +1117,15 @@ class PGVectorStore:
                 dim=self._sql.Integer(dim),
             )
         )
-        cursor.execute(
+        _execute(
+            cursor,
             self._sql.SQL(
                 "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS revision TEXT;"
             ).format(table=self._sql.Identifier(table_name))
         )
 
-        cursor.execute(
+        _execute(
+            cursor,
             self._sql.SQL(
                 "CREATE INDEX IF NOT EXISTS {index_name} ON {table} "
                 "USING hnsw (embedding vector_cosine_ops);"
@@ -1447,7 +1466,8 @@ class PGVectorStore:
             table_names = [row[0] for row in cursor.fetchall()]
 
             for table_name in table_names:
-                cursor.execute(
+                _execute(
+                    cursor,
                     self._sql.SQL("DELETE FROM {table} WHERE record_id = ANY(%s);").format(
                         table=self._sql.Identifier(table_name)
                     ),
@@ -1496,7 +1516,8 @@ class PGVectorStore:
                 return
             table_name = row[0]
 
-            cursor.execute(
+            _execute(
+                cursor,
                 self._sql.SQL("DELETE FROM {table} WHERE record_id = ANY(%s);").format(
                     table=self._sql.Identifier(table_name)
                 ),
@@ -1514,7 +1535,8 @@ class PGVectorStore:
             ]
             if remaining_checks:
                 remaining_clause = self._sql.SQL(" AND ").join(remaining_checks)
-                cursor.execute(
+                _execute(
+                    cursor,
                     self._sql.SQL(
                         "SELECT r.workspace_id, r.source_kind, r.source_id "
                         "FROM records r "
@@ -1529,7 +1551,8 @@ class PGVectorStore:
                 graph_changed = _delete_graph_edges_for_identities(
                     cursor, deleted_identities
                 )
-                cursor.execute(
+                _execute(
+                    cursor,
                     self._sql.SQL(
                         "DELETE FROM records r WHERE r.record_id = ANY(%s) AND {}"
                     ).format(remaining_clause),
@@ -1598,14 +1621,16 @@ class PGVectorStore:
             # A table created before revision tracking existed has no such
             # column; add it (idempotent) rather than assume every existing
             # deployment has already upserted since that column was added.
-            cursor.execute(
+            _execute(
+                cursor,
                 self._sql.SQL(
                     "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS revision TEXT;"
                 ).format(table=self._sql.Identifier(table_name))
             )
 
             storage_keys = [record.storage_key for record in records]
-            cursor.execute(
+            _execute(
+                cursor,
                 self._sql.SQL(
                     "SELECT record_id, embedding::text, revision FROM {table} "
                     "WHERE record_id = ANY(%s);"
