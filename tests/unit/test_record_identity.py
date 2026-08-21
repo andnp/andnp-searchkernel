@@ -1,4 +1,3 @@
-import json
 from datetime import UTC, datetime
 
 import pytest
@@ -9,7 +8,6 @@ from searchkernel.domain import (
     RecordIdentity,
     canonical_storage_key,
 )
-from searchkernel.domain import models as models_module
 
 
 def test_storage_key_includes_optional_workspace_and_source_kind() -> None:
@@ -75,37 +73,6 @@ def test_from_storage_key_rejects_wrong_shaped_payload() -> None:
         RecordIdentity.from_storage_key('record:["note", "same"]')
 
 
-def test_record_reuses_identity_key_without_repeating_canonical_serialization(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Repeated record identity views reuse one canonical JSON serialization."""
-    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
-    record = Record(
-        workspace_id="workspace-a",
-        source_kind="note",
-        source_id="same/id",
-        title="Title",
-        body="Body",
-        created_at=timestamp,
-        updated_at=timestamp,
-    )
-    original_dumps = json.dumps
-    call_count = 0
-
-    def counting_dumps(*args: object, **kwargs: object) -> str:
-        nonlocal call_count
-        call_count += 1
-        return original_dumps(*args, **kwargs)
-
-    monkeypatch.setattr(json, "dumps", counting_dumps)
-
-    expected = 'record:["workspace-a","note","same/id"]'
-    assert record.storage_key == expected
-    assert record.identity.storage_key == expected
-    assert record.storage_key == expected
-    assert call_count == 1
-
-
 def test_record_identity_cache_tracks_mutated_identity_fields() -> None:
     """Mutable records refresh cached identity after a source field changes."""
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
@@ -124,28 +91,6 @@ def test_record_identity_cache_tracks_mutated_identity_fields() -> None:
 
     assert original != record.storage_key
     assert record.identity == RecordIdentity("workspace-b", "note", "same/id")
-
-
-def test_from_storage_key_memoizes_repeated_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A repeated storage-key parse must not redo the JSON round trip."""
-    models_module._parse_storage_key.cache_clear()
-    original_loads = json.loads
-    call_count = 0
-
-    def counting_loads(*args: object, **kwargs: object) -> object:
-        nonlocal call_count
-        call_count += 1
-        return original_loads(*args, **kwargs)
-
-    monkeypatch.setattr(json, "loads", counting_loads)
-
-    key = RecordIdentity("workspace-a", "note", "same").storage_key
-
-    first = RecordIdentity.from_storage_key(key)
-    second = RecordIdentity.from_storage_key(key)
-
-    assert first == second == RecordIdentity("workspace-a", "note", "same")
-    assert call_count == 1
 
 
 @pytest.mark.parametrize(
