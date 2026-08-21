@@ -215,7 +215,7 @@ def test_upsert_submits_records_with_one_psycopg3_bulk_call() -> None:
     assert "INSERT INTO records" in str(statement)
     assert len(rows) == len(records)
     assert rows[0][0] == records[0].storage_key
-    assert rows[0][10] == '{"index": 0}'
+    assert rows[0][9] == '{"index": 0}'
     assert (
         sum("INSERT INTO records" in str(statement) for statement, _ in cursor.executed)
         == 0
