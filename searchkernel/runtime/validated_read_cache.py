@@ -159,7 +159,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
             key, self._read_entry(key), validate
         )
         if fresh_entry is not None:
-            return fresh_entry.value
+            return self._copy_value(fresh_entry.value)
 
         self._record(misses=1)
         inflight, is_leader = self._start_or_join(key)
@@ -186,7 +186,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
             key, entry, validate
         )
         if fresh_entry is not None:
-            return fresh_entry.value
+            return self._copy_value(fresh_entry.value)
 
         self._record(misses=1)
         inflight, is_leader = self._start_or_join(key)
@@ -292,7 +292,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
             )
             self._write_entry(key, entry)
             value = self._copy_value(loaded.value)
-            self._complete_success(key, inflight, loaded.value)
+            self._complete_success(key, inflight, value)
             return value
         except Exception as error:  # noqa: BLE001 - stale fallback covers load errors
             return self._handle_load_failure(key, inflight, stale_entry, error)
@@ -326,7 +326,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
             )
             await asyncio.to_thread(self._write_entry, key, entry)
             value = self._copy_value(loaded.value)
-            self._complete_success(key, inflight, loaded.value)
+            self._complete_success(key, inflight, value)
             return value
         except Exception as error:  # noqa: BLE001 - stale fallback covers load errors
             return self._handle_load_failure(key, inflight, stale_entry, error)
@@ -357,7 +357,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
         if stale_entry is not None:
             value = self._copy_value(stale_entry.value)
             self._complete_success(
-                key, inflight, stale_entry.value, used_stale_fallback=True
+                key, inflight, value, used_stale_fallback=True
             )
             self._record(stale_fallbacks=1)
             return value
@@ -372,15 +372,8 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
         *,
         used_stale_fallback: bool = False,
     ) -> None:
-        """Store ``value`` for waiters; ``value`` must not be aliased elsewhere.
-
-        Every waiter clones this stored value in ``_finish_waiter`` before
-        returning it, so the caller must pass an object it holds no other
-        live reference to (e.g. a freshly loaded value), not the copy it
-        already returned to its own caller.
-        """
         with self._lock:
-            inflight.value = value
+            inflight.value = copy.deepcopy(value)
             inflight.used_stale_fallback = used_stale_fallback
             self._inflight.pop(key, None)
             inflight.completed.set_result(None)
