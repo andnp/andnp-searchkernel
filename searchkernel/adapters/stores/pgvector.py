@@ -829,6 +829,7 @@ class PGVectorStore:
         self.overfetch_multiplier = float(overfetch_multiplier)
         self.max_scan_rounds = max_scan_rounds
         self._feature_support: PGVectorFeatureSupport | None = None
+        self._vector_tables: dict[str, tuple[int, str]] = {}
         self._last_search_diagnostics: dict[str, Any] = {}
 
     @property
@@ -889,6 +890,21 @@ class PGVectorStore:
         Raises:
             ValueError: If model_name is already registered under a different dim.
         """
+        cached_table = self._vector_tables.get(model_name)
+        if cached_table is not None:
+            existing_dim, existing_table = cached_table
+            if existing_dim != dim:
+                raise ModelDimensionMismatchError(
+                    f"Dimension mismatch for model {model_name}: "
+                    f"expected {existing_dim}, got {dim}"
+                )
+            cursor.execute(
+                self._sql.SQL(
+                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS revision TEXT;"
+                ).format(table=self._sql.Identifier(existing_table))
+            )
+            return existing_table
+
         cursor.execute(
             "SELECT dim, table_name FROM vector_tables WHERE model_name = %s;",
             (model_name,),
@@ -1099,6 +1115,7 @@ class PGVectorStore:
             )
 
             conn.commit()
+            self._vector_tables[model_name] = (dim, table_name)
             logger.debug(f"Upserted {len(records)} records for model {model_name}")
         except Exception:
             conn.rollback()
@@ -1141,21 +1158,33 @@ class PGVectorStore:
         try:
             cursor = conn.cursor()
 
-            cursor.execute(
-                "SELECT 1 FROM vector_tables WHERE model_name = %s AND dim = %s;",
-                (model_name, dim),
-            )
-            if cursor.fetchone() is None:
-                self._last_search_diagnostics = {
-                    "requested_k": k,
-                    "returned": 0,
-                    "scan_rounds": 0,
-                    "under_returned": True,
-                    "scan_bound_hit": False,
-                }
-                return []
-
-            table_name = _vector_table_name(model_name, dim)
+            cached_table = self._vector_tables.get(model_name)
+            if cached_table is None:
+                cursor.execute(
+                    "SELECT 1 FROM vector_tables WHERE model_name = %s AND dim = %s;",
+                    (model_name, dim),
+                )
+                if cursor.fetchone() is None:
+                    self._last_search_diagnostics = {
+                        "requested_k": k,
+                        "returned": 0,
+                        "scan_rounds": 0,
+                        "under_returned": True,
+                        "scan_bound_hit": False,
+                    }
+                    return []
+                table_name = _vector_table_name(model_name, dim)
+            else:
+                registered_dim, table_name = cached_table
+                if registered_dim != dim:
+                    self._last_search_diagnostics = {
+                        "requested_k": k,
+                        "returned": 0,
+                        "scan_rounds": 0,
+                        "under_returned": True,
+                        "scan_bound_hit": False,
+                    }
+                    return []
 
             feature_support = self._configure_hnsw(cursor)
 
@@ -1204,6 +1233,7 @@ class PGVectorStore:
                 "extension_version": feature_support.extension_version,
             }
             conn.commit()
+            self._vector_tables[model_name] = (dim, table_name)
             return [
                 (
                     RecordHit(
