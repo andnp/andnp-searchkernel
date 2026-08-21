@@ -3,7 +3,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Event, Thread
-from typing import Any
 
 import pytest
 
@@ -11,6 +10,7 @@ from searchkernel.domain import (
     Record,
     RecordHit,
     RecordIdentity,
+    SearchFilters,
     SearchResultProvenance,
 )
 from searchkernel.runtime import (
@@ -715,7 +715,7 @@ async def test_record_pipeline_warm_candidates_skip_retrieval_until_epoch_change
             self,
             query: str,
             k: int,
-            filters: dict[str, Any] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             self.calls += 1
             return [RecordHit(RecordIdentity(None, "note", "record"), 1.0)]
@@ -781,7 +781,7 @@ async def test_record_pipeline_hydration_cache_uses_version_and_policy() -> None
             self,
             query: str,
             k: int,
-            filters: dict[str, Any] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             return [RecordHit(RecordIdentity(None, "note", "record"), 1.0)]
 
@@ -815,7 +815,8 @@ async def test_record_pipeline_uses_batch_hydration_versions_before_scalar_provi
         def __init__(self) -> None:
             self.hydrate_calls = 0
 
-        def hydrate_record(self, identity: RecordIdentity) -> Record:
+        def hydrate_record(self, record_id: RecordIdentity) -> Record:
+            del record_id
             self.hydrate_calls += 1
             return record
 
@@ -835,11 +836,14 @@ async def test_record_pipeline_uses_batch_hydration_versions_before_scalar_provi
             return 99
 
     class Keyword:
+        def index(self, records: list[Record]) -> None:
+            del records
+
         def search(
             self,
             query: str,
             k: int,
-            filters: dict[str, Any] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             return [RecordHit(RecordIdentity(None, "note", "record"), 1.0)]
 
