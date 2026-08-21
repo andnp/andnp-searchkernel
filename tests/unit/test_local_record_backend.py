@@ -331,6 +331,42 @@ def test_local_record_operations_chunk_large_key_lists(tmp_path) -> None:
     ]
 
 
+def test_local_graph_neighbors_chunks_dense_frontier_beyond_hop(tmp_path) -> None:
+    """A hop-2 frontier past SQLite's variable limit must not crash.
+
+    Modern SQLite builds raise the default variable limit well above 999,
+    so the 999-variable ceiling from "many builds" is pinned explicitly via
+    ``setlimit`` to make this test deterministic across SQLite versions.
+    """
+    backend, _keyword, _vector, graph = _backend(tmp_path)
+    backend._access.connection().setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    child_count = 1_500
+    root = _record("note", "root", "root")
+    children = [_record("note", f"child-{index:04d}", "child") for index in range(child_count)]
+    sink = _record("note", "sink", "sink")
+    backend.index([root, *children, sink])
+
+    special_index = 750
+    graph.upsert_edges(
+        [(root.storage_key, child.storage_key, "hop1", 1.0) for child in children]
+    )
+    graph.upsert_edges(
+        [
+            (
+                child.storage_key,
+                sink.storage_key,
+                "hop2",
+                5.0 if index == special_index else 1.0,
+            )
+            for index, child in enumerate(children)
+        ]
+    )
+
+    neighbors = graph.neighbors(root.identity, depth=2)
+
+    assert GraphNeighbor(sink.identity, "hop2", 5.0) in neighbors
+
+
 def test_local_graph_top_neighbors_are_bounded_and_deterministic(tmp_path) -> None:
     backend, _keyword, _vector, graph = _backend(tmp_path)
     source = _record("note", "source", "source")

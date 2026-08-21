@@ -341,17 +341,23 @@ class _GraphEngine:
             for hop in range(depth):
                 if not frontier:
                     break
-                placeholders = ",".join("?" for _ in frontier)
-                rows = conn.execute(
-                    f"""
-                    SELECT e.source_id, e.target_id, e.edge_type, e.weight
-                    FROM local_graph_edges e
-                    JOIN local_records target_record
-                        ON target_record.storage_key = e.{target_column}
-                    WHERE e.{source_column} IN ({placeholders})
-                    """,
-                    tuple(frontier),
-                ).fetchall()
+                rows: list[sqlite3.Row] = []
+                for key_chunk in iter_ordered_key_chunks(
+                    frontier, limit=DEFAULT_KEY_CHUNK_LIMIT
+                ):
+                    placeholders = ",".join("?" for _ in key_chunk)
+                    rows.extend(
+                        conn.execute(
+                            f"""
+                            SELECT e.source_id, e.target_id, e.edge_type, e.weight
+                            FROM local_graph_edges e
+                            JOIN local_records target_record
+                                ON target_record.storage_key = e.{target_column}
+                            WHERE e.{source_column} IN ({placeholders})
+                            """,
+                            key_chunk,
+                        ).fetchall()
+                    )
                 next_frontier: set[str] = set()
                 for row in rows:
                     if allowed is not None and row["edge_type"] not in allowed:
