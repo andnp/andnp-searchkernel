@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -155,6 +155,7 @@ class VectorSnapshot:
         encoder_namespace: str,
         dim: int,
         epoch: int,
+        materialize_metadata: bool = False,
     ) -> VectorSnapshot:
         matrix = np.empty((len(rows), dim), dtype="<f4")
         storage_keys: list[str] = []
@@ -180,8 +181,9 @@ class VectorSnapshot:
             workspace_ids.append(row["workspace_id"])
             source_kinds.append(row["source_kind"])
             statuses.append(row["status"])
-            metadata.append(dict(metadata_mapping(row["metadata"])))
-            uris.append(row["uri"])
+            if materialize_metadata:
+                metadata.append(dict(metadata_mapping(row["metadata"])))
+                uris.append(row["uri"])
         arrays = [
             np.asarray(values, dtype=object)
             for values in (source_ids, workspace_ids, source_kinds, statuses)
@@ -205,7 +207,7 @@ class VectorSnapshot:
 
     def filter_mask(
         self,
-        filters: dict[str, Any] | None,
+        filters: Mapping[str, Any] | None,
         *,
         status_values: set[str],
         filter_values: Any,
@@ -225,6 +227,8 @@ class VectorSnapshot:
                     tuple(predicate.candidate_keys),
                 )
             return np.asarray(eligible, dtype=bool)
+        if len(self.metadata) != len(self.storage_keys):
+            raise ValueError("metadata must be materialized for this filter")
         return np.asarray(
             [
                 predicate.matches(
@@ -254,7 +258,7 @@ class VectorSnapshot:
 
     @staticmethod
     def _can_prefilter_scalars(
-        filters: dict[str, Any] | None,
+        filters: Mapping[str, Any] | None,
         predicate: CompiledVectorFilter,
     ) -> bool:
         filter_names = set(filters or {})

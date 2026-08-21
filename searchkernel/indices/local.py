@@ -40,6 +40,7 @@ from searchkernel.domain import (
 from searchkernel.domain.vector_filters import (
     candidate_storage_keys,
     compile_source_scoped_filters,
+    compile_vector_filters,
     metadata_mapping,
     record_matches_vector_filters,
 )
@@ -674,7 +675,13 @@ class _VectorEngine:
             ),
         )
 
-    def _get_vector_snapshot(self, model_name: str, dim: int) -> VectorSnapshot:
+    def _get_vector_snapshot(
+        self,
+        model_name: str,
+        dim: int,
+        *,
+        materialize_metadata: bool = False,
+    ) -> VectorSnapshot:
         key = (model_name, dim)
         with self._snapshot_lock:
             with self._access.lock:
@@ -683,12 +690,20 @@ class _VectorEngine:
                     conn, _LocalEpochLane._LANE_KEYS["vector"]
                 )
                 cached = self._vector_snapshots.get(key)
-                if cached is not None and cached.epoch == current_epoch:
+                if (
+                    cached is not None
+                    and cached.epoch == current_epoch
+                    and (
+                        not materialize_metadata
+                        or len(cached.metadata) == len(cached.storage_keys)
+                    )
+                ):
                     return cached
+                metadata_columns = ", r.metadata, r.uri" if materialize_metadata else ""
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                           r.status, r.metadata, r.uri, v.embedding, v.format_version,
+                           r.status{metadata_columns}, v.embedding, v.format_version,
                            v.normalization_policy
                     FROM local_records r
                     JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
@@ -705,6 +720,7 @@ class _VectorEngine:
                 encoder_namespace=model_name,
                 dim=dim,
                 epoch=snapshot_epoch,
+                materialize_metadata=materialize_metadata,
             )
             self._vector_snapshots[key] = snapshot
             self._vector_storage_stats[key] = (
@@ -777,7 +793,15 @@ class _VectorEngine:
                 dim=dim,
                 filters=filters,
             )
-        snapshot = self._get_vector_snapshot(model_name, dim)
+        predicate = compile_vector_filters(filters)
+        materialize_metadata = not VectorSnapshot._can_prefilter_scalars(
+            filters, predicate
+        )
+        snapshot = self._get_vector_snapshot(
+            model_name,
+            dim,
+            materialize_metadata=materialize_metadata,
+        )
         eligible = snapshot.filter_mask(
             dict(filters) if filters is not None else None,
             status_values=self._status_values(filters),
