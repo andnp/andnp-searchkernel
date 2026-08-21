@@ -77,6 +77,12 @@ def _hits(results: Sequence[RecordHit | tuple[str, float]]) -> list[RecordHit]:
     ]
 
 
+def _mapping(value: object) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise TypeError("expected a mapping")
+    return value
+
+
 class FakeKeywordStore:
     def __init__(self, results: Sequence[RecordHit | tuple[str, float]]) -> None:
         self.results = _hits(results)
@@ -124,6 +130,25 @@ class FakeVectorStore:
         return 0
 
 
+class FakeKeywordIndex:
+    def index(self, records: list[Record]) -> None:
+        pass
+
+
+class FakeGraphMutations:
+    def upsert_edges(
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+    ) -> None:
+        pass
+
+    def delete_edges(
+        self,
+        edges: Sequence[GraphEdge | tuple[str, str, str, float]],
+    ) -> None:
+        pass
+
+
 class FakeGraphStore:
     def __init__(
         self,
@@ -160,9 +185,13 @@ class FakeGraphStore:
         edge_types: list[str] | None = None,
         depth: int = 1,
         max_neighbors: int | None = None,
-    ) -> list[GraphNeighbor]:
+    ) -> Sequence[GraphNeighbor]:
         del edge_types, depth, max_neighbors
-        key = record_id.source_id
+        key = (
+            record_id.source_id
+            if isinstance(record_id, RecordIdentity)
+            else record_id
+        )
         self.calls.append(key)
         return self._neighbors.get(key, [])
 
@@ -377,7 +406,10 @@ async def test_semantic_retrieval_mode_routes_only_vector(
     assert keyword_store.queries == []
     assert graph_store.calls == []
     assert outcome.trace is not None
-    assert outcome.trace.to_dict()["provenance"]["query_plan"]["lanes"] == (
+    trace = outcome.trace.to_dict()
+    provenance = _mapping(trace["provenance"])
+    query_plan = _mapping(provenance["query_plan"])
+    assert query_plan["lanes"] == (
         "vector",
     )
     assert outcome.diagnostic_evidence is not None
@@ -402,7 +434,10 @@ async def test_retrieval_mode_defaults_to_hybrid_and_rejects_unknown_values() ->
 
     outcome = await pipeline.async_search("query", limit=1)
     assert outcome.trace is not None
-    assert outcome.trace.to_dict()["provenance"]["query_plan"]["lanes"] == (
+    trace = outcome.trace.to_dict()
+    provenance = _mapping(trace["provenance"])
+    query_plan = _mapping(provenance["query_plan"])
+    assert query_plan["lanes"] == (
         "keyword",
     )
 
@@ -977,7 +1012,7 @@ async def test_query_policy_calibrates_sources_without_hardcoded_query_modes() -
     ) -> bool:
         source_kind = candidate.source_kind
         selected = context.filters.get("source_kinds")
-        if selected is not None:
+        if isinstance(selected, Sequence) and not isinstance(selected, str):
             return source_kind in selected
         return source_kind != "git_commit"
 
@@ -1039,7 +1074,7 @@ async def test_graph_expansion_reads_only_bounded_seed_neighbors() -> None:
     records = {record_id: _record(record_id) for record_id in ("a", "b", "c")}
     calls: list[RecordIdentity] = []
 
-    class Graph:
+    class Graph(FakeGraphMutations):
         def upsert_edges(
             self,
             edges: Sequence[GraphEdge | tuple[str, str, str, float]],
@@ -1313,7 +1348,7 @@ async def test_composite_identity_reaches_async_hydrator() -> None:
             assert record_id == expected_identity
             return record
 
-    class Store:
+    class Store(FakeKeywordIndex):
         def index(self, records: list[Record]) -> None:
             pass
 
@@ -1361,7 +1396,7 @@ async def test_graph_neighbors_preserve_canonical_identity() -> None:
         ),
     }
 
-    class Store:
+    class Store(FakeKeywordIndex):
         def index(self, records: list[Record]) -> None:
             pass
 
@@ -1373,7 +1408,7 @@ async def test_graph_neighbors_preserve_canonical_identity() -> None:
         ) -> Sequence[RecordHit]:
             return [RecordHit(seed, 1.0)]
 
-    class Graph:
+    class Graph(FakeGraphMutations):
         def upsert_edges(
             self,
             edges: Sequence[GraphEdge | tuple[str, str, str, float]],
@@ -1391,7 +1426,8 @@ async def test_graph_neighbors_preserve_canonical_identity() -> None:
             record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
-        ) -> list[GraphNeighbor | tuple[str, str, float]]:
+            max_neighbors: int | None = None,
+        ) -> Sequence[GraphNeighbor]:
             return [GraphNeighbor(target, "related", 1.0)]
 
     pipeline = RecordSearchPipeline(
@@ -1433,7 +1469,7 @@ async def test_graph_expansion_preserves_scoped_neighbor_provenance(
         for identity in (seed, one_hop, two_hop, cross_project)
     }
 
-    class Store:
+    class Store(FakeKeywordIndex):
         def search(
             self,
             query: str,
@@ -1442,17 +1478,17 @@ async def test_graph_expansion_preserves_scoped_neighbor_provenance(
         ) -> list[RecordHit]:
             return [RecordHit(seed, 1.0)]
 
-    class Graph:
+    class Graph(FakeGraphMutations):
         def neighbors(
             self,
-            record_id: RecordIdentity,
+            record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
-            filters: SearchFilters | None = None,
+            **kwargs: object,
         ) -> list[GraphNeighbor]:
             assert record_id == seed
-            assert filters == {
+            assert kwargs.get("filters") == {
                 "statuses": ["active"],
                 "workspace_id": "workspace-a",
                 "source_kinds": ["note"],
@@ -1530,7 +1566,7 @@ async def test_relationship_target_resolver_selects_canonical_neighbors(
     }
     resolver_calls: list[tuple[str, Mapping[str, object]]] = []
 
-    class Store:
+    class Store(FakeKeywordIndex):
         def search(
             self,
             query: str,
@@ -1539,20 +1575,21 @@ async def test_relationship_target_resolver_selects_canonical_neighbors(
         ) -> list[RecordHit]:
             return [RecordHit(seed, 1.0)]
 
-    class Graph:
+    class Graph(FakeGraphMutations):
         def __init__(self) -> None:
             self.calls: list[RecordIdentity] = []
 
         def neighbors(
             self,
-            record_id: RecordIdentity,
+            record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
-            filters: SearchFilters | None = None,
+            **kwargs: object,
         ) -> list[GraphNeighbor]:
+            assert isinstance(record_id, RecordIdentity)
             self.calls.append(record_id)
-            assert filters == {
+            assert kwargs.get("filters") == {
                 "statuses": ["active"],
                 "workspace_id": "workspace-a",
                 "project_id": "project-a",
@@ -1631,14 +1668,15 @@ async def test_relationship_target_resolver_preserves_no_neighbor_behavior() -> 
     target = _record("target")
     calls: list[str] = []
 
-    class Graph:
+    class Graph(FakeGraphMutations):
         def neighbors(
             self,
-            record_id: RecordIdentity,
+            record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
         ) -> list[GraphNeighbor]:
+            assert isinstance(record_id, RecordIdentity)
             calls.append(record_id.source_id)
             return []
 
@@ -1691,7 +1729,7 @@ async def test_relationship_resolver_keeps_direct_target_as_graph_seed(
     }
     calls: list[RecordIdentity] = []
 
-    class Store:
+    class Store(FakeKeywordIndex):
         def search(
             self,
             query: str,
@@ -1703,17 +1741,18 @@ async def test_relationship_resolver_keeps_direct_target_as_graph_seed(
                 RecordHit(target.identity, 0.2),
             ]
 
-    class Graph:
+    class Graph(FakeGraphMutations):
         def neighbors(
             self,
-            record_id: RecordIdentity,
+            record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
-            filters: SearchFilters | None = None,
+            **kwargs: object,
         ) -> list[GraphNeighbor]:
+            assert isinstance(record_id, RecordIdentity)
             calls.append(record_id)
-            assert filters == {
+            assert kwargs.get("filters") == {
                 "statuses": ["active"],
                 "workspace_id": "project-a",
                 "source_kinds": ["note"],
@@ -1772,10 +1811,10 @@ async def test_relationship_target_resolver_uses_incoming_graph_direction() -> N
     }
     calls: list[str] = []
 
-    class Graph:
+    class Graph(FakeGraphMutations):
         def neighbors(
             self,
-            record_id: RecordIdentity,
+            record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
@@ -1784,14 +1823,15 @@ async def test_relationship_target_resolver_uses_incoming_graph_direction() -> N
 
         def incoming_neighbors(
             self,
-            record_id: RecordIdentity,
+            record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
-            filters: SearchFilters | None = None,
+            **kwargs: object,
         ) -> list[GraphNeighbor]:
+            assert isinstance(record_id, RecordIdentity)
             calls.append(record_id.source_id)
-            assert filters == {
+            assert kwargs.get("filters") == {
                 "statuses": ["active"],
                 "workspace_id": "workspace-a",
                 "source_kinds": ["note"],
@@ -1801,7 +1841,7 @@ async def test_relationship_target_resolver_uses_incoming_graph_direction() -> N
                 GraphNeighbor(outsider.identity, "links_to", 2.0),
             ]
 
-    class Store:
+    class Store(FakeKeywordIndex):
         def search(
             self,
             query: str,
@@ -1888,7 +1928,7 @@ async def test_chunk_target_hits_normalize_to_document_graph_neighbors() -> None
     )
     graph_calls: list[RecordIdentity] = []
 
-    class Store:
+    class Store(FakeKeywordIndex):
         def search(
             self,
             query: str,
@@ -1897,17 +1937,19 @@ async def test_chunk_target_hits_normalize_to_document_graph_neighbors() -> None
         ) -> list[RecordHit]:
             return [RecordHit(seed, 1.0)]
 
-    class Graph:
+    class Graph(FakeGraphMutations):
         def neighbors(
             self,
-            record_id: RecordIdentity,
+            record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
-            filters: SearchFilters | None = None,
+            **kwargs: object,
         ) -> list[GraphNeighbor]:
+            assert isinstance(record_id, RecordIdentity)
+            assert isinstance(record_id, RecordIdentity)
             graph_calls.append(record_id)
-            assert filters == {
+            assert kwargs.get("filters") == {
                 "statuses": ["active"],
                 "workspace_id": "project-a",
                 "project_id": "project-a",
@@ -1989,14 +2031,15 @@ async def test_chunk_target_normalization_preserves_empty_neighbor_behavior() ->
     )
     graph_calls: list[RecordIdentity] = []
 
-    class Graph:
+    class Graph(FakeGraphMutations):
         def neighbors(
             self,
-            record_id: RecordIdentity,
+            record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
         ) -> list[GraphNeighbor]:
+            assert isinstance(record_id, RecordIdentity)
             graph_calls.append(record_id)
             return []
 
@@ -2040,7 +2083,7 @@ async def test_keyword_and_embedding_work_overlap_without_candidate_gating() -> 
     release = asyncio.Event()
     vector_started = asyncio.Event()
 
-    class Keyword:
+    class Keyword(FakeKeywordIndex):
         async def search(
             self,
             query: str,
@@ -2281,7 +2324,7 @@ async def test_exact_artifact_query_keeps_empty_keyword_candidates_bounded() -> 
             model_name: str,
             dim: int,
             filters: SearchFilters | None = None,
-        ) -> list[RecordHit]:
+        ) -> Sequence[RecordHit]:
             assert keyword_store.queries
             return super().search(
                 query_vector,
@@ -2616,7 +2659,7 @@ async def test_trace_is_redacted_and_contains_routing_diagnostics() -> None:
     assert outcome.trace is not None
     trace = outcome.trace.to_dict()
     assert "query" not in trace
-    assert "diagnostics" in trace["provenance"]
+    assert "diagnostics" in _mapping(trace["provenance"])
     assert outcome.candidate_count == 1
     assert outcome.candidate_counts == {"keyword": 1}
     assert outcome.stage_timings_ms["search"] >= 0
@@ -2713,7 +2756,7 @@ async def test_batch_graph_and_hydration_use_canonical_keys_once() -> None:
         ) -> list[RecordHit]:
             return [RecordHit(seed, 1.0)]
 
-    class Graph:
+    class Graph(FakeGraphMutations):
         def upsert_edges(
             self,
             edges: Sequence[GraphEdge | tuple[str, str, str, float]],
@@ -2735,6 +2778,7 @@ async def test_batch_graph_and_hydration_use_canonical_keys_once() -> None:
             identities: Sequence[RecordIdentity],
             *,
             depth: int,
+            max_neighbors: int | None = None,
         ) -> dict[str, list[GraphNeighbor]]:
             self.calls += 1
             self.identities = list(identities)
@@ -2747,7 +2791,8 @@ async def test_batch_graph_and_hydration_use_canonical_keys_once() -> None:
             record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
-        ) -> list[GraphNeighbor]:
+            max_neighbors: int | None = None,
+        ) -> Sequence[GraphNeighbor]:
             raise AssertionError("scalar graph lookup should not run")
 
     class Hydrator:
@@ -2794,12 +2839,13 @@ async def test_batch_graph_normalizes_legacy_source_id_seed_keys() -> None:
     seed = records["seed"].identity
     target = records["target"].identity
 
-    class Graph:
+    class Graph(FakeGraphMutations):
         def neighbors_many(
             self,
             identities: Sequence[RecordIdentity],
             *,
             depth: int,
+            max_neighbors: int | None = None,
         ) -> dict[str, list[GraphNeighbor]]:
             assert identities == [seed]
             return {"seed": [GraphNeighbor(target, "related", 1.0)]}
@@ -2809,7 +2855,8 @@ async def test_batch_graph_normalizes_legacy_source_id_seed_keys() -> None:
             record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
-        ) -> list[GraphNeighbor]:
+            max_neighbors: int | None = None,
+        ) -> Sequence[GraphNeighbor]:
             raise AssertionError("scalar graph lookup should not run")
 
     pipeline = RecordSearchPipeline(
@@ -2837,7 +2884,7 @@ async def test_graph_retrieval_recovers_neighbors_from_partial_batch(
         for record_id in ("seed", "one-hop", "two-hop")
     }
 
-    class Graph:
+    class Graph(FakeGraphMutations):
         def neighbors_many(
             self,
             identities: Sequence[RecordIdentity],
@@ -3120,7 +3167,7 @@ async def test_scalar_graph_fallback_is_bounded() -> None:
 
 
 async def test_batch_graph_failures_keep_strict_and_lenient_modes() -> None:
-    class BrokenGraph:
+    class BrokenGraph(FakeGraphMutations):
         def upsert_edges(
             self,
             edges: Sequence[GraphEdge | tuple[str, str, str, float]],
