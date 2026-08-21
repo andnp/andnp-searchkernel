@@ -77,6 +77,7 @@ _RECORD_IDENTITY_VERSION_KEY = "record_identity_version"
 _LOCAL_RECORD_IDENTITY_VERSION = 2
 _LOCAL_FTS_COLUMNS = ("title", "body", "uri", "keywords")
 _FALLBACK_SCAN_MAX_ROWS = 10_000
+_FUZZY_SCAN_MAX_ROWS = 500
 _FILTERED_KEYWORD_OVERFETCH = 4
 _KEYWORD_SQL_FILTERS = frozenset(
     {
@@ -1427,7 +1428,7 @@ class _KeywordEngine:
                          r.storage_key ASC
                 LIMIT ?
                 """,
-                (*parameters, _FALLBACK_SCAN_MAX_ROWS),
+                (*parameters, _FUZZY_SCAN_MAX_ROWS),
             ).fetchall()
         hits: list[RecordHit] = []
         for row in rows:

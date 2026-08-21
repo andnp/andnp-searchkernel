@@ -594,6 +594,35 @@ def test_keyword_fuzzy_search_preserves_filtered_recall_beyond_batch(
     ] == ["target"]
 
 
+def test_keyword_fuzzy_search_bounds_rescan_below_fallback_scan_cap(tmp_path) -> None:
+    """The fuzzy rescan trades recall for latency below _FALLBACK_SCAN_MAX_ROWS.
+
+    Rows beyond ``_FUZZY_SCAN_MAX_ROWS`` are never rescanned for fuzzy term
+    similarity, even though the FTS prefix query matches them. This pins that
+    bound so a future change cannot silently widen (or narrow) it.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    scan_cap = local_indices._FUZZY_SCAN_MAX_ROWS
+    records = [
+        _record(
+            "note",
+            f"filler-{index:05d}",
+            "reciprocal random fusillade filler",
+        )
+        for index in range(scan_cap + 50)
+    ]
+    records.append(
+        _record(
+            "note",
+            "zzz-target",
+            "The reciprocal rank fusion algorithm",
+        )
+    )
+    backend.index(records)
+
+    assert backend.search_keyword("reciprocol rankk fusoin", 10) == []
+
+
 def test_keyword_search_applies_filters_to_natural_language_fallback(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     records = [
