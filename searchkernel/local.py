@@ -14,7 +14,7 @@ from searchkernel.indices import (
     LocalRecordBackend,
     LocalVectorStore,
 )
-from searchkernel.indices.faiss_local import FAISSSearchStrategy
+from searchkernel.indices.faiss_local import FAISSConfiguration
 from searchkernel.kernel import SearchKernel
 from searchkernel.ports.embedding import AsyncEmbeddingProvider, EmbeddingProvider
 from searchkernel.ports.keyword_scoring import KeywordArtifactScorer
@@ -76,7 +76,7 @@ def build_local_record_kernel(
     vector_snapshot_max_rows: int = 100_000,
     vector_snapshot_max_bytes: int = _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES,
     faiss_path: Path | None = None,
-    faiss_search_strategy: FAISSSearchStrategy = "exact",
+    faiss_configuration: FAISSConfiguration | None = None,
     reranker: Reranker | None = None,
     search_policy: RecordSearchPolicy | None = None,
     search_config: RecordSearchConfig | None = None,
@@ -94,7 +94,7 @@ def build_local_record_kernel(
     vector_store = LocalVectorStore(
         backend,
         faiss_path=faiss_path,
-        faiss_search_strategy=faiss_search_strategy,
+        faiss_configuration=faiss_configuration,
     )
     keyword_store = LocalKeywordStore(backend)
     graph_store = LocalGraphStore(backend)

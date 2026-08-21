@@ -154,10 +154,11 @@ class FAISSLocalVectorStore:
         hnsw_ef_construction: int = 40,
         hnsw_ef_search: int = 16,
         max_scan_candidates: int = 100_000,
+        configuration: FAISSConfiguration | None = None,
     ) -> None:
         self._backend = backend
         self._index_path = index_path
-        self._configuration = FAISSConfiguration(
+        self._configuration = configuration or FAISSConfiguration(
             search_strategy=search_strategy,
             hnsw_m=hnsw_m,
             hnsw_ef_construction=hnsw_ef_construction,

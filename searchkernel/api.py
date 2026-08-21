@@ -128,6 +128,7 @@ from searchkernel.indexing.submission import (
     TaskBatchSubmissionResult,
     TaskSubmissionResult,
 )
+from searchkernel.indices.faiss_local import FAISSConfiguration
 from searchkernel.ingestion.records import SemanticRecordIngestor
 from searchkernel.kernel import SearchKernel
 from searchkernel.local import LocalRecordKernel, build_local_record_kernel
@@ -334,6 +335,7 @@ __all__ = [
     "EmbeddingSink",
     "EmbeddingWrite",
     "EncoderFingerprint",
+    "FAISSConfiguration",
     "FederatedSearchExecutor",
     "FederatedSearchResponse",
     "FederationConfig",

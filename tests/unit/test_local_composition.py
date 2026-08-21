@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import pytest
 
 from searchkernel import Record, RecordSearchOutcome, build_local_record_kernel
+from searchkernel.indices import FAISSConfiguration
 
 
 class _FakeEmbeddingProvider:
@@ -88,8 +89,11 @@ def test_public_local_composition_accepts_faiss_search_strategy(tmp_path) -> Non
         tmp_path / "records.db",
         embedding_provider=_FakeEmbeddingProvider(),
         vector_engine="faiss",
-        faiss_search_strategy="approximate",
+        faiss_configuration=FAISSConfiguration(
+            search_strategy="approximate", hnsw_ef_search=64
+        ),
     )
 
     assert composition.vector_store.faiss_search_strategy == "approximate"
+    assert composition.vector_store.faiss_configuration.hnsw_ef_search == 64
     composition.close()

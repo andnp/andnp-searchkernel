@@ -1,4 +1,5 @@
 from searchkernel.indices.local import (
+    FAISSConfiguration,
     FAISSLocalVectorStore,
     LocalGraphStore,
     LocalKeywordStore,
@@ -10,6 +11,7 @@ from searchkernel.indices.local import (
 )
 
 __all__ = [
+    "FAISSConfiguration",
     "FAISSLocalVectorStore",
     "LocalGraphStore",
     "LocalKeywordStore",
