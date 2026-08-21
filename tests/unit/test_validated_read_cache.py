@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Event, Lock, Thread
 
@@ -173,3 +174,60 @@ async def test_async_misses_are_single_flight_and_support_async_validation() -> 
     assert await asyncio.gather(first, second) == ["shared", "shared"]
     assert calls == 1
     assert cache.metrics.coalesced_waiters == 1
+
+
+@pytest.mark.asyncio
+async def test_async_followers_do_not_occupy_the_default_executor() -> None:
+    """Async single-flight followers leave executor workers available."""
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+    cache = ValidatedReadThroughCache(_MemoryStore())
+    started = Event()
+    release = Event()
+    results: list[str] = []
+
+    def load() -> ValidatedCacheValue[str, str]:
+        started.set()
+        assert release.wait(timeout=5.0)
+        return ValidatedCacheValue("shared", "v1")
+
+    def read() -> None:
+        results.append(
+            cache.get_or_load(
+                "key", validate=lambda _key, _token: True, load=load
+            )
+        )
+
+    leader = Thread(target=read)
+    leader.start()
+
+    while not started.is_set():
+        await asyncio.sleep(0)
+
+    follower = asyncio.create_task(
+        cache.async_get_or_load(
+            "key", validate=lambda _key, _token: True, load=load
+        )
+    )
+
+    async def wait_for_follower() -> None:
+        while cache.metrics.coalesced_waiters == 0:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_follower(), timeout=1.0)
+    probe_started = Event()
+    probe = asyncio.create_task(asyncio.to_thread(probe_started.set))
+
+    async def wait_for_probe() -> None:
+        while not probe_started.is_set():
+            await asyncio.sleep(0)
+
+    try:
+        await asyncio.wait_for(wait_for_probe(), timeout=1.0)
+    finally:
+        release.set()
+        leader.join(timeout=5.0)
+        await asyncio.gather(follower, probe)
+
+    assert probe_started.is_set()
+    assert results == ["shared"]
