@@ -1861,6 +1861,38 @@ def test_block_vector_search_applies_filters_per_batch(tmp_path) -> None:
     assert [hit.source_id for hit in hits] == ["a", "c", "e"]
 
 
+def test_block_vector_search_intersects_candidate_and_metadata_filters(
+    tmp_path,
+) -> None:
+    """Block scans preserve candidate and metadata filter intersection."""
+    records = _cosine_ranked_records()
+    for record in records:
+        record.metadata = {"keep": record.source_id in {"a", "c", "e"}}
+    backend = LocalRecordBackend(
+        tmp_path / "records.db",
+        vector_snapshot_max_rows=2,
+        vector_snapshot_max_bytes=1_000_000,
+    )
+    backend.upsert(records, "test", 2)
+
+    hits = backend.search_vector(
+        [1.0, 0.0],
+        5,
+        model_name="test",
+        dim=2,
+        filters={
+            "candidate_storage_keys": [
+                records[0].storage_key,
+                records[1].storage_key,
+                records[2].storage_key,
+            ],
+            "metadata_equals": {"keep": True},
+        },
+    )
+
+    assert [hit.source_id for hit in hits] == ["a", "c"]
+
+
 def test_block_vector_search_returns_all_available_when_k_exceeds_corpus(
     tmp_path,
 ) -> None:

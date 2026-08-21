@@ -876,38 +876,43 @@ class _VectorEngine:
         last_storage_key: str | None = None
         batch_limit = self._vector_batch_limit(dim)
         predicate = compile_vector_filters(filters)
+        if predicate.candidate_keys == frozenset():
+            return []
+        candidate_clause = (
+            "r.storage_key IN (SELECT value FROM json_each(?))"
+            if predicate.candidate_keys is not None
+            else None
+        )
+        candidate_parameter = (
+            json.dumps(sorted(predicate.candidate_keys))
+            if predicate.candidate_keys is not None
+            else None
+        )
         while True:
             with self._access.lock:
                 conn = self._access.connection()
-                if last_storage_key is None:
-                    rows = conn.execute(
-                        """
-                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
-                               v.normalization_policy
-                        FROM local_records r
-                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
-                        WHERE v.encoder_namespace = ? AND v.dim = ?
-                        ORDER BY r.storage_key
-                        LIMIT ?
-                        """,
-                        (model_name, dim, batch_limit),
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        """
-                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
-                               v.normalization_policy
-                        FROM local_records r
-                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
-                        WHERE v.encoder_namespace = ? AND v.dim = ?
-                          AND r.storage_key > ?
-                        ORDER BY r.storage_key
-                        LIMIT ?
-                        """,
-                        (model_name, dim, last_storage_key, batch_limit),
-                    ).fetchall()
+                clauses = ["v.encoder_namespace = ?", "v.dim = ?"]
+                parameters: list[object] = [model_name, dim]
+                if candidate_clause is not None:
+                    clauses.append(candidate_clause)
+                    parameters.append(candidate_parameter)
+                if last_storage_key is not None:
+                    clauses.append("r.storage_key > ?")
+                    parameters.append(last_storage_key)
+                parameters.append(batch_limit)
+                rows = conn.execute(
+                    f"""
+                    SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                           r.status, r.metadata, r.uri, v.embedding, v.format_version,
+                           v.normalization_policy
+                    FROM local_records r
+                    JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY r.storage_key
+                    LIMIT ?
+                    """,
+                    parameters,
+                ).fetchall()
             if not rows:
                 break
             eligible_rows = [
