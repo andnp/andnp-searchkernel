@@ -34,6 +34,30 @@ class _MemoryStore:
             self.entries[key] = entry
 
 
+class _ObjectStore:
+    def __init__(self) -> None:
+        self.entries: dict[str, ValidatedCacheEntry[object, str]] = {}
+
+    def get(self, key: str) -> ValidatedCacheEntry[object, str] | None:
+        return self.entries.get(key)
+
+    def set(self, key: str, entry: ValidatedCacheEntry[object, str]) -> None:
+        self.entries[key] = entry
+
+
+def test_clone_hook_replaces_default_deepcopy_on_a_load() -> None:
+    sentinel = object()
+    cache = ValidatedReadThroughCache(_ObjectStore(), clone=lambda _value: sentinel)
+
+    result = cache.get_or_load(
+        "key",
+        validate=lambda _key, _token: True,
+        load=lambda: ValidatedCacheValue(object(), "v1"),
+    )
+
+    assert result is sentinel
+
+
 def test_validated_cache_refreshes_after_ttl_and_defends_values() -> None:
     clock = _Clock()
     store = _MemoryStore()
