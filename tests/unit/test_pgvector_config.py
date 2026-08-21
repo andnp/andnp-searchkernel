@@ -108,6 +108,53 @@ class _Pool:
         pass
 
 
+class _SearchCursor:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def execute(self, statement: object, params: object = None) -> None:
+        self.statements.append(str(statement))
+
+    def fetchone(self):
+        if "vector_tables" in self.statements[-1]:
+            return (1,)
+        return ("0.8.0",)
+
+    def fetchall(self):
+        return [("workspace", "note", "one", 0.1)]
+
+    def close(self) -> None:
+        pass
+
+
+class _SearchConnection:
+    def __init__(self) -> None:
+        self.cursor_value = _SearchCursor()
+
+    def cursor(self) -> _SearchCursor:
+        return self.cursor_value
+
+    def commit(self) -> None:
+        pass
+
+    def rollback(self) -> None:
+        pass
+
+
+class _SearchPool:
+    def __init__(self) -> None:
+        self.connections = [_SearchConnection(), _SearchConnection()]
+        self.next_connection = 0
+
+    def get_connection(self) -> _SearchConnection:
+        connection = self.connections[self.next_connection]
+        self.next_connection = (self.next_connection + 1) % len(self.connections)
+        return connection
+
+    def put_connection(self, conn: object) -> None:
+        pass
+
+
 class _ConnectionPoolFactory:
     last_kwargs: ClassVar[dict[str, object]] = {}
 
@@ -241,6 +288,23 @@ def test_filtered_search_reports_bounded_under_returning() -> None:
         "iterative_scan": False,
         "extension_version": "0.7.4",
     }
+
+
+def test_search_reuses_table_metadata_across_connections_and_transactions() -> None:
+    """Stable table metadata is reused while transaction-local setup repeats."""
+    pool = _SearchPool()
+    store = PGVectorStore(pool)
+
+    store.search([1.0, 0.0], 1, model_name="model", dim=2)
+    store.search([1.0, 0.0], 1, model_name="model", dim=2)
+
+    statements = [
+        statement
+        for connection in pool.connections
+        for statement in connection.cursor_value.statements
+    ]
+    assert sum("FROM vector_tables" in statement for statement in statements) == 1
+    assert sum("SET LOCAL hnsw.ef_search" in statement for statement in statements) == 2
 
 
 @pytest.mark.parametrize(
