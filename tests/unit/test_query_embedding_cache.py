@@ -1,4 +1,6 @@
+import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -122,6 +124,53 @@ def test_cache_coalesces_concurrent_misses() -> None:
 
     assert sorted(results) == [[1.0], [1.0]]
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_async_followers_do_not_occupy_the_default_executor() -> None:
+    """Async single-flight followers leave executor workers available."""
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+    cache = QueryEmbeddingCache()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def compute() -> list[float]:
+        started.set()
+        await release.wait()
+        return [1.0]
+
+    leader = asyncio.create_task(
+        cache.async_get_or_compute(
+            model_name="model", query="query", compute=compute
+        )
+    )
+    await started.wait()
+    follower = asyncio.create_task(
+        cache.async_get_or_compute(
+            model_name="model", query="query", compute=compute
+        )
+    )
+
+    async def wait_for_follower() -> None:
+        while cache.metrics.coalesced_waiters == 0:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_follower(), timeout=1.0)
+    probe_started = threading.Event()
+    probe = asyncio.create_task(asyncio.to_thread(probe_started.set))
+
+    async def wait_for_probe() -> None:
+        while not probe_started.is_set():
+            await asyncio.sleep(0)
+
+    try:
+        await asyncio.wait_for(wait_for_probe(), timeout=1.0)
+    finally:
+        release.set()
+        await asyncio.gather(leader, follower, probe)
+
+    assert probe_started.is_set()
 
 
 def test_cache_does_not_cache_failures() -> None:

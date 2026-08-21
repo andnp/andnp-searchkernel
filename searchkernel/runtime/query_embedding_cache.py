@@ -7,8 +7,9 @@ import logging
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future
 from dataclasses import dataclass, field
-from threading import Event, Lock
+from threading import Lock
 
 from searchkernel.domain import Vector
 from searchkernel.ports.stores import CacheStore
@@ -40,7 +41,7 @@ class _CachedEmbedding:
 
 @dataclass(slots=True)
 class _InFlightEmbedding:
-    completed: Event = field(default_factory=Event)
+    completed: Future[None] = field(default_factory=Future)
     embedding: tuple[float, ...] | None = None
     error: BaseException | None = None
 
@@ -96,7 +97,7 @@ class QueryEmbeddingCache:
 
         inflight, is_leader = self._start_or_join(key)
         if not is_leader:
-            inflight.completed.wait()
+            inflight.completed.result()
             return self._finish_waiter(inflight)
 
         started = self._clock()
@@ -126,7 +127,7 @@ class QueryEmbeddingCache:
 
         inflight, is_leader = self._start_or_join(key)
         if not is_leader:
-            await asyncio.to_thread(inflight.completed.wait)
+            await asyncio.wrap_future(inflight.completed)
             return self._finish_waiter(inflight)
 
         started = self._clock()
@@ -241,7 +242,7 @@ class QueryEmbeddingCache:
                 self._cache.popitem(last=False)
                 self._evictions += 1
             self._inflight.pop(key, None)
-            inflight.completed.set()
+            inflight.completed.set_result(None)
         self._save_to_store(key, embedding)
 
     def _complete_failure(
@@ -253,7 +254,7 @@ class QueryEmbeddingCache:
         with self._lock:
             inflight.error = error
             self._inflight.pop(key, None)
-            inflight.completed.set()
+            inflight.completed.set_result(None)
 
     def _finish_waiter(self, inflight: _InFlightEmbedding) -> Vector:
         if inflight.embedding is not None:
