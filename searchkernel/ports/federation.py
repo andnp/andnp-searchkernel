@@ -68,6 +68,12 @@ def _record_status(value: object, name: str) -> RecordStatus:
     raise TypeError(f"{name} must be a record status")
 
 
+def _boolean(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} must be a boolean")
+    return value
+
+
 def _string_tuple(value: object, name: str) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, str):
         raise TypeError(f"{name} must be an array of strings")
@@ -595,15 +601,28 @@ class SourceCapabilities(_JsonContract):
                 _required(value, "contract_versions", "capabilities"),
                 "contract_versions",
             ),
-            supports_filters=value.get("supports_filters", True),
-            supports_source_selection=value.get("supports_source_selection", False),
-            supports_rerank_text=value.get("supports_rerank_text", False),
-            supports_partial_results=value.get("supports_partial_results", True),
-            supports_cancellation=value.get("supports_cancellation", True),
-            max_top_k=value.get("max_top_k", MAX_TOP_K),
-            max_rerank_text_length=value.get(
+            supports_filters=_boolean(
+                value.get("supports_filters", True), "supports_filters"
+            ),
+            supports_source_selection=_boolean(
+                value.get("supports_source_selection", False),
+                "supports_source_selection",
+            ),
+            supports_rerank_text=_boolean(
+                value.get("supports_rerank_text", False), "supports_rerank_text"
+            ),
+            supports_partial_results=_boolean(
+                value.get("supports_partial_results", True),
+                "supports_partial_results",
+            ),
+            supports_cancellation=_boolean(
+                value.get("supports_cancellation", True),
+                "supports_cancellation",
+            ),
+            max_top_k=_positive_int(value.get("max_top_k", MAX_TOP_K), "max_top_k"),
+            max_rerank_text_length=_positive_int(
+                value.get("max_rerank_text_length", MAX_RERANK_TEXT_LENGTH),
                 "max_rerank_text_length",
-                MAX_RERANK_TEXT_LENGTH,
             ),
         )
 
