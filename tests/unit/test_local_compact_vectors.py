@@ -1193,3 +1193,33 @@ async def test_async_vector_search_offloads_blocking_work() -> None:
     assert started.is_set()
     release.set()
     assert await task == []
+
+
+def test_snapshot_names_the_offending_row_for_a_later_corrupt_vector(
+    tmp_path: Path,
+) -> None:
+    """A non-finite vector past the first row is still attributed correctly.
+
+    Bulk decoding validates the whole matrix at once, so the row-to-key
+    mapping in the error path is the part that can silently drift.
+    """
+    db_path = tmp_path / "records.db"
+    backend = LocalRecordBackend(db_path)
+    records = [_record("one", [1.0, 0.0]), _record("two", [0.0, 1.0])]
+    backend.upsert(records, "model", 2)
+    later = max(records, key=lambda record: record.storage_key)
+
+    conn = backend.db_manager.get_connection()
+    conn.execute(
+        "UPDATE local_vectors_v2 SET embedding = ? WHERE storage_key = ?",
+        (
+            np.asarray([np.nan, 0.0], dtype="<f4").tobytes(),
+            later.storage_key,
+        ),
+    )
+    conn.commit()
+
+    reopened = LocalRecordBackend(db_path)
+    with pytest.raises(ValueError, match="must contain only finite values") as error:
+        reopened.search_vector([1.0, 0.0], 1, model_name="model", dim=2)
+    assert later.storage_key in str(error.value)
