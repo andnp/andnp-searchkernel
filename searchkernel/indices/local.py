@@ -660,7 +660,7 @@ class _VectorEngine:
                 (model_name, dim),
             ).fetchone()
             stats = (int(row[0]), int(row[1])) if row else (0, 0)
-            self._vector_storage_stats[key] = (vector_epoch, *stats)
+            self._vector_storage_stats[key] = (vector_epoch, stats[0], stats[1])
             return stats
 
     def _vector_batch_limit(self, dim: int) -> int:
