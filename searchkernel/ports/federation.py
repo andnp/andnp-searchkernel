@@ -830,8 +830,10 @@ class SearchResponse(_JsonContract):
                 for item in hits_value
             ),
             index_epoch=_optional_string(value.get("index_epoch"), "index_epoch"),
-            elapsed_ms=value.get("elapsed_ms", 0.0),
-            partial=value.get("partial", False),
+            elapsed_ms=_non_negative_float(
+                value.get("elapsed_ms", 0.0), "elapsed_ms"
+            ),
+            partial=_boolean(value.get("partial", False), "partial"),
             warnings=_string_tuple(value.get("warnings", ()), "warnings"),
             diagnostics=(
                 SearchDiagnostics.from_dict(
