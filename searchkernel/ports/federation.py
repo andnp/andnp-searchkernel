@@ -60,6 +60,14 @@ def _optional_string(value: object, name: str) -> str | None:
     return _string(value, name)
 
 
+def _record_status(value: object, name: str) -> RecordStatus:
+    if isinstance(value, RecordStatus):
+        return value
+    if isinstance(value, str):
+        return RecordStatus(value)
+    raise TypeError(f"{name} must be a record status")
+
+
 def _string_tuple(value: object, name: str) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, str):
         raise TypeError(f"{name} must be an array of strings")
@@ -392,9 +400,10 @@ class SearchHit(_JsonContract):
             },
             "hit",
         )
-        lifecycle = value.get("lifecycle", RecordStatus.ACTIVE.value)
-        if isinstance(lifecycle, str):
-            lifecycle = RecordStatus(lifecycle)
+        lifecycle = _record_status(
+            value.get("lifecycle", RecordStatus.ACTIVE.value),
+            "lifecycle",
+        )
         return cls(
             workspace_id=_optional_string(value.get("workspace_id"), "workspace_id"),
             source_kind=_string(_required(value, "source_kind", "hit"), "source_kind"),
