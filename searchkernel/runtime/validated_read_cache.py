@@ -6,8 +6,9 @@ import asyncio
 import copy
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future
 from dataclasses import dataclass, field, replace
-from threading import Event, Lock
+from threading import Lock
 from typing import Protocol, TypeVar, cast
 
 KeyT = TypeVar("KeyT")
@@ -75,7 +76,7 @@ _MISSING = object()
 
 @dataclass(slots=True)
 class _InFlight[ValueT]:
-    completed: Event = field(default_factory=Event)
+    completed: Future[None] = field(default_factory=Future)
     value: object = _MISSING
     error: BaseException | None = None
     used_stale_fallback: bool = False
@@ -135,7 +136,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
         self._record(misses=1)
         inflight, is_leader = self._start_or_join(key)
         if not is_leader:
-            inflight.completed.wait()
+            inflight.completed.result()
             return self._finish_waiter(inflight)
         return self._load_as_leader(key, inflight, stale_entry, load)
 
@@ -162,7 +163,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
         self._record(misses=1)
         inflight, is_leader = self._start_or_join(key)
         if not is_leader:
-            await asyncio.to_thread(inflight.completed.wait)
+            await asyncio.wrap_future(inflight.completed)
             return self._finish_waiter(inflight)
         return await self._load_as_async_leader(key, inflight, stale_entry, load)
 
@@ -346,7 +347,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
             inflight.value = copy.deepcopy(value)
             inflight.used_stale_fallback = used_stale_fallback
             self._inflight.pop(key, None)
-            inflight.completed.set()
+            inflight.completed.set_result(None)
 
     def _complete_failure(
         self, key: KeyT, inflight: _InFlight[ValueT], error: BaseException
@@ -354,7 +355,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
         with self._lock:
             inflight.error = error
             self._inflight.pop(key, None)
-            inflight.completed.set()
+            inflight.completed.set_result(None)
 
     def _finish_waiter(self, inflight: _InFlight[ValueT]) -> ValueT:
         if inflight.value is not _MISSING:
