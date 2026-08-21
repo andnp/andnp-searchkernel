@@ -227,51 +227,41 @@ class VectorSnapshot:
         filter_values: Any,
     ) -> np.ndarray:
         predicate = compile_vector_filters(filters)
+        # Vectorized prefilter on scalar fields always runs first, even when
+        # a Python metadata predicate is also needed below: it is cheap and
+        # narrows the rows the slow per-row predicate must visit.
+        eligible = np.isin(self.statuses, tuple(predicate.statuses))
+        if predicate.workspace_id is not None and isinstance(
+            predicate.workspace_id, str
+        ):
+            eligible &= self.workspace_ids == predicate.workspace_id
+        if predicate.source_kinds is not None:
+            eligible &= np.isin(self.source_kinds, tuple(predicate.source_kinds))
+        if predicate.candidate_keys is not None:
+            position_index = self._position_index()
+            candidate_mask = np.zeros(len(self.storage_keys), dtype=bool)
+            for candidate_key in predicate.candidate_keys:
+                position = position_index.get(candidate_key)
+                if position is not None:
+                    candidate_mask[position] = True
+            eligible &= candidate_mask
         if self._can_prefilter_scalars(filters, predicate):
-            eligible = np.isin(self.statuses, tuple(predicate.statuses))
-            if predicate.workspace_id is not None:
-                eligible &= self.workspace_ids == predicate.workspace_id
-            if predicate.source_kinds is not None:
-                eligible &= np.isin(
-                    self.source_kinds, tuple(predicate.source_kinds)
-                )
-            if predicate.candidate_keys is not None:
-                position_index = self._position_index()
-                candidate_mask = np.zeros(len(self.storage_keys), dtype=bool)
-                for candidate_key in predicate.candidate_keys:
-                    position = position_index.get(candidate_key)
-                    if position is not None:
-                        candidate_mask[position] = True
-                eligible &= candidate_mask
             return np.asarray(eligible, dtype=bool)
         if len(self.metadata) != len(self.storage_keys):
             raise ValueError("metadata must be materialized for this filter")
-        return np.asarray(
-            [
-                predicate.matches(
-                    storage_key=storage_key,
-                    source_id=str(source_id),
-                    workspace_id=(
-                        str(workspace_id) if workspace_id is not None else None
-                    ),
-                    source_kind=str(source_kind),
-                    status=str(status),
-                    metadata=metadata,
-                    uri=uri,
-                )
-                for storage_key, source_id, workspace_id, source_kind, status, metadata, uri in zip(
-                    self.storage_keys,
-                    self.source_ids,
-                    self.workspace_ids,
-                    self.source_kinds,
-                    self.statuses,
-                    self.metadata,
-                    self.uris,
-                    strict=True,
-                )
-            ],
-            dtype=bool,
-        )
+        result = np.zeros(len(self.storage_keys), dtype=bool)
+        for position in np.flatnonzero(eligible):
+            workspace_id = self.workspace_ids[position]
+            result[position] = predicate.matches(
+                storage_key=self.storage_keys[position],
+                source_id=str(self.source_ids[position]),
+                workspace_id=(str(workspace_id) if workspace_id is not None else None),
+                source_kind=str(self.source_kinds[position]),
+                status=str(self.statuses[position]),
+                metadata=self.metadata[position],
+                uri=self.uris[position],
+            )
+        return result
 
     @staticmethod
     def _can_prefilter_scalars(
