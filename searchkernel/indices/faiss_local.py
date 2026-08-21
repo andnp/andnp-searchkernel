@@ -359,10 +359,7 @@ class FAISSLocalVectorStore:
                 self.configuration.hnsw_m,
                 faiss.METRIC_INNER_PRODUCT,
             )
-            base_index.hnsw.efConstruction = (
-                self.configuration.hnsw_ef_construction
-            )
-            base_index.hnsw.efSearch = self.configuration.hnsw_ef_search
+            self._set_hnsw_settings(base_index)
         index = faiss.IndexIDMap2(base_index)
         ids: list[int] = []
         storage_keys: list[str] = []
@@ -652,5 +649,12 @@ class FAISSLocalVectorStore:
         import faiss
 
         base_index = faiss.downcast_index(index.index)
-        base_index.hnsw.efConstruction = self.configuration.hnsw_ef_construction
-        base_index.hnsw.efSearch = self.configuration.hnsw_ef_search
+        self._set_hnsw_settings(base_index)
+
+    def _set_hnsw_settings(self, index: object) -> None:
+        import faiss
+
+        if not isinstance(index, faiss.IndexHNSW):
+            raise TypeError("FAISS approximate index must expose HNSW settings")
+        index.hnsw.efConstruction = self.configuration.hnsw_ef_construction
+        index.hnsw.efSearch = self.configuration.hnsw_ef_search
