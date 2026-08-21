@@ -41,7 +41,7 @@ def embed_and_upsert(
     inputs: list[EmbeddingInput],
     *,
     provider: EmbeddingBatchProvider,
-    sink: EmbeddingSink,
+    sink: EmbeddingSink | EmbeddingBatchSink,
     batch_size: int,
 ) -> EmbeddingBatchResult:
     """Embed inputs in bounded batches and persist each result.
@@ -59,7 +59,6 @@ def embed_and_upsert(
         provider=provider,
         batch_size=batch_size,
     )
-    batch_sink = sink if isinstance(sink, EmbeddingBatchSink) else None
     stored = 0
     rejected = 0
     batches = 0
@@ -77,8 +76,8 @@ def embed_and_upsert(
             )
             for item, embedding in zip(input_batch, embedding_batch, strict=True)
         ]
-        if batch_sink is not None:
-            accepted_batch = list(batch_sink.upsert_batch(writes))
+        if isinstance(sink, EmbeddingBatchSink):
+            accepted_batch = list(sink.upsert_batch(writes))
         else:
             accepted_batch = [
                 sink.upsert(

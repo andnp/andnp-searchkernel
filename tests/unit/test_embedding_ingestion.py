@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import pytest
@@ -32,8 +33,8 @@ class _BatchSink:
     def __init__(self) -> None:
         self.batches: list[list[EmbeddingWrite]] = []
 
-    def upsert_batch(self, writes: list[EmbeddingWrite]) -> list[bool]:
-        self.batches.append(writes)
+    def upsert_batch(self, writes: Sequence[EmbeddingWrite]) -> Sequence[bool]:
+        self.batches.append(list(writes))
         return [True] * len(writes)
 
 
