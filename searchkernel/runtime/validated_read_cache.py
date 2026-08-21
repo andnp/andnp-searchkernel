@@ -102,12 +102,14 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
         *,
         ttl_seconds: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
+        clone: Callable[[ValueT], ValueT] = copy.deepcopy,
     ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be > 0")
         self._store = store
         self._ttl_seconds = ttl_seconds
         self._clock = clock
+        self._clone = clone
         self._inflight: dict[KeyT, _InFlight[ValueT]] = {}
         self._lock = Lock()
         self._requests = 0
@@ -200,7 +202,11 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
                 return None
             if not isinstance(entry, ValidatedCacheEntry):
                 raise TypeError("validated cache store returned an invalid entry")
-            return copy.deepcopy(entry)
+            return ValidatedCacheEntry(
+                value=self._clone(entry.value),
+                validation_token=copy.deepcopy(entry.validation_token),
+                cached_at=entry.cached_at,
+            )
         except Exception:  # noqa: BLE001 - cache reads are best effort
             self._record(cache_read_failures=1)
             return None
@@ -280,7 +286,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
             if not isinstance(loaded, ValidatedCacheValue):
                 raise TypeError("validated cache loader returned an invalid value")
             entry = ValidatedCacheEntry(
-                value=copy.deepcopy(loaded.value),
+                value=self._clone(loaded.value),
                 validation_token=copy.deepcopy(loaded.validation_token),
                 cached_at=self._clock(),
             )
@@ -314,7 +320,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
             if not isinstance(loaded, ValidatedCacheValue):
                 raise TypeError("validated cache loader returned an invalid value")
             entry = ValidatedCacheEntry(
-                value=copy.deepcopy(loaded.value),
+                value=self._clone(loaded.value),
                 validation_token=copy.deepcopy(loaded.validation_token),
                 cached_at=self._clock(),
             )
@@ -419,9 +425,8 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
             self._cache_read_failures += cache_read_failures
             self._load_time_seconds += load_time_seconds
 
-    @staticmethod
-    def _copy_value(value: ValueT) -> ValueT:
-        return copy.deepcopy(value)
+    def _copy_value(self, value: ValueT) -> ValueT:
+        return self._clone(value)
 
 
 async def _maybe_await[ResultT](value: ResultT | Awaitable[ResultT]) -> ResultT:
