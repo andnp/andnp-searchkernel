@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -146,6 +146,20 @@ class VectorSnapshot:
     statuses: np.ndarray
     metadata: tuple[dict[str, Any], ...]
     uris: tuple[str | None, ...]
+    _position_by_key: dict[str, int] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def _position_index(self) -> dict[str, int]:
+        """Build (and cache) a storage_key -> row position lookup."""
+        cached = self._position_by_key
+        if cached is None:
+            cached = {key: index for index, key in enumerate(self.storage_keys)}
+            object.__setattr__(self, "_position_by_key", cached)
+        return cached
 
     @classmethod
     def from_rows(
@@ -222,10 +236,13 @@ class VectorSnapshot:
                     self.source_kinds, tuple(predicate.source_kinds)
                 )
             if predicate.candidate_keys is not None:
-                eligible &= np.isin(
-                    np.asarray(self.storage_keys, dtype=object),
-                    tuple(predicate.candidate_keys),
-                )
+                position_index = self._position_index()
+                candidate_mask = np.zeros(len(self.storage_keys), dtype=bool)
+                for candidate_key in predicate.candidate_keys:
+                    position = position_index.get(candidate_key)
+                    if position is not None:
+                        candidate_mask[position] = True
+                eligible &= candidate_mask
             return np.asarray(eligible, dtype=bool)
         if len(self.metadata) != len(self.storage_keys):
             raise ValueError("metadata must be materialized for this filter")
