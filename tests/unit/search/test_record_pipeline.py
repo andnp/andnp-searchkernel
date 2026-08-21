@@ -1058,11 +1058,17 @@ async def test_graph_expansion_reads_only_bounded_seed_neighbors() -> None:
             edge_types: list[str] | None = None,
             depth: int = 1,
             max_neighbors: int | None = None,
-        ) -> list[GraphNeighbor | tuple[str, str, float]]:
+        ) -> Sequence[GraphNeighbor]:
             assert isinstance(record_id, RecordIdentity)
             assert max_neighbors == 1
             calls.append(record_id)
-            return [("missing", "related", 1.0)]
+            return [
+                GraphNeighbor(
+                    RecordIdentity(None, "fake", "missing"),
+                    "related",
+                    1.0,
+                )
+            ]
 
     pipeline = RecordSearchPipeline(
         keyword_store=FakeKeywordStore([("a", 1.0), ("b", 0.9), ("c", 0.8)]),
@@ -2369,7 +2375,8 @@ async def test_graph_disabled_does_not_touch_graph_store() -> None:
             record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
-        ) -> list[GraphNeighbor | tuple[str, str, float]]:
+            max_neighbors: int | None = None,
+        ) -> Sequence[GraphNeighbor]:
             raise AssertionError("graph should be disabled")
 
     pipeline = RecordSearchPipeline(
@@ -2392,7 +2399,8 @@ async def test_ordinary_query_does_not_touch_available_graph_store() -> None:
             record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
-        ) -> list[GraphNeighbor | tuple[str, str, float]]:
+            max_neighbors: int | None = None,
+        ) -> Sequence[GraphNeighbor]:
             raise AssertionError("graph should be skipped for ordinary queries")
 
     pipeline = RecordSearchPipeline(
@@ -2436,7 +2444,8 @@ async def test_adaptive_graph_skips_weak_ordinary_seed() -> None:
             record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
-        ) -> list[GraphNeighbor]:
+            max_neighbors: int | None = None,
+        ) -> Sequence[GraphNeighbor]:
             raise AssertionError("weak seeds should not route to graph")
 
     pipeline = RecordSearchPipeline(
@@ -3085,7 +3094,8 @@ async def test_scalar_graph_fallback_is_bounded() -> None:
             record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
-        ) -> list[GraphNeighbor | tuple[str, str, float]]:
+            max_neighbors: int | None = None,
+        ) -> Sequence[GraphNeighbor]:
             nonlocal active, maximum_active
             with lock:
                 active += 1
@@ -3136,7 +3146,8 @@ async def test_batch_graph_failures_keep_strict_and_lenient_modes() -> None:
             record_id: RecordIdentity | str,
             edge_types: list[str] | None = None,
             depth: int = 1,
-        ) -> list[GraphNeighbor]:
+            max_neighbors: int | None = None,
+        ) -> Sequence[GraphNeighbor]:
             raise AssertionError("scalar graph lookup should not run")
 
     strict = RecordSearchPipeline(
