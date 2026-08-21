@@ -1,9 +1,15 @@
 from datetime import UTC, datetime
-from typing import Any
 
 import pytest
 
-from searchkernel import Record, RecordHit, RecordIdentity, SearchAPI, SearchKernel
+from searchkernel import (
+    Record,
+    RecordHit,
+    RecordIdentity,
+    SearchAPI,
+    SearchKernel,
+)
+from searchkernel.domain import SearchFilters
 from searchkernel.ports.search_results import RecordSearchOutcome, RecordSearchResult
 
 
@@ -25,7 +31,7 @@ async def test_public_search_returns_canonical_record_outcome() -> None:
             self,
             query: str,
             k: int,
-            filters: dict[str, Any] | None = None,
+            filters: SearchFilters | None = None,
         ) -> list[RecordHit]:
             assert query == "query"
             assert filters == {"statuses": ["active"]}
