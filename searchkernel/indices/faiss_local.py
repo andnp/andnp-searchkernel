@@ -602,7 +602,11 @@ class FAISSLocalVectorStore:
                 return None
             ids = tuple(int(value) for value in metadata["ids"])
             storage_keys = tuple(metadata["storage_keys"])
-            if len(ids) != len(storage_keys) or len(set(ids)) != len(ids):
+            if (
+                len(ids) != len(storage_keys)
+                or len(set(ids)) != len(ids)
+                or len(set(storage_keys)) != len(storage_keys)
+            ):
                 return None
             candidate_metadata_values = metadata["candidate_metadata"]
             if not isinstance(candidate_metadata_values, list) or len(
