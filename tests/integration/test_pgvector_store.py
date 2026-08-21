@@ -1523,11 +1523,11 @@ class TestGraphStore:
         )
 
         assert store.incoming_neighbors(target) == [
-            GraphNeighbor(inbound, "links_to", pytest.approx(0.9))
+            GraphNeighbor(inbound, "links_to", 0.9)
         ]
         assert store.incoming_neighbors_many([target], depth=1) == {
             target.storage_key: [
-                GraphNeighbor(inbound, "links_to", pytest.approx(0.9))
+                GraphNeighbor(inbound, "links_to", 0.9)
             ]
         }
 
@@ -1558,15 +1558,15 @@ class TestGraphStore:
         )
 
         expected_a = [
-            GraphNeighbor(inbound_a, "links", pytest.approx(0.9)),
-            GraphNeighbor(inbound_b, "links", pytest.approx(0.9)),
-            GraphNeighbor(upstream, "links", pytest.approx(0.72)),
+            GraphNeighbor(inbound_a, "links", 0.9),
+            GraphNeighbor(inbound_b, "links", 0.9),
+            GraphNeighbor(upstream, "links", 0.72),
         ]
         expected_b = [
-            GraphNeighbor(target_a, "links", pytest.approx(0.6)),
-            GraphNeighbor(inbound_a, "links", pytest.approx(0.54)),
-            GraphNeighbor(inbound_b, "links", pytest.approx(0.54)),
-            GraphNeighbor(upstream, "links", pytest.approx(0.432)),
+            GraphNeighbor(target_a, "links", 0.6),
+            GraphNeighbor(inbound_a, "links", 0.54),
+            GraphNeighbor(inbound_b, "links", 0.54),
+            GraphNeighbor(upstream, "links", 0.432),
         ]
 
         incoming = store.incoming_neighbors_many(
@@ -1588,10 +1588,10 @@ class TestGraphStore:
             [inbound_a, inbound_b], depth=1
         ) == {
             inbound_a.storage_key: [
-                GraphNeighbor(target_a, "links", pytest.approx(0.9))
+                GraphNeighbor(target_a, "links", 0.9)
             ],
             inbound_b.storage_key: [
-                GraphNeighbor(target_a, "links", pytest.approx(0.9))
+                GraphNeighbor(target_a, "links", 0.9)
             ],
         }
         assert store.neighbors_many([inbound_a], depth=2) == {
@@ -1607,7 +1607,7 @@ class TestGraphStore:
         store.upsert_edges([GraphEdge(source, target, "related", 0.2)])
 
         assert store.neighbors(source, depth=3) == [
-            GraphNeighbor(target, "related", pytest.approx(0.2))
+            GraphNeighbor(target, "related", 0.2)
         ]
         assert store.neighbors(RecordIdentity(None, "test", "missing")) == []
 
@@ -1689,7 +1689,7 @@ class TestGraphStore:
             later,
         ]
         assert store.neighbors(start, max_neighbors=1) == [
-            GraphNeighbor(earlier, "links", pytest.approx(0.5))
+            GraphNeighbor(earlier, "links", 0.5)
         ]
 
 class TestCacheStore:

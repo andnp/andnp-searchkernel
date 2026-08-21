@@ -345,7 +345,7 @@ class TestPsycopg3GraphStore:
         store.upsert_edges([GraphEdge(source, target, "related", 0.2)])
 
         assert store.neighbors(source) == [
-            GraphNeighbor(target, "related", pytest.approx(0.2))
+            GraphNeighbor(target, "related", 0.2)
         ]
 
     def test_empty_graph_batches_are_noops(self, pg_conn):
@@ -376,10 +376,10 @@ class TestPsycopg3GraphStore:
         store.delete_edges([edges[0]])
 
         assert store.neighbors(source_a) == [
-            GraphNeighbor(target_a, "links", pytest.approx(0.8))
+            GraphNeighbor(target_a, "links", 0.8)
         ]
         assert store.neighbors(source_b) == [
-            GraphNeighbor(target_b, "related", pytest.approx(0.7))
+            GraphNeighbor(target_b, "related", 0.7)
         ]
 
     def test_failed_batch_rolls_back_all_graph_changes(self, pg_conn):
