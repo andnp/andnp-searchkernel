@@ -997,8 +997,6 @@ class PGVectorStore:
             record_rows = []
             for record in records:
                 metadata_json = json.dumps(record.metadata)
-                indexed_text = record.indexed_text or record.body
-                tsvector_text = f"{record.title} {indexed_text}"
                 record_key = record.storage_key
                 record_rows.append(
                     (
@@ -1009,7 +1007,6 @@ class PGVectorStore:
                         record.title,
                         record.body,
                         record.indexed_text,
-                        tsvector_text,
                         _utc_timestamp(record.created_at),
                         _utc_timestamp(record.updated_at),
                         metadata_json,
@@ -1021,9 +1018,8 @@ class PGVectorStore:
             record_insert_sql = """
                 INSERT INTO records
                 (record_id, workspace_id, source_kind, source_id, title, body,
-                 indexed_text, tsvector_body, created_at, updated_at, metadata, uri, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s,
-                        to_tsvector('english', %s), %s, %s, %s, %s, %s)
+                 indexed_text, created_at, updated_at, metadata, uri, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (record_id) DO UPDATE SET
                     workspace_id = EXCLUDED.workspace_id,
                     source_kind = EXCLUDED.source_kind,
@@ -1043,15 +1039,11 @@ class PGVectorStore:
                 psycopg2.extras.execute_values(
                     cursor,
                     record_insert_sql.replace(
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s,\n"
-                        "                        to_tsvector('english', %s), %s, %s, %s, %s, %s)",
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         "VALUES %s",
                     ),
                     record_rows,
-                    template=(
-                        "(%s, %s, %s, %s, %s, %s, %s, "
-                        "to_tsvector('english', %s), %s, %s, %s, %s, %s)"
-                    ),
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 )
 
             # Upsert only vector rows whose revision or payload differs.
