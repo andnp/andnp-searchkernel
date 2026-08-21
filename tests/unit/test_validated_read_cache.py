@@ -34,6 +34,20 @@ class _MemoryStore:
             self.entries[key] = entry
 
 
+class _ListStore:
+    def __init__(self) -> None:
+        self.entries: dict[str, ValidatedCacheEntry[list[str], str]] = {}
+        self._lock = Lock()
+
+    def get(self, key: str) -> ValidatedCacheEntry[list[str], str] | None:
+        with self._lock:
+            return self.entries.get(key)
+
+    def set(self, key: str, entry: ValidatedCacheEntry[list[str], str]) -> None:
+        with self._lock:
+            self.entries[key] = entry
+
+
 class _ObjectStore:
     def __init__(self) -> None:
         self.entries: dict[str, ValidatedCacheEntry[object, str]] = {}
@@ -255,3 +269,94 @@ async def test_async_followers_do_not_occupy_the_default_executor() -> None:
 
     assert probe_started.is_set()
     assert results == ["shared"]
+
+
+def test_mutating_a_fresh_hit_value_does_not_corrupt_the_cache() -> None:
+    store = _ListStore()
+    cache = ValidatedReadThroughCache(store)
+
+    def load() -> ValidatedCacheValue[list[str], str]:
+        return ValidatedCacheValue(["a"], "v1")
+
+    validate = lambda _key, _token: True
+
+    cache.get_or_load("key", validate=validate, load=load)
+    fresh_hit = cache.get_or_load("key", validate=validate, load=load)
+    fresh_hit.append("mutated-by-caller")
+
+    unaffected = cache.get_or_load("key", validate=validate, load=load)
+    assert unaffected == ["a"]
+
+
+def test_mutating_a_freshly_loaded_value_does_not_corrupt_the_cache() -> None:
+    store = _ListStore()
+    cache = ValidatedReadThroughCache(store)
+    validate = lambda _key, _token: True
+
+    loaded = cache.get_or_load(
+        "key", validate=validate, load=lambda: ValidatedCacheValue(["a"], "v1")
+    )
+    loaded.append("mutated-by-caller")
+
+    unaffected = cache.get_or_load(
+        "key", validate=validate, load=lambda: ValidatedCacheValue(["a"], "v1")
+    )
+    assert unaffected == ["a"]
+
+
+def test_mutating_a_stale_fallback_value_does_not_corrupt_the_cache() -> None:
+    clock = _Clock()
+    store = _ListStore()
+    cache = ValidatedReadThroughCache(store, ttl_seconds=1.0, clock=clock)
+    validate = lambda _key, _token: True
+
+    def fail() -> ValidatedCacheValue[list[str], str]:
+        raise TimeoutError("authoritative read failed")
+
+    cache.get_or_load(
+        "key", validate=validate, load=lambda: ValidatedCacheValue(["cached"], "v1")
+    )
+    clock.value = 2.0
+
+    fallback = cache.get_or_load("key", validate=validate, load=fail)
+    fallback.append("mutated-by-caller")
+
+    unaffected = cache.get_or_load("key", validate=validate, load=fail)
+    assert unaffected == ["cached"]
+
+
+def test_coalesced_readers_receive_independent_objects_not_a_shared_one() -> None:
+    store = _ListStore()
+    cache = ValidatedReadThroughCache(store)
+    started = Event()
+    release = Event()
+    results: list[list[str]] = []
+
+    def load() -> ValidatedCacheValue[list[str], str]:
+        started.set()
+        assert release.wait(timeout=5.0)
+        return ValidatedCacheValue(["shared"], "v1")
+
+    def read() -> None:
+        results.append(
+            cache.get_or_load(
+                "key", validate=lambda _key, _token: True, load=load
+            )
+        )
+
+    leader = Thread(target=read)
+    follower = Thread(target=read)
+    leader.start()
+    assert started.wait(timeout=5.0)
+    follower.start()
+    release.set()
+    leader.join(timeout=5.0)
+    follower.join(timeout=5.0)
+
+    assert len(results) == 2
+    assert results[0] == ["shared"]
+    assert results[1] == ["shared"]
+    assert results[0] is not results[1]
+
+    results[0].append("mutated-by-one-reader")
+    assert results[1] == ["shared"]
