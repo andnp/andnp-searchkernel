@@ -157,6 +157,7 @@ class VectorSnapshot:
         epoch: int,
         materialize_metadata: bool = False,
     ) -> VectorSnapshot:
+        matrix = np.empty((len(rows), dim), dtype="<f4")
         storage_keys: list[str] = []
         source_ids: list[str] = []
         workspace_ids: list[str | None] = []
@@ -164,27 +165,18 @@ class VectorSnapshot:
         statuses: list[str] = []
         metadata: list[dict[str, Any]] = []
         uris: list[str | None] = []
-        payloads: list[bytes] = []
-        expected_size = dim * np.dtype("<f4").itemsize
-        for row in rows:
-            storage_key = row["storage_key"]
+        for row_index, row in enumerate(rows):
             if (
                 row["format_version"] != VECTOR_FORMAT_VERSION
                 or row["normalization_policy"] != NORMALIZATION_POLICY
             ):
-                raise ValueError(f"unsupported vector format for {storage_key}")
-            payload = row["embedding"]
-            if not isinstance(payload, (bytes, bytearray, memoryview)):
-                raise ValueError(  # noqa: TRY004
-                    f"stored embedding for {storage_key} must be packed bytes"
-                )
-            if len(payload) != expected_size:
-                raise ValueError(
-                    f"stored embedding for {storage_key} byte length mismatch: "
-                    f"expected {expected_size}, got {len(payload)}"
-                )
-            payloads.append(bytes(payload))
-            storage_keys.append(storage_key)
+                raise ValueError(f"unsupported vector format for {row['storage_key']}")
+            matrix[row_index] = PackedVectorCodec.decode(
+                row["embedding"],
+                dim,
+                context=f"stored embedding for {row['storage_key']}",
+            )
+            storage_keys.append(row["storage_key"])
             source_ids.append(row["source_id"])
             workspace_ids.append(row["workspace_id"])
             source_kinds.append(row["source_kind"])
@@ -192,24 +184,6 @@ class VectorSnapshot:
             if materialize_metadata:
                 metadata.append(dict(metadata_mapping(row["metadata"])))
                 uris.append(row["uri"])
-        matrix = np.frombuffer(b"".join(payloads), dtype="<f4").reshape(
-            len(payloads), dim
-        ).copy()
-        finite_rows = np.isfinite(matrix).all(axis=1)
-        if not finite_rows.all():
-            bad_row = int(np.flatnonzero(~finite_rows)[0])
-            raise ValueError(
-                f"stored embedding for {storage_keys[bad_row]} must contain only "
-                "finite values"
-            )
-        norms = np.linalg.norm(matrix.astype(np.float64), axis=1)
-        bad_norm = ~np.isfinite(norms) | (norms == 0.0)
-        if bad_norm.any():
-            bad_row = int(np.flatnonzero(bad_norm)[0])
-            raise ValueError(
-                f"stored embedding for {storage_keys[bad_row]} must have a "
-                "non-zero finite norm"
-            )
         arrays = [
             np.asarray(values, dtype=object)
             for values in (source_ids, workspace_ids, source_kinds, statuses)
