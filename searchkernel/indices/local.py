@@ -101,6 +101,7 @@ _FUZZY_TERM_RATIO = 0.82
 _METADATA_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _VECTOR_EMBEDDING_BYTES = np.dtype("<f4").itemsize
 _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
+_VECTOR_GATHER_SELECTIVITY_THRESHOLD = 0.3
 logger = logging.getLogger(__name__)
 
 
@@ -810,7 +811,14 @@ class _VectorEngine:
         positions = np.flatnonzero(eligible)
         if not len(positions):
             return []
-        scores = snapshot.matrix[positions] @ query
+        # Gathering the candidate submatrix before the matvec is a
+        # memory-bound copy of the whole selection; once most rows survive
+        # the filter it's cheaper to run the full matvec (more flops, but no
+        # allocation) and then gather only the resulting scalar scores.
+        if len(positions) / len(eligible) > _VECTOR_GATHER_SELECTIVITY_THRESHOLD:
+            scores = (snapshot.matrix @ query)[positions]
+        else:
+            scores = snapshot.matrix[positions] @ query
         selected = self._select_top_positions(
             positions,
             scores,
