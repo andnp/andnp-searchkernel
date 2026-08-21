@@ -68,13 +68,18 @@ def hit(
 def source(
     name: str,
     hits: tuple[SearchHit, ...],
-    **kwargs: object,
+    *,
+    delay: float = 0.0,
+    error: Exception | None = None,
+    source_capabilities: SourceCapabilities | None = None,
 ) -> FakeSource:
     identity = SourceIdentity(name, name)
     return FakeSource(
         identity=identity,
         response=SearchResponse(source=identity, hits=hits),
-        **kwargs,
+        delay=delay,
+        error=error,
+        source_capabilities=source_capabilities or SourceCapabilities(),
     )
 
 
@@ -321,6 +326,8 @@ async def test_federation_order_is_deterministic_for_equal_scores():
 @pytest.mark.asyncio
 async def test_federation_reranker_is_optional_for_hits_without_text():
     class Reranker:
+        model_name = "test-reranker"
+
         def __init__(self) -> None:
             self.documents: list[str] = []
 
@@ -351,6 +358,8 @@ async def test_federation_reranker_is_optional_for_hits_without_text():
 @pytest.mark.asyncio
 async def test_federation_reranker_is_bounded_by_candidates_and_text_length():
     class Reranker:
+        model_name = "test-reranker"
+
         def __init__(self) -> None:
             self.documents: list[str] = []
 

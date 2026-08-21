@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from unittest import mock
 
@@ -42,8 +43,23 @@ def _client(response: httpx.Response | None = None) -> mock.AsyncMock:
     return client
 
 
-def _source(**kwargs: object) -> HttpSearchSource:
-    return HttpSearchSource("https://source.example/", IDENTITY, **kwargs)
+def _source(
+    *,
+    timeout_s: float = 5.0,
+    verify: bool | str = True,
+    max_request_bytes: int = 1_048_576,
+    max_response_bytes: int = 4_194_304,
+    headers: Mapping[str, str] | None = None,
+) -> HttpSearchSource:
+    return HttpSearchSource(
+        "https://source.example/",
+        IDENTITY,
+        timeout_s=timeout_s,
+        verify=verify,
+        max_request_bytes=max_request_bytes,
+        max_response_bytes=max_response_bytes,
+        headers=headers,
+    )
 
 
 @pytest.mark.asyncio
