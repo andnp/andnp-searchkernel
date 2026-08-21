@@ -11,11 +11,13 @@ from searchkernel.adapters.embedding import HuggingFaceEmbeddingProvider
 
 class _FakeModel:
     prompts: ClassVar[dict[str, str]] = {}
+    last_instance: ClassVar[_FakeModel | None] = None
 
     def __init__(self, *args, **kwargs) -> None:
         self.calls: list[dict[str, object]] = []
+        _FakeModel.last_instance = self
 
-    def get_embedding_dimension(self) -> int:
+    def get_embedding_dimension(self) -> int | None:
         return 1
 
     def encode(self, texts, **kwargs):
@@ -61,7 +63,9 @@ def test_embedding_batch_size_defaults_to_32() -> None:
 
     provider.embed(["document"])
 
-    assert provider._model.calls[0]["batch_size"] == 32
+    model = _FakeModel.last_instance
+    assert model is not None
+    assert model.calls[0]["batch_size"] == 32
 
 
 @pytest.mark.parametrize("batch_size", [0, -1])
