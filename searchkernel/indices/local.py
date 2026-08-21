@@ -38,6 +38,7 @@ from searchkernel.domain import (
     Vector,
 )
 from searchkernel.domain.vector_filters import (
+    CompiledVectorFilter,
     candidate_storage_keys,
     compile_source_scoped_filters,
     compile_vector_filters,
@@ -206,6 +207,21 @@ class _SQLiteAccess:
 
     def connection(self) -> sqlite3.Connection:
         return self.db.get_connection()
+
+
+def _matches_compiled_vector_filter(
+    row: sqlite3.Row,
+    predicate: CompiledVectorFilter,
+) -> bool:
+    return predicate.matches(
+        storage_key=row["storage_key"],
+        source_id=row["source_id"],
+        workspace_id=row["workspace_id"],
+        source_kind=row["source_kind"],
+        status=row["status"],
+        metadata=metadata_mapping(row["metadata"]),
+        uri=row["uri"],
+    )
 
 
 class _GraphEngine:
@@ -859,6 +875,7 @@ class _VectorEngine:
         best_scores: list[float] = []
         last_storage_key: str | None = None
         batch_limit = self._vector_batch_limit(dim)
+        predicate = compile_vector_filters(filters)
         while True:
             with self._access.lock:
                 conn = self._access.connection()
@@ -893,7 +910,9 @@ class _VectorEngine:
                     ).fetchall()
             if not rows:
                 break
-            eligible_rows = [row for row in rows if self._matches(row, filters)]
+            eligible_rows = [
+                row for row in rows if _matches_compiled_vector_filter(row, predicate)
+            ]
             if eligible_rows:
                 matrix = np.vstack(
                     [
