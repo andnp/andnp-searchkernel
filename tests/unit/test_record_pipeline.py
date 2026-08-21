@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from searchkernel.domain import Record, RecordHit, RecordIdentity
+from searchkernel.domain import Record, RecordHit, RecordIdentity, SearchFilters
 from searchkernel.search.record_pipeline import RecordSearchConfig, RecordSearchPipeline
 
 
@@ -22,7 +22,12 @@ def _record(record_id: str, *, title: str, body: str, indexed_text: str | None =
 
 
 class _KeywordStore:
-    def search(self, query: str, k: int, filters: dict[str, object] | None = None) -> list[RecordHit]:
+    def index(self, records: list[Record]) -> None:
+        del records
+
+    def search(
+        self, query: str, k: int, filters: SearchFilters | None = None
+    ) -> list[RecordHit]:
         del query, k, filters
         return [
             RecordHit(RecordIdentity(None, "test", "empty"), 0.8),
@@ -96,6 +101,10 @@ async def test_reranking_prefers_record_reranker_over_plain_text() -> None:
         def rerank_records(self, query: str, records: list[Record]) -> list[float]:
             del query
             self.received = records
+            return [0.1, 0.9]
+
+        def rerank(self, query: str, documents: list[str]) -> list[float]:
+            del query, documents
             return [0.1, 0.9]
 
     reranker = IdentityAwareReranker()
