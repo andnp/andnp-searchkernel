@@ -263,6 +263,14 @@ class _SearchExecution:
             raise RuntimeError("search has no acquired candidates yet")
         return candidates
 
+    @property
+    def query_context_value(self) -> RecordSearchQueryContext:
+        """The context for a nonblank search execution."""
+        context = self.query_context
+        if context is None:
+            raise RuntimeError("search has no query context")
+        return context
+
 
 class RecordSearchError(RuntimeError):
     """Raised when strict retrieval cannot complete a pipeline stage."""
@@ -617,7 +625,7 @@ class RecordSearchPipeline:
             candidate_set_eligible is None
             or candidate_set_eligible(
                 execution.rankings.get("keyword", ()),
-                execution.query_context,
+                execution.query_context_value,
             )
         )
         if eligible:
@@ -690,7 +698,7 @@ class RecordSearchPipeline:
                     plan.vector_candidate_budget,
                     filters,
                     rankings,
-                    context=execution.query_context,
+                    context=execution.query_context_value,
                     plan=plan,
                 ),
             )
@@ -711,7 +719,7 @@ class RecordSearchPipeline:
         plan = execution.routed_plan
         query = execution.query
         filters = execution.filters
-        query_context = execution.query_context
+        query_context = execution.query_context_value
         failures = execution.failures
         rankings = execution.rankings
         stage_results = await _gather_tasks(
@@ -774,7 +782,7 @@ class RecordSearchPipeline:
         execution.fused_scores = fused_scores
         base_candidates = self._build_candidates(fused_scores, rankings)
         execution.base_candidates = self._apply_candidate_policy(
-            base_candidates, execution.query_context
+            base_candidates, execution.query_context_value
         )
 
     def _reroute_for_adaptive_graph(self, execution: _SearchExecution) -> None:
@@ -838,7 +846,7 @@ class RecordSearchPipeline:
             try:
                 graph_seeds = await self._resolve_graph_targets(
                     base_candidates,
-                    execution.query_context,
+                    execution.query_context_value,
                     execution.filters,
                 )
                 graph_ranking = await self._expand_graph(
@@ -865,7 +873,7 @@ class RecordSearchPipeline:
                         fused_scores, execution.rankings
                     )
                     candidates = self._apply_candidate_policy(
-                        candidates, execution.query_context
+                        candidates, execution.query_context_value
                     )
                     candidates = self._apply_graph_priority(
                         candidates,
@@ -927,7 +935,7 @@ class RecordSearchPipeline:
         execution.fused_scores = fused_scores
         execution.candidates = self._apply_candidate_policy(
             self._build_candidates(fused_scores, execution.rankings),
-            execution.query_context,
+            execution.query_context_value,
         )
 
     def _finalise_candidates(self, execution: _SearchExecution) -> None:
@@ -943,7 +951,7 @@ class RecordSearchPipeline:
         plan = execution.routed_plan
         candidates = execution.candidates
         candidates = self._apply_score_adjustments(
-            candidates, execution.query_context
+            candidates, execution.query_context_value
         )
         candidates = self._apply_exact_identifier_priority(
             candidates, execution.query
