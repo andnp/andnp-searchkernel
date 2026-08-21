@@ -1157,6 +1157,7 @@ class PGVectorStore:
                     (model_name, dim),
                 )
                 if cursor.fetchone() is None:
+                    conn.rollback()
                     self._last_search_diagnostics = {
                         "requested_k": k,
                         "returned": 0,
@@ -1169,6 +1170,7 @@ class PGVectorStore:
             else:
                 registered_dim, table_name = cached_table
                 if registered_dim != dim:
+                    conn.rollback()
                     self._last_search_diagnostics = {
                         "requested_k": k,
                         "returned": 0,

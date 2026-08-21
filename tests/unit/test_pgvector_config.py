@@ -130,6 +130,7 @@ class _SearchCursor:
 class _SearchConnection:
     def __init__(self) -> None:
         self.cursor_value = _SearchCursor()
+        self.rollback_calls = 0
 
     def cursor(self) -> _SearchCursor:
         return self.cursor_value
@@ -138,7 +139,7 @@ class _SearchConnection:
         pass
 
     def rollback(self) -> None:
-        pass
+        self.rollback_calls += 1
 
 
 class _SearchPool:
@@ -305,6 +306,16 @@ def test_search_reuses_table_metadata_across_connections_and_transactions() -> N
     ]
     assert sum("FROM vector_tables" in statement for statement in statements) == 1
     assert sum("SET LOCAL hnsw.ef_search" in statement for statement in statements) == 2
+
+
+def test_cached_dimension_mismatch_rolls_back_before_returning() -> None:
+    """A skipped cached-dimension search returns its connection cleanly."""
+    pool = _SearchPool()
+    store = PGVectorStore(pool)
+    store._vector_tables["model"] = (3, "vectors__model__3")
+
+    assert store.search([1.0, 0.0], 1, model_name="model", dim=2) == []
+    assert pool.connections[0].rollback_calls == 1
 
 
 @pytest.mark.parametrize(
