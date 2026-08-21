@@ -28,6 +28,7 @@ from searchkernel.ports import (
     AsyncGraphStore,
     AsyncKeywordStore,
     AsyncVectorStore,
+    BatchRecordHydrator,
     EmbeddingProvider,
     GraphStore,
     KeywordStore,
@@ -355,7 +356,7 @@ class RecordSearchPipeline:
     def __init__(
         self,
         *,
-        hydrator: RecordHydrator | RecordHydratorCallable,
+        hydrator: RecordHydrator | BatchRecordHydrator | RecordHydratorCallable,
         keyword_store: KeywordStore | AsyncKeywordStore | None = None,
         vector_store: VectorStore | AsyncVectorStore | None = None,
         graph_store: GraphStore | AsyncGraphStore | None = None,
