@@ -13,7 +13,9 @@ from searchkernel.domain import (
     Record,
     RecordHit,
     RecordIdentity,
+    SearchFilters,
     SearchResultProvenance,
+    Vector,
 )
 from searchkernel.ports import KeywordStore, VectorStore
 from searchkernel.ports.search_results import (
@@ -73,7 +75,7 @@ def _hits(results: Sequence[tuple[str, float]]) -> list[RecordHit]:
 class FakeKeywordStore:
     def __init__(self, results: Sequence[tuple[str, float]]) -> None:
         self.results = _hits(results)
-        self.queries: list[tuple[str, int, dict[str, object] | None]] = []
+        self.queries: list[tuple[str, int, SearchFilters | None]] = []
 
     def index(self, records: list[Record]) -> None:
         pass
@@ -82,7 +84,7 @@ class FakeKeywordStore:
         self,
         query: str,
         k: int,
-        filters: dict[str, object] | None = None,
+        filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
         self.queries.append((query, k, filters))
         return self.results
@@ -91,19 +93,19 @@ class FakeKeywordStore:
 class FakeVectorStore:
     def __init__(self, results: Sequence[tuple[str, float]]) -> None:
         self.results = _hits(results)
-        self.filters: list[dict[str, object] | None] = []
+        self.filters: list[SearchFilters | None] = []
 
     def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
         pass
 
     def search(
         self,
-        query_vector: list[float],
+        query_vector: Vector,
         k: int,
         *,
         model_name: str,
         dim: int,
-        filters: dict[str, object] | None = None,
+        filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
         assert query_vector == [1.0, 0.0]
         assert (model_name, dim) == ("fake-model", 2)
@@ -152,7 +154,9 @@ class FakeGraphStore:
         record_id: RecordIdentity | str,
         edge_types: list[str] | None = None,
         depth: int = 1,
+        max_neighbors: int | None = None,
     ) -> list[GraphNeighbor]:
+        del edge_types, depth, max_neighbors
         key = record_id.source_id
         self.calls.append(key)
         return self._neighbors.get(key, [])
