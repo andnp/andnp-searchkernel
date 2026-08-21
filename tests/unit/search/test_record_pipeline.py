@@ -68,12 +68,17 @@ def _source_record(source_kind: str, record_id: str) -> Record:
     )
 
 
-def _hits(results: Sequence[tuple[str, float]]) -> list[RecordHit]:
-    return [_hit(record_id, score) for record_id, score in results]
+def _hits(results: Sequence[RecordHit | tuple[str, float]]) -> list[RecordHit]:
+    return [
+        result
+        if isinstance(result, RecordHit)
+        else _hit(result[0], result[1])
+        for result in results
+    ]
 
 
 class FakeKeywordStore:
-    def __init__(self, results: Sequence[tuple[str, float]]) -> None:
+    def __init__(self, results: Sequence[RecordHit | tuple[str, float]]) -> None:
         self.results = _hits(results)
         self.queries: list[tuple[str, int, SearchFilters | None]] = []
 
@@ -91,7 +96,7 @@ class FakeKeywordStore:
 
 
 class FakeVectorStore:
-    def __init__(self, results: Sequence[tuple[str, float]]) -> None:
+    def __init__(self, results: Sequence[RecordHit | tuple[str, float]]) -> None:
         self.results = _hits(results)
         self.filters: list[SearchFilters | None] = []
 
