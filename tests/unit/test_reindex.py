@@ -123,6 +123,8 @@ class LocalLifecycleStore:
             (namespace.model_name, namespace.dim),
         )
         conn.commit()
+        # This test-owned lifecycle fake deletes a namespace directly in SQL;
+        # clear the backend snapshot cache that public deletion would refresh.
         self.backend._vector_snapshots.clear()
 
     def validate_namespace(
@@ -261,6 +263,7 @@ class LocalLifecycleStore:
             ],
         )
         conn.commit()
+        # Restore writes vectors directly and must invalidate cached snapshots.
         self.backend._vector_snapshots.clear()
         active = self.get_active_model()
         return RollbackMetadata(
