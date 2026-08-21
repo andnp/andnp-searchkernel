@@ -425,6 +425,104 @@ async def test_semantic_retrieval_mode_routes_only_vector(
     }
 
 
+async def test_keyword_only_retrieval_mode_routes_only_keyword() -> None:
+    records = {record_id: _record(record_id) for record_id in ("keyword", "graph")}
+    keyword_store = FakeKeywordStore([("keyword", 1.0)])
+    graph_store = FakeGraphStore({"keyword": [("graph", "related", 1.0)]})
+
+    class FailingEmbedder:
+        model_name = "fake-model"
+        dim = 2
+
+        def embed_query(self, query: str) -> list[float]:
+            raise AssertionError("vector lane should be skipped for keyword_only")
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=keyword_store,
+        vector_store=FakeVectorStore([("vector", 0.9)]),
+        graph_store=graph_store,
+        embedding_provider=FailingEmbedder(),
+        hydrator=_hydrator(records),
+        config=RecordSearchConfig(capture_trace=True),
+    )
+
+    outcome = await pipeline.async_search(
+        "what relates to query?",
+        limit=1,
+        filters={"retrieval_mode": "keyword_only"},
+    )
+
+    assert [result.record_id for result in outcome.results] == ["keyword"]
+    assert graph_store.calls == []
+    assert outcome.trace is not None
+    trace = outcome.trace.to_dict()
+    provenance = _mapping(trace["provenance"])
+    query_plan = _mapping(provenance["query_plan"])
+    assert query_plan["lanes"] == ("keyword",)
+    assert outcome.diagnostic_evidence is not None
+    assert outcome.diagnostic_evidence.enabled_lanes == ("keyword",)
+    assert outcome.diagnostic_evidence.raw_pre_fusion_overlap.available
+    assert outcome.diagnostic_evidence.raw_pre_fusion_overlap.count == 0
+    assert {
+        (skip.lane, skip.reason)
+        for skip in outcome.diagnostic_evidence.skipped_lanes
+    } == {
+        ("vector", "unavailable"),
+        ("graph", "unavailable"),
+    }
+
+
+async def test_keyword_only_adaptive_graph_reroute_stays_keyword_only() -> None:
+    """Regression guard: the adaptive-graph reroute must not reinstate the
+    vector lane under keyword_only, even when readiness is satisfied.
+
+    The reroute call gates ``graph_enabled`` on ``keyword_only`` exactly as
+    it already does for ``semantic_only``, so the plan's early exit (its
+    ``graph_enabled`` stays ``False``) fires before any replacement plan
+    -- one that would otherwise carry ``vector_available=True`` -- is
+    ever adopted.
+    """
+
+    class FailingVectorStore(FakeVectorStore):
+        def search(self, *args: object, **kwargs: object) -> Sequence[RecordHit]:
+            raise AssertionError("vector lane must stay disabled for keyword_only")
+
+    class FailingEmbedder:
+        model_name = "fake-model"
+        dim = 2
+
+        def embed_query(self, query: str) -> list[float]:
+            raise AssertionError("vector lane must stay disabled for keyword_only")
+
+    class FailingGraphStore(FakeGraphStore):
+        def neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+            max_neighbors: int | None = None,
+        ) -> Sequence[GraphNeighbor]:
+            raise AssertionError("graph lane must stay disabled for keyword_only")
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("seed", 40.0)]),
+        vector_store=FailingVectorStore([]),
+        graph_store=FailingGraphStore({"seed": [("neighbor", "related", 1.0)]}),
+        embedding_provider=FailingEmbedder(),
+        hydrator=_hydrator({"seed": _record("seed")}),
+        config=RecordSearchConfig(adaptive_graph_enabled=True, capture_trace=True),
+    )
+
+    outcome = await pipeline.async_search(
+        "what is caching?",
+        limit=1,
+        filters={"retrieval_mode": "keyword_only"},
+    )
+
+    assert [result.record_id for result in outcome.results] == ["seed"]
+    assert "query_plan:graph:adaptive" not in outcome.diagnostics
+
+
 async def test_retrieval_mode_defaults_to_hybrid_and_rejects_unknown_values() -> None:
     pipeline = RecordSearchPipeline(
         keyword_store=FakeKeywordStore([("a", 1.0)]),
