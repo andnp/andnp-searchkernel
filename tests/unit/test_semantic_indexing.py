@@ -421,7 +421,7 @@ class TestSQLiteEmbeddingCache:
 
             cache.put_many(vectors)
 
-            assert set(cache.get_many(vectors)) == set(vectors)
+            assert set(cache.get_many(list(vectors))) == set(vectors)
 
     def test_cache_put_and_get(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
