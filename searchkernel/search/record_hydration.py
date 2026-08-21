@@ -136,6 +136,7 @@ class RecordHydrationCoordinator:
 
         if not misses:
             return cached
+        hydration_cache = self._hydration_cache
         hydrate_records = getattr(self._hydrator, "hydrate_records", None)
         if callable(hydrate_records):
             loaded: list[tuple[RecordSearchCandidate, Record | None]] = []
@@ -151,8 +152,8 @@ class RecordHydrationCoordinator:
                 if result[2] is not None:
                     for candidate in hydration_batch:
                         key = versioned_keys.get(candidate.storage_key)
-                        if key is not None:
-                            self._hydration_cache.fail(key, result[2])
+                        if key is not None and hydration_cache is not None:
+                            hydration_cache.fail(key, result[2])
                 records = self._consume_stage(result, failures)
                 if records is None:
                     continue
@@ -193,8 +194,8 @@ class RecordHydrationCoordinator:
         ):
             if error is not None:
                 key = versioned_keys.get(candidate.storage_key)
-                if key is not None:
-                    self._hydration_cache.fail(key, error)
+                if key is not None and hydration_cache is not None:
+                    hydration_cache.fail(key, error)
                 self._handle_error("hydration", error, failures)
                 continue
             hydrated.append((candidate, record))
