@@ -282,6 +282,7 @@ def _filter_snapshot() -> VectorSnapshot:
         encoder_namespace="model",
         dim=2,
         epoch=1,
+        materialize_metadata=True,
     )
 
 
@@ -392,6 +393,8 @@ def test_vector_metadata_and_snapshot_cache_follow_vector_epoch() -> None:
 
     vector.search([1.0, 0.0], 1, model_name="model", dim=2)
     snapshot = backend._vector_snapshots[("model", 2)]
+    assert snapshot.metadata == ()
+    assert snapshot.uris == ()
     vector.search([1.0, 0.0], 1, model_name="model", dim=2)
 
     assert stats_query_count() == 1
@@ -768,6 +771,55 @@ def test_faiss_query_policy_reload_reuses_index_and_updates_diagnostics(
     assert diagnostics["query_policy_fingerprint"] != (
         original.configuration.query_policy_fingerprint
     )
+
+
+def test_faiss_persistence_compacts_candidate_metadata_and_round_trips_filters(
+    tmp_path: Path,
+) -> None:
+    """Reloaded FAISS state preserves metadata filtering and ordering."""
+    pytest.importorskip("faiss")
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert(
+        [
+            _record("allowed", [1.0, 0.0], metadata={"project": "a"}),
+            _record("blocked", [0.9, 0.1], metadata={"project": "b"}),
+        ],
+        "model",
+        2,
+    )
+    index_path = tmp_path / "faiss"
+    original = FAISSLocalVectorStore(backend, index_path=index_path)
+    filters = {"metadata_equals": {"project": "a"}}
+
+    expected = original.search(
+        [1.0, 0.0], 2, model_name="model", dim=2, filters=filters
+    )
+    metadata_path = next(index_path.glob("*.json"))
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    reloaded = FAISSLocalVectorStore(backend, index_path=index_path)
+    actual = reloaded.search(
+        [1.0, 0.0], 2, model_name="model", dim=2, filters=filters
+    )
+
+    assert isinstance(metadata["candidate_metadata"], list)
+    assert len(metadata["candidate_metadata"]) == len(metadata["storage_keys"])
+    assert all("storage_key" not in value for value in metadata["candidate_metadata"])
+    assert [hit.storage_key for hit in actual] == [hit.storage_key for hit in expected]
+    assert [hit.score for hit in actual] == pytest.approx(
+        [hit.score for hit in expected]
+    )
+    assert reloaded.last_search_diagnostics["persistence"] == "loaded"
+
+    legacy_metadata = dict(metadata)
+    legacy_metadata["candidate_metadata"] = dict(
+        zip(metadata["storage_keys"], metadata["candidate_metadata"], strict=True)
+    )
+    metadata_path.write_text(json.dumps(legacy_metadata), encoding="utf-8")
+    rebuilt = FAISSLocalVectorStore(backend, index_path=index_path)
+    rebuilt.search([1.0, 0.0], 2, model_name="model", dim=2, filters=filters)
+
+    assert rebuilt.last_search_diagnostics["persistence"] == "rebuilt"
 
 
 def test_faiss_configuration_fingerprints_separate_build_and_query_policy() -> None:
