@@ -7,7 +7,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, Self, runtime_checkable
 
 from searchkernel.domain import RecordIdentity, RecordStatus
 
@@ -157,6 +157,13 @@ def _loads(value: str, name: str) -> Mapping[str, object]:
 class _JsonContract:
     """Shared JSON helpers for the public wire models."""
 
+    def to_dict(self) -> dict[str, JsonValue]:
+        raise NotImplementedError
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> Self:
+        raise NotImplementedError
+
     def to_json(self) -> str:
         return json.dumps(
             self.to_dict(),
@@ -167,7 +174,7 @@ class _JsonContract:
         )
 
     @classmethod
-    def from_json(cls, value: str):
+    def from_json(cls, value: str) -> Self:
         return cls.from_dict(_loads(value, cls.__name__))
 
 
