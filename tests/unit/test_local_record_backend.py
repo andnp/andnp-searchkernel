@@ -1,4 +1,5 @@
 import sqlite3
+from collections.abc import MutableMapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -669,8 +670,7 @@ def test_keyword_scan_fallback_returns_empty_for_large_no_match(tmp_path, monkey
         "scan_complete": True,
         "fallback": True,
     }
-    with pytest.raises(TypeError):
-        diagnostics["returned"] = 1
+    assert not isinstance(diagnostics, MutableMapping)
 
 
 def test_keyword_scan_fallback_matches_uri_and_metadata_keywords(tmp_path, monkeypatch) -> None:
