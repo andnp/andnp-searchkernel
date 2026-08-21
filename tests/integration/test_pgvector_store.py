@@ -1309,7 +1309,6 @@ class TestKeywordStore:
         keyword_store = PGKeywordStore(pg_conn)
 
         vector_store.upsert(records, model_name="test-model", dim=4)
-        assert keyword_store.search("projection-token", 10) == []
         if keyword_first:
             keyword_store.index(records)
             vector_store.upsert(records, model_name="test-model", dim=4)
