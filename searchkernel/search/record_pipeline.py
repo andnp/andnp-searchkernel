@@ -118,7 +118,9 @@ class RecordSearchQueryContext(Mapping[str, object]):
 
     The optional ``retrieval_mode`` filter defaults to ``"hybrid"``. An
     application may set it to ``"semantic"`` (or ``"semantic_only"``) to
-    retain vector retrieval while disabling keyword and graph lanes.
+    retain vector retrieval while disabling keyword and graph lanes, or to
+    ``"keyword_only"`` to retain keyword retrieval while disabling the
+    vector and graph lanes. The two modes are mutually exclusive.
     """
 
     query: str
@@ -247,6 +249,7 @@ class _SearchExecution:
     trace: QueryTrace | None = None
     candidate_key: CandidateCacheKey | None = None
     semantic_only: bool = False
+    keyword_only: bool = False
 
     @property
     def routed_plan(self) -> QueryPlan:
@@ -515,7 +518,7 @@ class RecordSearchPipeline:
         )
         filters = dict(filters or {})
         filters.setdefault("statuses", ["active"])
-        semantic_only = _semantic_only_requested(filters)
+        semantic_only, keyword_only = _retrieval_mode_flags(filters)
         query_context = RecordSearchQueryContext(
             query=query,
             filters=filters,
@@ -534,6 +537,7 @@ class RecordSearchPipeline:
             raw_pre_fusion_overlap=raw_pre_fusion_overlap,
             trace=trace,
             semantic_only=semantic_only,
+            keyword_only=keyword_only,
         )
 
     def _plan_query(self, execution: _SearchExecution) -> None:
@@ -543,15 +547,22 @@ class RecordSearchPipeline:
         acquisition, fusion, and re-fusion decision downstream.
         """
         semantic_only = execution.semantic_only
+        keyword_only = execution.keyword_only
         plan = self._router.route(
             execution.query,
             limit=execution.limit,
             keyword_available=(
                 self._keyword_store is not None and not semantic_only
             ),
-            vector_available=self._vector_store is not None,
-            graph_available=self._graph_store is not None and not semantic_only,
-            graph_enabled=self._config.graph_enabled and not semantic_only,
+            vector_available=self._vector_store is not None and not keyword_only,
+            graph_available=(
+                self._graph_store is not None
+                and not semantic_only
+                and not keyword_only
+            ),
+            graph_enabled=(
+                self._config.graph_enabled and not semantic_only and not keyword_only
+            ),
             rerank_available=self._reranker is not None,
         )
         execution.plan = plan
@@ -809,13 +820,16 @@ class RecordSearchPipeline:
         ):
             return
         semantic_only = execution.semantic_only
+        keyword_only = execution.keyword_only
         adaptive_plan = self._router.route(
             execution.query,
             limit=execution.limit,
             keyword_available=self._keyword_store is not None,
             vector_available=self._vector_store is not None,
             graph_available=self._graph_store is not None,
-            graph_enabled=self._config.graph_enabled and not semantic_only,
+            graph_enabled=(
+                self._config.graph_enabled and not semantic_only and not keyword_only
+            ),
             adaptive_graph_ready=self._adaptive_graph_ready(
                 execution.base_candidates
             ),
@@ -1166,8 +1180,11 @@ class RecordSearchPipeline:
         """Return deterministic hydrated results for ``query``.
 
         ``filters["retrieval_mode"]`` accepts ``"hybrid"`` (the default),
-        ``"semantic"``, or ``"semantic_only"``. Semantic-only requests keep
-        vector retrieval and disable keyword and graph retrieval.
+        ``"semantic"``, ``"semantic_only"``, or ``"keyword_only"``.
+        Semantic-only requests keep vector retrieval and disable keyword
+        and graph retrieval; keyword-only requests keep keyword retrieval
+        and disable vector and graph retrieval. The two modes are
+        mutually exclusive.
         """
         execution = self._begin_search(query, limit, filters)
         if execution is None:
@@ -2567,19 +2584,28 @@ def _raw_pre_fusion_overlap(
     return DiagnosticCapability(state="available", count=len(overlap))
 
 
-def _semantic_only_requested(filters: Mapping[str, object]) -> bool:
+def _retrieval_mode_flags(filters: Mapping[str, object]) -> tuple[bool, bool]:
+    """Parse ``retrieval_mode`` into ``(semantic_only, keyword_only)`` flags.
+
+    The two modes are mutually exclusive: each disables the other two
+    lanes while retaining its own.
+    """
     mode = filters.get("retrieval_mode", "hybrid")
     if not isinstance(mode, str):
         raise TypeError(
-            "retrieval_mode must be 'hybrid', 'semantic', or 'semantic_only'"
+            "retrieval_mode must be 'hybrid', 'semantic', 'semantic_only', "
+            "or 'keyword_only'"
         )
     normalized_mode = mode.strip().lower()
     if normalized_mode == "hybrid":
-        return False
+        return False, False
     if normalized_mode in {"semantic", "semantic_only"}:
-        return True
+        return True, False
+    if normalized_mode == "keyword_only":
+        return False, True
     raise ValueError(
-        "retrieval_mode must be 'hybrid', 'semantic', or 'semantic_only'"
+        "retrieval_mode must be 'hybrid', 'semantic', 'semantic_only', "
+        "or 'keyword_only'"
     )
 
 
