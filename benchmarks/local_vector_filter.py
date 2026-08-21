@@ -67,6 +67,8 @@ def _generic_mask(
     filters: dict[str, object],
 ) -> np.ndarray:
     predicate = compile_vector_filters(filters)
+    metadata = snapshot.metadata or ({} for _ in snapshot.storage_keys)
+    uris = snapshot.uris or (None for _ in snapshot.storage_keys)
     return np.asarray(
         [
             predicate.matches(
@@ -86,8 +88,8 @@ def _generic_mask(
                 snapshot.workspace_ids,
                 snapshot.source_kinds,
                 snapshot.statuses,
-                snapshot.metadata,
-                snapshot.uris,
+                metadata,
+                uris,
                 strict=True,
             )
         ],
