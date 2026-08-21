@@ -367,6 +367,26 @@ def test_local_graph_neighbors_chunks_dense_frontier_beyond_hop(tmp_path) -> Non
     assert GraphNeighbor(sink.identity, "hop2", 5.0) in neighbors
 
 
+def test_local_graph_neighbors_many_chunks_dense_owner_keys(tmp_path) -> None:
+    """Many seeds sharing a hop's owner-key set must not exceed the variable limit."""
+    backend, _keyword, _vector, graph = _backend(tmp_path)
+    backend._access.connection().setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    seed_count = 1_500
+    seeds = [_record("note", f"seed-{index:04d}", "seed") for index in range(seed_count)]
+    sink = _record("note", "sink", "sink")
+    backend.index([*seeds, sink])
+    graph.upsert_edges(
+        [(seed.storage_key, sink.storage_key, "hop1", 1.0) for seed in seeds]
+    )
+
+    result = graph.neighbors_many([seed.identity for seed in seeds], depth=1)
+
+    assert all(
+        result[seed.storage_key] == [GraphNeighbor(sink.identity, "hop1", 1.0)]
+        for seed in seeds
+    )
+
+
 def test_local_graph_top_neighbors_are_bounded_and_deterministic(tmp_path) -> None:
     backend, _keyword, _vector, graph = _backend(tmp_path)
     source = _record("note", "source", "source")

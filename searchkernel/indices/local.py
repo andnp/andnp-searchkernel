@@ -450,17 +450,23 @@ class _GraphEngine:
                         owners.setdefault(source_key, []).append(seed_key)
                 if not owners:
                     break
-                placeholders = ",".join("?" for _ in owners)
-                rows = conn.execute(
-                    f"""
-                    SELECT e.source_id, e.target_id, e.edge_type, e.weight
-                    FROM local_graph_edges e
-                    JOIN local_records target_record
-                        ON target_record.storage_key = e.{target_column}
-                    WHERE e.{source_column} IN ({placeholders})
-                    """,
-                    tuple(owners),
-                ).fetchall()
+                rows: list[sqlite3.Row] = []
+                for key_chunk in iter_ordered_key_chunks(
+                    owners, limit=DEFAULT_KEY_CHUNK_LIMIT
+                ):
+                    placeholders = ",".join("?" for _ in key_chunk)
+                    rows.extend(
+                        conn.execute(
+                            f"""
+                            SELECT e.source_id, e.target_id, e.edge_type, e.weight
+                            FROM local_graph_edges e
+                            JOIN local_records target_record
+                                ON target_record.storage_key = e.{target_column}
+                            WHERE e.{source_column} IN ({placeholders})
+                            """,
+                            key_chunk,
+                        ).fetchall()
+                    )
                 next_frontiers = {seed_key: set() for seed_key in seed_keys}
                 for row in rows:
                     try:
