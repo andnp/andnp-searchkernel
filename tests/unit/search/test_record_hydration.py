@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from searchkernel.domain import Record, RecordIdentity, SearchResultProvenance
-from searchkernel.ports.search_results import RecordSearchFailure
+from searchkernel.ports.search_results import FailureStage, RecordSearchFailure
 from searchkernel.runtime import HydrationCache, HydrationCacheKey
 from searchkernel.search.record_hydration import RecordHydrationCoordinator
 from searchkernel.search.record_pipeline import (
@@ -62,7 +62,7 @@ def _coordinator(
 
 
 def _lenient_error_handler(
-    stage: str, error: Exception, failures: list[RecordSearchFailure]
+    stage: FailureStage, error: Exception, failures: list[RecordSearchFailure]
 ) -> None:
     failures.append(RecordSearchFailure(stage, str(error), type(error).__name__))
 
@@ -236,7 +236,9 @@ async def test_batch_failures_follow_handler_mode_and_mutate_failures(
         raise error
 
     def handle_error(
-        stage: str, failure: Exception, target: list[RecordSearchFailure]
+        stage: FailureStage,
+        failure: Exception,
+        target: list[RecordSearchFailure],
     ) -> None:
         if failure_mode == "strict":
             raise RecordSearchError(stage, failure)
