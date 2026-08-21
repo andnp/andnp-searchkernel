@@ -1221,14 +1221,20 @@ class PGVectorStore:
                 )
 
             # Upsert only vector rows whose revision or payload differs.
-            vector_rows = [
-                (
-                    record.storage_key,
-                    _vector_literal(record.embedding),
-                    record_embedding_revision(record, model_name, dim),
+            vector_rows = []
+            for record in records:
+                embedding = record.embedding
+                if embedding is None:
+                    raise ValueError(
+                        f"Record {record.storage_key} must have an embedding"
+                    )
+                vector_rows.append(
+                    (
+                        record.storage_key,
+                        _vector_literal(embedding),
+                        record_embedding_revision(record, model_name, dim),
+                    )
                 )
-                for record in records
-            ]
             table_sql = self._sql.Identifier(table_name).as_string(cursor)
             vector_insert_sql = f"""
                 INSERT INTO {table_sql} AS existing (record_id, embedding, revision)
