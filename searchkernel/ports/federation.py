@@ -113,6 +113,14 @@ def _positive_int(value: object, name: str, *, maximum: int | None = None) -> in
     return value
 
 
+def _non_negative_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return value
+
+
 def _non_negative_float(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{name} must be a number")
@@ -502,12 +510,15 @@ class SearchDiagnostics(_JsonContract):
         )
         candidate_counts = value.get("candidate_counts", {})
         stage_timings = value.get("stage_timings_ms", {})
+        candidate_count = value.get("candidate_count")
+        if candidate_count is not None:
+            candidate_count = _non_negative_int(candidate_count, "candidate_count")
         if not isinstance(candidate_counts, Mapping):
             raise TypeError("candidate_counts must be an object")
         if not isinstance(stage_timings, Mapping):
             raise TypeError("stage_timings_ms must be an object")
         return cls(
-            candidate_count=value.get("candidate_count"),
+            candidate_count=candidate_count,
             candidate_counts=dict(candidate_counts),
             failures=_string_tuple(value.get("failures", ()), "failures"),
             stage_timings_ms=dict(stage_timings),
