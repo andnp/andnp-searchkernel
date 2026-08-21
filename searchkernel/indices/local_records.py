@@ -117,19 +117,25 @@ class _RecordWriter:
             return False
         parent_keys = sorted({row[1] for row in chunk_rows})
         incoming_keys = {row[0] for row in chunk_rows}
-        placeholders = ",".join("?" for _ in parent_keys)
-        stale_rows = conn.execute(
-            f"""
-            SELECT r.storage_key, r.rowid, r.title, r.body, r.indexed_text, r.uri, r.keywords
-            FROM local_records r
-            WHERE r.storage_key IN (
-                SELECT chunk_storage_key
-                FROM local_chunk_state
-                WHERE parent_storage_key IN ({placeholders})
+        stale_rows: list[sqlite3.Row] = []
+        for key_chunk in iter_ordered_key_chunks(
+            parent_keys, limit=DEFAULT_KEY_CHUNK_LIMIT
+        ):
+            placeholders = ",".join("?" for _ in key_chunk)
+            stale_rows.extend(
+                conn.execute(
+                    f"""
+                    SELECT r.storage_key, r.rowid, r.title, r.body, r.indexed_text, r.uri, r.keywords
+                    FROM local_records r
+                    WHERE r.storage_key IN (
+                        SELECT chunk_storage_key
+                        FROM local_chunk_state
+                        WHERE parent_storage_key IN ({placeholders})
+                    )
+                    """,
+                    key_chunk,
+                ).fetchall()
             )
-            """,
-            parent_keys,
-        ).fetchall()
         stale_rows = [row for row in stale_rows if row["storage_key"] not in incoming_keys]
         if self._fts5_available() and stale_rows:
             conn.executemany(

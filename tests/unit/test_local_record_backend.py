@@ -275,6 +275,37 @@ def test_chunk_replacement_removes_stale_records_from_search_and_state(tmp_path)
     assert list(backend.chunk_records(parent.identity)) == [replacement.storage_key]
 
 
+def test_chunk_replacement_chunks_large_parent_key_lists(tmp_path) -> None:
+    """Replacing chunks across >999 parents must not exceed the variable limit."""
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend._access.connection().setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    parent_count = 1_500
+    parents = [_record("note", f"parent-{index:04d}", "parent body") for index in range(parent_count)]
+
+    def chunk(parent: Record, chunk_id: str, content: str) -> Record:
+        return _record(
+            "note",
+            f"{parent.source_id}#chunk:{chunk_id}",
+            content,
+            indexed_text=content,
+            metadata={
+                "_searchkernel_chunk": True,
+                "_chunk_parent_storage_key": parent.storage_key,
+                "_chunk_id": chunk_id,
+                "_chunk_index": 0,
+                "_chunk_metadata": {},
+            },
+        )
+
+    stale_chunks = [chunk(parent, "stale", "stale needle") for parent in parents]
+    replacement_chunks = [chunk(parent, "replacement", "replacement needle") for parent in parents]
+    backend.index([*parents, *stale_chunks])
+    backend.index([*parents, *replacement_chunks])
+
+    assert backend.search_keyword("stale", 10) == []
+    assert len(backend.search_keyword("replacement", parent_count)) == parent_count
+
+
 def test_local_batch_hydration_and_graph_preserve_canonical_keys(tmp_path) -> None:
     backend, _keyword, _vector, graph = _backend(tmp_path)
     source = _record("note", "source", "source", workspace_id="one")
