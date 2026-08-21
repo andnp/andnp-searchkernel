@@ -271,6 +271,14 @@ class _SearchExecution:
             raise RuntimeError("search has no query context")
         return context
 
+    @property
+    def raw_pre_fusion_overlap_value(self) -> DiagnosticCapability:
+        """The computed raw-overlap diagnostic for this execution."""
+        capability = self.raw_pre_fusion_overlap
+        if capability is None:
+            raise RuntimeError("search has no raw-overlap diagnostic")
+        return capability
+
 
 class RecordSearchError(RuntimeError):
     """Raised when strict retrieval cannot complete a pipeline stage."""
@@ -1234,7 +1242,7 @@ class RecordSearchPipeline:
                     for result in hydrated
                 },
                 final_duplicate_count=_duplicate_count(hydrated),
-                raw_pre_fusion_overlap=execution.raw_pre_fusion_overlap,
+                raw_pre_fusion_overlap=execution.raw_pre_fusion_overlap_value,
             ),
         )
 
