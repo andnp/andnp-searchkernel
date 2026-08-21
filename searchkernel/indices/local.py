@@ -106,6 +106,16 @@ _VECTOR_GATHER_SELECTIVITY_THRESHOLD = 0.3
 logger = logging.getLogger(__name__)
 
 
+def _quote_sql_text_literal(value: Any) -> str:
+    """Quote a value as a SQL text literal, escaping embedded quotes.
+
+    Used only for the overflow chunks of a large IN filter, where binding
+    another placeholder would still count against SQLite's per-statement
+    variable limit even inside an OR-ed group.
+    """
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 def _fuzzy_term_score(query_term: str, tokens: Sequence[str]) -> float:
     candidates = (
         token
@@ -1227,8 +1237,22 @@ class _KeywordEngine:
         column: str,
         values: Sequence[Any],
     ) -> None:
-        clauses.append(f"{column} IN ({', '.join('?' for _ in values)})")
-        parameters.extend(values)
+        chunks = [
+            values[start : start + DEFAULT_KEY_CHUNK_LIMIT]
+            for start in range(0, len(values), DEFAULT_KEY_CHUNK_LIMIT)
+        ]
+        groups: list[str] = []
+        for index, chunk in enumerate(chunks):
+            if index == 0:
+                groups.append(f"{column} IN ({', '.join('?' for _ in chunk)})")
+                parameters.extend(chunk)
+            else:
+                # SQLite's variable-count limit applies to the whole
+                # statement, so OR-ing further bound placeholders would
+                # not avoid it; overflow chunks are quoted literals instead.
+                literals = ", ".join(_quote_sql_text_literal(v) for v in chunk)
+                groups.append(f"{column} IN ({literals})")
+        clauses.append("(" + " OR ".join(groups) + ")")
 
     def _append_keyword_path_filter(
         self,

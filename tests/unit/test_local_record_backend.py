@@ -679,6 +679,34 @@ def test_keyword_fuzzy_search_bounds_rescan_below_fallback_scan_cap(tmp_path) ->
     assert backend.search_keyword("reciprocol rankk fusoin", 10) == []
 
 
+def test_keyword_search_chunks_large_in_filter_value_lists(tmp_path) -> None:
+    """An IN-filter with more than 999 values must not exceed the variable limit.
+
+    "note" and "kind's" sit past the first chunk boundary, in the region
+    emitted as quoted literals rather than bound placeholders, so this also
+    exercises literal-escaping for an apostrophe in that overflow region.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend._access.connection().setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    backend.index(
+        [
+            _record("note", "matched", "alpha content"),
+            _record("kind's", "quoted", "alpha content"),
+        ]
+    )
+
+    source_kinds = [
+        f"kind-{index:04d}" for index in range(1_500)
+    ] + ["note", "kind's"]
+
+    assert {
+        hit.source_id
+        for hit in backend.search_keyword(
+            "alpha", 10, {"source_kinds": source_kinds}
+        )
+    } == {"matched", "quoted"}
+
+
 def test_keyword_search_applies_filters_to_natural_language_fallback(tmp_path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     records = [
