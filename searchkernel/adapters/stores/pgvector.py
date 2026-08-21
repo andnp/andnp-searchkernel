@@ -14,7 +14,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, LiteralString, Protocol
 
 try:
     import psycopg2  # type: ignore[import-not-found]
@@ -28,8 +28,10 @@ except ImportError:
 try:
     import psycopg  # type: ignore[import-not-found]
     import psycopg_pool  # type: ignore[import-not-found]
+    from psycopg import sql as psycopg3_sql
 except ImportError:
     psycopg = None  # type: ignore[assignment]
+    psycopg3_sql = None
     psycopg_pool = None  # type: ignore[assignment]
 
 
@@ -49,6 +51,24 @@ def _require_psycopg3():
             "Install with: pip install 'andnp-searchkernel[pgvector-psycopg3]'"
         )
     return psycopg
+
+
+def _require_psycopg2_sql():
+    if sql is None:
+        raise ImportError(
+            "psycopg2 is required for PostgreSQL SQL composition. "
+            "Install with: pip install 'andnp-searchkernel[pgvector]'"
+        )
+    return sql
+
+
+def _require_psycopg3_sql():
+    if psycopg3_sql is None:
+        raise ImportError(
+            "psycopg3 is required for PostgreSQL SQL composition. "
+            "Install with: pip install 'andnp-searchkernel[pgvector-psycopg3]'"
+        )
+    return psycopg3_sql
 
 from searchkernel.adapters.stores.postgres_epochs import (
     _POSTGRES_EPOCH_LANE,
@@ -734,7 +754,7 @@ class Psycopg3Connection:
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute(sql, params)
+            cursor.execute(sql.encode("utf-8"), params)
             result = cursor.fetchall() if cursor.description is not None else []
             cursor.close()
             conn.commit()
@@ -754,15 +774,139 @@ class Psycopg3Connection:
 
 
 
-def _sql_module_for(conn_pool: _PostgresConnectionLike):
-    """Return the SQL builder module matching the connection pool's driver.
+class _SQLFragment(Protocol):
+    value: object
 
-    For psycopg3 connections, returns psycopg.sql; otherwise returns psycopg2.sql.
-    This ensures all Composed objects created by PGVectorStore match the cursor's driver.
-    """
+    def format(
+        self, *args: _SQLFragment, **kwargs: _SQLFragment
+    ) -> _SQLFragment: ...
+
+    def join(self, values: Sequence[_SQLFragment]) -> _SQLFragment: ...
+
+    def as_string(self, cursor) -> str: ...
+
+
+class _SQLBuilder(Protocol):
+    def SQL(self, value: LiteralString) -> _SQLFragment: ...
+
+    def Identifier(self, *values: str) -> _SQLFragment: ...
+
+    def Integer(self, value: int) -> _SQLFragment: ...
+
+
+def _psycopg2_composable(value: object):
+    composable_type = _require_psycopg2_sql().Composable
+    if not isinstance(value, composable_type):
+        raise TypeError("psycopg2 SQL fragments cannot be mixed with psycopg3")
+    return value
+
+
+def _psycopg2_sql(value: object):
+    sql_type = _require_psycopg2_sql().SQL
+    if not isinstance(value, sql_type):
+        raise TypeError("psycopg2 SQL formatting requires an SQL template")
+    return value
+
+
+def _psycopg3_composable(value: object):
+    composable_type = _require_psycopg3_sql().Composable
+    if not isinstance(value, composable_type):
+        raise TypeError("psycopg3 SQL fragments cannot be mixed with psycopg2")
+    return value
+
+
+def _psycopg3_sql(value: object):
+    sql_type = _require_psycopg3_sql().SQL
+    if not isinstance(value, sql_type):
+        raise TypeError("psycopg3 SQL formatting requires an SQL template")
+    return value
+
+
+class _Psycopg2Fragment:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def format(
+        self, *args: _SQLFragment, **kwargs: _SQLFragment
+    ) -> _SQLFragment:
+        positional = [_psycopg2_composable(fragment.value) for fragment in args]
+        named = {
+            name: _psycopg2_composable(fragment.value)
+            for name, fragment in kwargs.items()
+        }
+        return _Psycopg2Fragment(
+            _psycopg2_sql(self.value).format(*positional, **named)
+        )
+
+    def join(self, values: Sequence[_SQLFragment]) -> _SQLFragment:
+        return _Psycopg2Fragment(
+            _psycopg2_sql(self.value).join(
+                [_psycopg2_composable(value.value) for value in values]
+            )
+        )
+
+    def as_string(self, cursor) -> str:
+        return _psycopg2_composable(self.value).as_string(cursor)
+
+
+class _Psycopg3Fragment:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def format(
+        self, *args: _SQLFragment, **kwargs: _SQLFragment
+    ) -> _SQLFragment:
+        positional = [_psycopg3_composable(fragment.value) for fragment in args]
+        named = {
+            name: _psycopg3_composable(fragment.value)
+            for name, fragment in kwargs.items()
+        }
+        return _Psycopg3Fragment(
+            _psycopg3_sql(self.value).format(*positional, **named)
+        )
+
+    def join(self, values: Sequence[_SQLFragment]) -> _SQLFragment:
+        return _Psycopg3Fragment(
+            _psycopg3_sql(self.value).join(
+                [_psycopg3_composable(value.value) for value in values]
+            )
+        )
+
+    def as_string(self, cursor) -> str:
+        return _psycopg3_composable(self.value).as_string(cursor)
+
+
+class _Psycopg2SQLBuilder:
+    def SQL(self, value: LiteralString) -> _SQLFragment:
+        return _Psycopg2Fragment(_require_psycopg2_sql().SQL(value))
+
+    def Identifier(self, *values: str) -> _SQLFragment:
+        return _Psycopg2Fragment(_require_psycopg2_sql().Identifier(*values))
+
+    def Integer(self, value: int) -> _SQLFragment:
+        return _Psycopg2Fragment(_require_psycopg2_sql().SQL(str(value)))
+
+
+class _Psycopg3SQLBuilder:
+    def SQL(self, value: LiteralString) -> _SQLFragment:
+        return _Psycopg3Fragment(_require_psycopg3_sql().SQL(value))
+
+    def Identifier(self, *values: str) -> _SQLFragment:
+        return _Psycopg3Fragment(_require_psycopg3_sql().Identifier(*values))
+
+    def Integer(self, value: int) -> _SQLFragment:
+        return _Psycopg3Fragment(
+            _require_psycopg3_sql().SQL("{}").format(
+                _require_psycopg3_sql().Literal(value)
+            )
+        )
+
+
+def _sql_module_for(conn_pool: _PostgresConnectionLike) -> _SQLBuilder:
+    """Return a driver-specific SQL builder for the connection pool."""
     if isinstance(conn_pool, Psycopg3Connection):
-        return psycopg.sql
-    return sql
+        return _Psycopg3SQLBuilder()
+    return _Psycopg2SQLBuilder()
 
 
 class PGVectorStore:
@@ -951,7 +1095,10 @@ class PGVectorStore:
                 "created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, "
                 "updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"
                 ");"
-            ).format(table=self._sql.Identifier(table_name), dim=self._sql.SQL(str(int(dim))))
+            ).format(
+                table=self._sql.Identifier(table_name),
+                dim=self._sql.Integer(dim),
+            )
         )
         cursor.execute(
             self._sql.SQL(
@@ -1216,15 +1363,15 @@ class PGVectorStore:
 
             # Order by the raw distance operator (not a wrapped/aliased
             # expression) so the planner can use the HNSW index for ANN.
-            query_sql = self._sql.SQL(
-                "SELECT r.workspace_id, r.source_kind, r.source_id, "
-                "v.embedding <=> %s::vector AS distance "
-                "FROM {table} v "
-                "JOIN records r ON v.record_id = r.record_id "
-                "WHERE 1 = 1 " + where_clause + " "
-                "ORDER BY v.embedding <=> %s::vector ASC, v.record_id ASC "
-                "LIMIT %s;"
-            ).format(table=self._sql.Identifier(table_name))
+            query_sql = f"""
+                SELECT r.workspace_id, r.source_kind, r.source_id,
+                       v.embedding <=> %s::vector AS distance
+                FROM {table_name} v
+                JOIN records r ON v.record_id = r.record_id
+                WHERE 1 = 1 {where_clause}
+                ORDER BY v.embedding <=> %s::vector ASC, v.record_id ASC
+                LIMIT %s;
+                """
 
             results: list[Any] = []
             scan_limits = bounded_scan_limits(
@@ -1239,7 +1386,10 @@ class PGVectorStore:
                 scan_rounds += 1
                 last_scan_limit = scan_limit
                 params = [vec_literal, *filter_params, vec_literal, scan_limit]
-                cursor.execute(query_sql, params)
+                if isinstance(self.conn_pool, Psycopg3Connection):
+                    cursor.execute(query_sql.encode("utf-8"), params)
+                else:
+                    cursor.execute(query_sql, params)
                 results = cursor.fetchall()
                 if len(results) >= k or scan_limit >= self.hnsw_max_scan_tuples:
                     break
