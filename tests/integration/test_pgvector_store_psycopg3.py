@@ -11,6 +11,7 @@ from typing import cast
 
 import pytest
 from psycopg.errors import NotNullViolation
+from psycopg.sql import SQL, Identifier
 
 from searchkernel.adapters.stores.pgvector import (
     PGGraphStore,
@@ -55,7 +56,9 @@ def pg_conn(pg_dsn, request):
     bootstrap_pool = Psycopg3Connection(pg_dsn, min_connections=1, max_connections=1)
     bootstrap_conn = bootstrap_pool.get_connection()
     bootstrap_cursor = bootstrap_conn.cursor()
-    bootstrap_cursor.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}";')
+    bootstrap_cursor.execute(
+        SQL("CREATE SCHEMA IF NOT EXISTS {};").format(Identifier(schema))
+    )
     bootstrap_conn.commit()
     bootstrap_cursor.close()
     bootstrap_pool.put_connection(bootstrap_conn)
@@ -70,7 +73,7 @@ def pg_conn(pg_dsn, request):
 
     cursor.execute("SELECT table_name FROM vector_tables;")
     for (table_name,) in cursor.fetchall():
-        cursor.execute(f'DROP TABLE IF EXISTS "{table_name}";')
+        cursor.execute(SQL("DROP TABLE IF EXISTS {};").format(Identifier(table_name)))
 
     cursor.execute("DELETE FROM vector_tables;")
     cursor.execute("DELETE FROM records;")
