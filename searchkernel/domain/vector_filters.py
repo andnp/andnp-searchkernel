@@ -243,6 +243,20 @@ class CompiledVectorFilter:
     metadata_in: tuple[tuple[str, frozenset[str]], ...] | None
     source_scoped_filters: tuple[SourceScopedFilter, ...]
 
+    @property
+    def requires_metadata(self) -> bool:
+        return bool(
+            self.source_scoped_filters
+            or self.project_values is not None
+            or self.excluded_projects is not None
+            or self.included_paths is not None
+            or self.excluded_paths is not None
+            or self.document_values is not None
+            or self.excluded_documents is not None
+            or self.metadata_equals is not None
+            or self.metadata_in is not None
+        )
+
     def matches(
         self,
         *,
@@ -270,6 +284,9 @@ class CompiledVectorFilter:
             and storage_key in self.excluded_storage_keys
         ):
             return False
+
+        if not self.requires_metadata:
+            return True
 
         metadata = metadata_mapping(metadata)
         scoped_filters = [

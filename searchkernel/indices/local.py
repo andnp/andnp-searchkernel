@@ -219,7 +219,7 @@ def _matches_compiled_vector_filter(
         workspace_id=row["workspace_id"],
         source_kind=row["source_kind"],
         status=row["status"],
-        metadata=metadata_mapping(row["metadata"]),
+        metadata=(row["metadata"] if predicate.requires_metadata else None),
         uri=row["uri"],
     )
 
