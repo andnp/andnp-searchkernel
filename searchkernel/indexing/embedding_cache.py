@@ -56,12 +56,13 @@ class SQLiteEmbeddingCache:
 
     @property
     def metrics(self) -> EmbeddingCacheMetrics:
-        return EmbeddingCacheMetrics(
-            hits=self._hits,
-            misses=self._misses,
-            writes=self._writes,
-            invalidations=self._invalidations,
-        )
+        with self._lock:
+            return EmbeddingCacheMetrics(
+                hits=self._hits,
+                misses=self._misses,
+                writes=self._writes,
+                invalidations=self._invalidations,
+            )
 
     def get_many(self, content_hashes: Sequence[str]) -> Mapping[str, Sequence[float]]:
         """Return valid vectors for this encoder namespace."""
