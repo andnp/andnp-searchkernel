@@ -132,6 +132,7 @@ def test_local_vector_schema_repairs_legacy_rows_on_replacement(tmp_path: Path) 
         )
         """
     )
+    assert record.embedding is not None
     conn.execute(
         """
         INSERT INTO local_vectors_v2
@@ -263,6 +264,7 @@ def _filter_snapshot() -> VectorSnapshot:
             uri=f"/docs/{index}.md",
             embedding=[1.0, 0.0],
         )
+        assert record.embedding is not None
         rows.append(
             {
                 "storage_key": record.storage_key,
@@ -627,6 +629,7 @@ def test_large_mixed_vector_upsert_writes_only_changed_rows(tmp_path: Path) -> N
         """,
         (records[2].storage_key,),
     ).fetchone()
+    assert records[2].embedding is not None
     assert tuple(repaired) == (
         PackedVectorCodec.encode(records[2].embedding, 2),
         record_embedding_revision(records[2], "model", 2),
