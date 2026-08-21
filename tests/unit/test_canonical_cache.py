@@ -267,6 +267,7 @@ def test_candidate_key_separates_source_scoped_authorization_variants() -> None:
 
 
 def test_candidate_cache_is_bounded_and_defensive() -> None:
+    """Keep generic cached values isolated from producer and caller mutation."""
     cache: CandidateResultCache[list[str]] = CandidateResultCache(max_entries=1)
     key = CandidateCacheKey.build(
         query="query",
@@ -305,7 +306,10 @@ def test_candidate_cache_isolates_mutable_candidate_provenance() -> None:
         policy_version=None,
     )
     identity = RecordIdentity("workspace", "note", "1")
-    provenance = SearchResultProvenance(record_identity=identity)
+    provenance = SearchResultProvenance(
+        record_identity=identity,
+        parent_expanded_from="parent",
+    )
     provenance.add_strategy("keyword", 1, 1.0)
     cache.set(
         key,
@@ -314,6 +318,7 @@ def test_candidate_cache_isolates_mutable_candidate_provenance() -> None:
                 identity=identity,
                 score=1.0,
                 provenance=provenance,
+                priority=2,
             ),
         ),
     )
@@ -326,9 +331,16 @@ def test_candidate_cache_isolates_mutable_candidate_provenance() -> None:
     cached = cache.get(key)
     assert cached is not None
     cached[0].provenance.strategy_details.clear()
+    cached[0].provenance.record_identity = None
+    cached[0].provenance.parent_expanded_from = "mutated"
 
     stored = cache.get(key)
     assert stored is not None
+    assert stored[0].identity == identity
+    assert stored[0].score == 1.0
+    assert stored[0].priority == 2
+    assert stored[0].provenance.record_identity == identity
+    assert stored[0].provenance.parent_expanded_from == "parent"
     assert stored[0].provenance.strategies == ("keyword",)
     assert stored[0].provenance.strategy_details["keyword"].rank == 1
 

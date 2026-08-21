@@ -15,9 +15,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
 from threading import Lock, RLock
-from typing import TypeVar
+from typing import Protocol, TypeGuard, TypeVar, overload, runtime_checkable
 
-from searchkernel.domain import RecordIdentity
+from searchkernel.domain import RecordIdentity, SearchResultProvenance
 from searchkernel.ports.epochs import SearchEpochs
 
 
@@ -121,6 +121,51 @@ ValueT = TypeVar("ValueT")
 KeyT = TypeVar("KeyT")
 
 
+@runtime_checkable
+class _SearchCandidateContract(Protocol):
+    identity: RecordIdentity
+    score: float
+    provenance: SearchResultProvenance
+    priority: int
+
+
+def _is_search_candidate(
+    value: object,
+) -> TypeGuard[_SearchCandidateContract]:
+    value_type = type(value)
+    return (
+        isinstance(value, _SearchCandidateContract)
+        and value_type.__module__ == "searchkernel.search.record_pipeline"
+        and value_type.__qualname__ == "RecordSearchCandidate"
+    )
+
+
+@overload
+def _clone_candidate_cache_value(
+    value: tuple[_SearchCandidateContract, ...],
+) -> tuple[_SearchCandidateContract, ...]: ...
+
+
+@overload
+def _clone_candidate_cache_value[T](value: T) -> T: ...
+
+
+def _clone_candidate_cache_value(value: object) -> object:
+    if isinstance(value, tuple) and value and all(
+        _is_search_candidate(candidate) for candidate in value
+    ):
+        return tuple(
+            type(candidate)(
+                identity=candidate.identity,
+                score=candidate.score,
+                provenance=candidate.provenance.clone(),
+                priority=candidate.priority,
+            )
+            for candidate in value
+        )
+    return copy.deepcopy(value)
+
+
 @dataclass(frozen=True, slots=True)
 class BoundedCacheMetrics:
     """Counters for a bounded cache."""
@@ -143,6 +188,7 @@ class _BoundedCache[ValueT]:
         max_entries: int,
         ttl_seconds: float,
         clock: Callable[[], float] = time.monotonic,
+        clone: Callable[[ValueT], ValueT] = copy.deepcopy,
     ) -> None:
         if max_entries < 1:
             raise ValueError("max_entries must be >= 1")
@@ -151,6 +197,7 @@ class _BoundedCache[ValueT]:
         self._max_entries = max_entries
         self._ttl_seconds = ttl_seconds
         self._clock = clock
+        self._clone = clone
         self._entries: OrderedDict[object, tuple[float, ValueT]] = OrderedDict()
         self._lock = Lock()
         self._hits = 0
@@ -182,13 +229,13 @@ class _BoundedCache[ValueT]:
                 return None
             self._entries.move_to_end(key)
             self._hits += 1
-            return copy.deepcopy(value)
+            return self._clone(value)
 
     def set(self, key: object, value: ValueT) -> None:
         with self._lock:
             self._entries[key] = (
                 self._clock() + self._ttl_seconds,
-                copy.deepcopy(value),
+                self._clone(value),
             )
             self._entries.move_to_end(key)
             while len(self._entries) > self._max_entries:
@@ -210,6 +257,7 @@ class CandidateResultCache[ValueT]:
             max_entries=max_entries,
             ttl_seconds=ttl_seconds,
             clock=clock,
+            clone=_clone_candidate_cache_value,
         )
         self._inflight: dict[CandidateCacheKey, _InFlight[ValueT]] = {}
         self._flight_lock = Lock()
@@ -244,7 +292,9 @@ class CandidateResultCache[ValueT]:
                 inflight,
             )
             return True, None
-        return False, await _wait_for_inflight(inflight)
+        return False, await _wait_for_inflight(
+            inflight, clone=_clone_candidate_cache_value
+        )
 
     async def async_get_or_compute(
         self,
@@ -257,11 +307,13 @@ class CandidateResultCache[ValueT]:
             return cached
         inflight, leader = self._start_or_join(key)
         if not leader:
-            return await _wait_for_inflight(inflight)
+            return await _wait_for_inflight(
+                inflight, clone=_clone_candidate_cache_value
+            )
         try:
             value = await _maybe_await(compute())
             self.set(key, value)
-            return copy.deepcopy(value)
+            return _clone_candidate_cache_value(value)
         except BaseException as error:
             self._fail_inflight(key, inflight, error)
             raise
@@ -270,7 +322,7 @@ class CandidateResultCache[ValueT]:
         with self._flight_lock:
             inflight = self._inflight.pop(key, None)
         if inflight is not None:
-            _complete_success(inflight, value)
+            _complete_success(inflight, value, _clone_candidate_cache_value)
 
     def _fail_inflight(
         self,
@@ -439,8 +491,12 @@ class HydrationCache[ValueT]:
         self._fail_inflight(key, inflight, error)
 
 
-def _complete_success[T](inflight: _InFlight[T], value: T) -> None:
-    inflight.completed.set_result(copy.deepcopy(value))
+def _complete_success[T](
+    inflight: _InFlight[T],
+    value: T,
+    clone: Callable[[T], T] = copy.deepcopy,
+) -> None:
+    inflight.completed.set_result(clone(value))
 
 
 def _complete_failure[T](inflight: _InFlight[T], error: BaseException) -> None:
@@ -467,9 +523,12 @@ def _watch_single_flight_owner[KeyT, ValueT](
     owner.add_done_callback(owner_done)
 
 
-async def _wait_for_inflight[T](inflight: _InFlight[T]) -> T:
+async def _wait_for_inflight[T](
+    inflight: _InFlight[T],
+    clone: Callable[[T], T] = copy.deepcopy,
+) -> T:
     await asyncio.shield(asyncio.wrap_future(inflight.completed))
-    return copy.deepcopy(inflight.completed.result())
+    return clone(inflight.completed.result())
 
 
 async def _maybe_await[T](value: T | Awaitable[T]) -> T:
