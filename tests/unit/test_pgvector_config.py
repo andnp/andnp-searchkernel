@@ -49,16 +49,24 @@ class _BulkConnection:
     def commit(self) -> None:
         pass
 
+    def rollback(self) -> None:
+        pass
 
-class _Psycopg3Pool(Psycopg3Connection):
+
+class _BulkPool:
     def __init__(self, connection: _BulkConnection) -> None:
         self.connection = connection
 
-    def get_connection(self) -> _BulkConnection:
+    def getconn(self) -> _BulkConnection:
         return self.connection
 
-    def put_connection(self, conn: _BulkConnection) -> None:
+    def putconn(self, conn: _BulkConnection) -> None:
         pass
+
+
+class _Psycopg3Pool(Psycopg3Connection):
+    def __init__(self, connection: _BulkConnection) -> None:
+        self.pool = _BulkPool(connection)
 
 
 class _Cursor:
@@ -160,7 +168,6 @@ class _ConnectionPoolFactory:
     last_kwargs: ClassVar[dict[str, object]] = {}
 
     def __init__(self, dsn: str, **kwargs: object) -> None:
-        self.last_kwargs = kwargs
         type(self).last_kwargs = kwargs
 
 
@@ -214,9 +221,12 @@ def test_upsert_submits_records_with_one_psycopg3_bulk_call() -> None:
     assert len(vector_calls) == 1
     statement, rows = record_calls[0]
     assert "INSERT INTO records" in str(statement)
+    assert isinstance(rows, list)
+    typed_rows = [row for row in rows if isinstance(row, tuple)]
+    assert len(typed_rows) == len(rows)
     assert len(rows) == len(records)
-    assert rows[0][0] == records[0].storage_key
-    assert rows[0][10] == '{"index": 0}'
+    assert typed_rows[0][0] == records[0].storage_key
+    assert typed_rows[0][10] == '{"index": 0}'
     assert (
         sum("INSERT INTO records" in str(statement) for statement, _ in cursor.executed)
         == 0
