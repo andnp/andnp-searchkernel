@@ -704,7 +704,11 @@ class SearchRequest(_JsonContract):
         caller_value = value.get("caller")
         return cls(
             query=_string(_required(value, "query", "request"), "query"),
-            top_k=value.get("top_k", 10),
+            top_k=_positive_int(
+                value.get("top_k", 10),
+                "top_k",
+                maximum=MAX_TOP_K,
+            ),
             filters=_json_object(value.get("filters", {}), "filters"),
             source_selection=_string_tuple(
                 value.get("source_selection", ()),
