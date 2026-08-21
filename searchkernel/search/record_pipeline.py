@@ -822,12 +822,15 @@ class RecordSearchPipeline:
         ]
         execution.diagnostics.append("query_plan:graph:adaptive")
         if execution.trace is not None:
-            execution.trace.provenance["query_plan"] = {
-                "type": adaptive_plan.query_type.name.lower(),
-                "signals": adaptive_plan.signals.names,
-                "lanes": adaptive_plan.enabled_lanes,
-                "budgets": adaptive_plan.lane_budgets,
-                "skip_reasons": adaptive_plan.diagnostic_skip_reasons,
+            execution.trace.provenance = {
+                **(execution.trace.provenance or {}),
+                "query_plan": {
+                    "type": adaptive_plan.query_type.name.lower(),
+                    "signals": adaptive_plan.signals.names,
+                    "lanes": adaptive_plan.enabled_lanes,
+                    "budgets": adaptive_plan.lane_budgets,
+                    "skip_reasons": adaptive_plan.diagnostic_skip_reasons,
+                },
             }
 
     async def _expand_graph_stage(self, execution: _SearchExecution) -> None:
