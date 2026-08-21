@@ -904,7 +904,7 @@ class RecordSearchPipeline:
         fusion point — left as-is, not unified with ``_fuse_candidates``.
         """
         plan = execution.routed_plan
-        candidates = execution.candidates
+        candidates = execution.acquired_candidates
         if not (
             plan.expansion_strategy is not None
             and _needs_conditional_expansion(candidates, execution.limit)
@@ -949,7 +949,7 @@ class RecordSearchPipeline:
         is built from ``execution.base_candidates``, the pre-graph set.
         """
         plan = execution.routed_plan
-        candidates = execution.candidates
+        candidates = execution.acquired_candidates
         candidates = self._apply_score_adjustments(
             candidates, execution.query_context_value
         )
@@ -979,7 +979,7 @@ class RecordSearchPipeline:
         legitimately differ from the earlier one and is the one that wins.
         """
         candidates = await self._expand_parents(
-            execution.candidates, execution.failures
+            execution.acquired_candidates, execution.failures
         )
         execution.candidates = candidates
         if execution.candidate_key is not None:
