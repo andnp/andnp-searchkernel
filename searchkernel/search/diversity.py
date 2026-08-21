@@ -99,12 +99,15 @@ def mmr_post_process(
             return list(results)
 
         embeddings: list[np.ndarray | None] = []
+        embeddable_vectors: list[np.ndarray] = []
         for result in results:
             vector = embedding_of(result)
             if vector is None:
                 embeddings.append(None)
                 continue
-            embeddings.append(np.asarray(vector, dtype=np.float64))
+            embedding = np.asarray(vector, dtype=np.float64)
+            embeddings.append(embedding)
+            embeddable_vectors.append(embedding)
 
         embeddable = [
             position
@@ -120,7 +123,7 @@ def mmr_post_process(
         if not embeddable:
             return list(results)
 
-        matrix = np.stack([embeddings[position] for position in embeddable])
+        matrix = np.stack(embeddable_vectors)
         norms = np.linalg.norm(matrix, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         normalized = matrix / norms
