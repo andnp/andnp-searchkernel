@@ -23,7 +23,8 @@ DiagnosticAvailability = Literal["available", "unavailable"]
 class SearchTrace(Protocol):
     """Minimal trace interface carried by a search outcome."""
 
-    total_duration_ms: float | None
+    @property
+    def total_duration_ms(self) -> float | None: ...
 
     def close(self) -> None: ...
 
