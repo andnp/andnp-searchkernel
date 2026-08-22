@@ -56,6 +56,7 @@ def _measure(
         "hit_count": len(hits),
         "latency_p50_ms": statistics.median(samples),
         "latency_p95_ms": _percentile(samples, 0.95),
+        "latency_p99_ms": _percentile(samples, 0.99),
     }
 
 
@@ -65,27 +66,32 @@ def run_benchmark(record_count: int, repetitions: int) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="searchkernel-keyword-") as directory:
         backend = LocalRecordBackend(Path(directory) / "records.db")
         backend.index(records)
-        filtered = _measure(
-            backend,
-            repetitions=repetitions,
-            filters={"project_filter": ["project-1"]},
-        )
-        unfiltered = _measure(
-            backend,
-            repetitions=repetitions,
-            filters=None,
-        )
+        filters_by_name = {
+            "unfiltered": None,
+            "workspace_scalar": {"workspace_id": "workspace-1"},
+            "source_scalar": {"source_kind": "note"},
+            "metadata": {"project_filter": ["project-1"]},
+            "scalar_and_metadata": {
+                "workspace_id": "workspace-1",
+                "project_filter": ["project-1"],
+            },
+        }
+        cases = {
+            name: _measure(backend, repetitions=repetitions, filters=filters)
+            for name, filters in filters_by_name.items()
+        }
         backend.close()
     expected_filtered = sum(
         record.metadata["project_id"] == "project-1" for record in records
     )
-    if filtered["hit_count"] != min(10, expected_filtered):
+    if cases["metadata"]["hit_count"] != min(10, expected_filtered):
         raise RuntimeError("filtered keyword retrieval returned an incorrect hit count")
     return {
         "record_count": record_count,
         "eligible_count": expected_filtered,
-        "filtered": filtered,
-        "unfiltered": unfiltered,
+        "filtered": cases["metadata"],
+        "unfiltered": cases["unfiltered"],
+        "cases": cases,
     }
 
 

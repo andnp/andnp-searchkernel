@@ -37,7 +37,7 @@ def _time_search(
     *,
     warmups: int,
     repetitions: int,
-) -> float:
+) -> dict[str, float]:
     for _ in range(warmups):
         search()
     samples: list[float] = []
@@ -45,7 +45,16 @@ def _time_search(
         started = time.perf_counter()
         search()
         samples.append((time.perf_counter() - started) * 1_000)
-    return statistics.median(samples)
+    return {
+        "latency_p50_ms": statistics.median(samples),
+        "latency_p95_ms": _percentile(samples, 0.95),
+        "latency_p99_ms": _percentile(samples, 0.99),
+    }
+
+
+def _percentile(samples: list[float], percentile: float) -> float:
+    ordered = sorted(samples)
+    return ordered[min(len(ordered) - 1, int(len(ordered) * percentile))]
 
 
 def _build_corpus(
@@ -85,7 +94,7 @@ def _run_case(
     repetitions: int,
 ) -> dict[str, Any]:
     backend, query = _build_corpus(record_count, dim, seed)
-    exact_ms = _time_search(
+    exact_latency = _time_search(
         lambda: backend.search_vector(
             query, 10, model_name=_MODEL_NAME, dim=dim
         ),
@@ -111,30 +120,45 @@ def _run_case(
         )
         faiss_result = {
             "status": "available",
-            "latency_p50_ms": faiss_ms,
+            **faiss_ms,
             "same_results": [hit.storage_key for hit in exact_hits]
             == [hit.storage_key for hit in faiss_hits],
         }
 
-    adaptive = LocalVectorStore(backend, engine="auto")
-    started = time.perf_counter()
-    adaptive.search(query, 10, model_name=_MODEL_NAME, dim=dim)
-    calibration_ms = (time.perf_counter() - started) * 1_000
-    steady_state_ms = _time_search(
-        lambda: adaptive.search(query, 10, model_name=_MODEL_NAME, dim=dim),
-        warmups=warmups,
-        repetitions=repetitions,
-    )
-    measurement = adaptive.last_routing_measurement
-    return {
-        "record_count": record_count,
-        "dimension": dim,
-        "seed": seed,
-        "sqlite_exact_p50_ms": exact_ms,
-        "faiss_exact": faiss_result,
-        "adaptive": {
-            "calibration_p50_ms": calibration_ms,
-            "steady_state_p50_ms": steady_state_ms,
+    if importlib.util.find_spec("faiss") is None:
+        adaptive_result: dict[str, object] = {"status": "unavailable"}
+    else:
+        cold_samples: list[float] = []
+        for _ in range(repetitions):
+            cold_adaptive = LocalVectorStore(backend, engine="auto")
+            started = time.perf_counter()
+            cold_adaptive.search(query, 10, model_name=_MODEL_NAME, dim=dim)
+            cold_samples.append((time.perf_counter() - started) * 1_000)
+        adaptive = LocalVectorStore(backend, engine="auto")
+        started = time.perf_counter()
+        adaptive.search(query, 10, model_name=_MODEL_NAME, dim=dim)
+        calibration_samples = [(time.perf_counter() - started) * 1_000]
+        steady_state = _time_search(
+            lambda: adaptive.search(query, 10, model_name=_MODEL_NAME, dim=dim),
+            warmups=warmups,
+            repetitions=repetitions,
+        )
+        measurement = adaptive.last_routing_measurement
+        adaptive_result = {
+            "status": "available",
+            "cold_calibration": {
+                "latency_p50_ms": statistics.median(cold_samples),
+                "latency_p95_ms": _percentile(cold_samples, 0.95),
+                "latency_p99_ms": _percentile(cold_samples, 0.99),
+            },
+            "warm_calibration": {
+                "latency_p50_ms": statistics.median(calibration_samples),
+                "latency_p95_ms": _percentile(calibration_samples, 0.95),
+                "latency_p99_ms": _percentile(calibration_samples, 0.99),
+            },
+            "steady_state": steady_state,
+            "calibration_p50_ms": calibration_samples[0],
+            "steady_state_p50_ms": steady_state["latency_p50_ms"],
             "selected_engine": adaptive.engine_name,
             "measurement": (
                 None
@@ -145,7 +169,15 @@ def _run_case(
                     "selected": measurement.selected,
                 }
             ),
-        },
+        }
+    return {
+        "record_count": record_count,
+        "dimension": dim,
+        "seed": seed,
+        "sqlite_exact": exact_latency,
+        "sqlite_exact_p50_ms": exact_latency["latency_p50_ms"],
+        "faiss_exact": faiss_result,
+        "adaptive": adaptive_result,
     }
 
 
@@ -177,13 +209,13 @@ def main() -> None:
         "--records",
         type=int,
         nargs="+",
-        default=[10_000, 100_000],
+        default=[5_000, 20_000],
     )
     parser.add_argument(
         "--dimensions",
         type=int,
         nargs="+",
-        default=[32, 384],
+        default=[32, 128, 384],
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--warmups", type=int, default=2)

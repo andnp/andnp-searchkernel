@@ -16,7 +16,9 @@ from searchkernel.eval.golden import GoldenSet
 from searchkernel.indices import LocalRecordBackend
 
 
-def _make_search(records: list[Record], golden_set: GoldenSet, db_path: Path, k: int):
+def _make_search(
+    records: list[Record], golden_set: GoldenSet, db_path: Path | None, k: int
+):
     backend = LocalRecordBackend(db_path)
     backend.index(records)
     entries = {entry.query: entry for entry in golden_set}
@@ -82,10 +84,9 @@ def measure_concurrent_latency(
 ) -> dict[str, Any]:
     """Return comparable serial/concurrent reports and observed deltas."""
     records, golden_set = load_labeled_fixture(fixture)
-    with tempfile.TemporaryDirectory(prefix="searchkernel-latency-") as directory:
-        search, backend = _make_search(
-            records, golden_set, Path(directory) / "records.db", k
-        )
+
+    def measure_backend(db_path: Path | None, backend_name: str) -> dict[str, Any]:
+        search, backend = _make_search(records, golden_set, db_path, k)
         try:
             serial = _run(
                 golden_set,
@@ -105,18 +106,37 @@ def measure_concurrent_latency(
             )
         finally:
             backend.close()
+        return {
+            "backend": backend_name,
+            "serial": serial.to_dict(),
+            "concurrent": concurrent.to_dict(),
+            "quality_equivalent": _quality_rows(serial) == _quality_rows(concurrent),
+            "latency_p95_delta_ms": (
+                concurrent.latency_p95_ms - serial.latency_p95_ms
+                if concurrent.latency_p95_ms is not None
+                and serial.latency_p95_ms is not None
+                else None
+            ),
+            "latency_p99_delta_ms": (
+                concurrent.latency_p99_ms - serial.latency_p99_ms
+                if concurrent.latency_p99_ms is not None
+                and serial.latency_p99_ms is not None
+                else None
+            ),
+        }
+
+    with tempfile.TemporaryDirectory(prefix="searchkernel-latency-") as directory:
+        file_backed = measure_backend(Path(directory) / "records.db", "file-backed")
+    in_memory = measure_backend(None, "in-memory")
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "fixture": str(fixture),
-        "serial": serial.to_dict(),
-        "concurrent": concurrent.to_dict(),
-        "quality_equivalent": _quality_rows(serial) == _quality_rows(concurrent),
-        "latency_p95_delta_ms": (
-            concurrent.latency_p95_ms - serial.latency_p95_ms
-            if concurrent.latency_p95_ms is not None and serial.latency_p95_ms is not None
-            else None
-        ),
+        "serial": file_backed["serial"],
+        "concurrent": file_backed["concurrent"],
+        "quality_equivalent": file_backed["quality_equivalent"],
+        "latency_p95_delta_ms": file_backed["latency_p95_delta_ms"],
+        "backends": {"file_backed": file_backed, "in_memory": in_memory},
     }
 
 
@@ -124,7 +144,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--k", type=int, default=3)
-    parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--warmup-count", type=int, default=2)
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()

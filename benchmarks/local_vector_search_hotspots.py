@@ -1,14 +1,17 @@
 """Regression benchmark for local vector search hotspots.
 
-Builds a deterministic seeded corpus and reports p50/p95 latency, in
+Builds a deterministic seeded corpus and reports p50/p95/p99 latency, in
 milliseconds, for four measured cases against the local record backend's
 exact-search path:
 
   * ``snapshot_build``          -- ``VectorSnapshot.from_rows`` via a forced
                                     cache miss (``_get_vector_snapshot``)
   * ``search_unfiltered``       -- ``search_vector`` with no filters
-  * ``search_candidate_bounded``-- ``search_vector`` restricted to a small
+  * ``search_candidate_small`` -- ``search_vector`` restricted to a small
                                     ``candidate_storage_keys`` set
+  * ``search_candidate_broad`` -- ``search_vector`` restricted to a broader
+                                    candidate set
+  * ``search_scalar_filtered`` -- scalar workspace/source/status filters
   * ``search_metadata_filtered``-- ``search_vector`` with a metadata filter
                                     that cannot be prefiltered by scalar
                                     fields alone
@@ -62,6 +65,7 @@ def _timeit(
     return {
         "latency_p50_ms": statistics.median(samples),
         "latency_p95_ms": _percentile(samples, 0.95),
+        "latency_p99_ms": _percentile(samples, 0.99),
     }
 
 
@@ -106,8 +110,14 @@ def run_benchmark(
     query_list = query.tolist()
     engine = backend._vector_snapshot_engine
 
-    candidate_count = max(1, record_count // 200)
-    candidate_keys = [record.storage_key for record in records[:candidate_count]]
+    candidate_counts = {
+        "candidate_small": max(1, record_count // 200),
+        "candidate_broad": max(1, record_count // 20),
+    }
+    candidate_keys = {
+        name: [record.storage_key for record in records[:count]]
+        for name, count in candidate_counts.items()
+    }
 
     def build_snapshot() -> None:
         engine._vector_snapshots.clear()
@@ -118,12 +128,30 @@ def run_benchmark(
         "search_unfiltered": lambda: backend.search_vector(
             query_list, 10, model_name=_MODEL_NAME, dim=dim
         ),
-        "search_candidate_bounded": lambda: backend.search_vector(
+        "search_candidate_small": lambda: backend.search_vector(
             query_list,
             10,
             model_name=_MODEL_NAME,
             dim=dim,
-            filters={"candidate_storage_keys": candidate_keys},
+            filters={"candidate_storage_keys": candidate_keys["candidate_small"]},
+        ),
+        "search_candidate_broad": lambda: backend.search_vector(
+            query_list,
+            10,
+            model_name=_MODEL_NAME,
+            dim=dim,
+            filters={"candidate_storage_keys": candidate_keys["candidate_broad"]},
+        ),
+        "search_scalar_filtered": lambda: backend.search_vector(
+            query_list,
+            10,
+            model_name=_MODEL_NAME,
+            dim=dim,
+            filters={
+                "workspace_id": "workspace-2",
+                "source_kind": "note",
+                "statuses": ["active"],
+            },
         ),
         "search_metadata_filtered": lambda: backend.search_vector(
             query_list,
@@ -142,7 +170,8 @@ def run_benchmark(
         "record_count": record_count,
         "dim": dim,
         "seed": seed,
-        "candidate_count": candidate_count,
+        "candidate_count": candidate_counts["candidate_small"],
+        "candidate_counts": candidate_counts,
         "warmups": warmups,
         "repetitions": repetitions,
         "results": results,
@@ -153,21 +182,28 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--records", type=int, default=20_000)
     parser.add_argument("--dim", type=int, default=384)
+    parser.add_argument("--dimensions", type=int, nargs="+")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--repetitions", type=int, default=7)
     args = parser.parse_args()
-    if args.records < 1 or args.dim < 1 or args.repetitions < 1:
-        parser.error("--records, --dim, and --repetitions must be positive")
-    print(
-        json.dumps(
-            run_benchmark(
-                args.records,
-                args.dim,
-                seed=args.seed,
-                repetitions=args.repetitions,
-            ),
-            indent=2,
+    dimensions = args.dimensions or [args.dim]
+    if (
+        args.records < 1
+        or any(dim < 1 for dim in dimensions)
+        or args.repetitions < 1
+    ):
+        parser.error("--records, --dimensions, and --repetitions must be positive")
+    results = [
+        run_benchmark(
+            args.records,
+            dim,
+            seed=args.seed,
+            repetitions=args.repetitions,
         )
+        for dim in dimensions
+    ]
+    print(
+        json.dumps(results[0] if args.dimensions is None else results, indent=2)
     )
 
 
