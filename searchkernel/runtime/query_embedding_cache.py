@@ -121,26 +121,35 @@ class QueryEmbeddingCache:
     ) -> Vector:
         """Return a cached embedding without blocking the event loop."""
         key = self._key(model_name, encoder_namespace, query)
-        cached = self._load(key)
-        if cached is not None:
-            return cached
-
-        inflight, is_leader = self._start_or_join(key)
+        inflight, is_leader = self._start_or_join(key, count_miss=False)
         if not is_leader:
             await asyncio.wrap_future(inflight.completed)
             return self._finish_waiter(inflight)
 
+        try:
+            cached = await asyncio.to_thread(self._load, key)
+        except BaseException as error:
+            self._complete_failure(key, inflight, error)
+            raise
+        if cached is not None:
+            self._complete_success(key, inflight, tuple(cached), persist=False)
+            return cached
+
+        self._record_miss()
         started = self._clock()
         try:
             result = compute()
             embedding = tuple(float(value) for value in await _maybe_await(result))
-            self._complete_success(key, inflight, embedding)
-            return list(embedding)
+            self._complete_success(key, inflight, embedding, persist=False)
         except BaseException as error:
             self._complete_failure(key, inflight, error)
+            self._record_compute_time(self._clock() - started)
             raise
+        try:
+            await asyncio.to_thread(self._save_to_store, key, embedding)
         finally:
             self._record_compute_time(self._clock() - started)
+        return list(embedding)
 
     @property
     def metrics(self) -> QueryEmbeddingCacheMetrics:
@@ -189,16 +198,23 @@ class QueryEmbeddingCache:
     def _start_or_join(
         self,
         key: tuple[str, str],
+        *,
+        count_miss: bool = True,
     ) -> tuple[_InFlightEmbedding, bool]:
         with self._lock:
             inflight = self._inflight.get(key)
             if inflight is not None:
                 self._coalesced_waiters += 1
                 return inflight, False
-            self._misses += 1
+            if count_miss:
+                self._misses += 1
             inflight = _InFlightEmbedding()
             self._inflight[key] = inflight
             return inflight, True
+
+    def _record_miss(self) -> None:
+        with self._lock:
+            self._misses += 1
 
     def _load(self, key: tuple[str, str]) -> Vector | None:
         now = self._clock()
@@ -229,6 +245,8 @@ class QueryEmbeddingCache:
         key: tuple[str, str],
         inflight: _InFlightEmbedding,
         embedding: tuple[float, ...],
+        *,
+        persist: bool = True,
     ) -> None:
         now = self._clock()
         with self._lock:
@@ -243,7 +261,8 @@ class QueryEmbeddingCache:
                 self._evictions += 1
             self._inflight.pop(key, None)
             inflight.completed.set_result(None)
-        self._save_to_store(key, embedding)
+        if persist:
+            self._save_to_store(key, embedding)
 
     def _complete_failure(
         self,
