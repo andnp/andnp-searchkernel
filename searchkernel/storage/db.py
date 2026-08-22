@@ -201,6 +201,10 @@ class DatabaseManager:
 
     def get_connection(self) -> sqlite3.Connection:
         """Return a per-thread SQLite connection."""
+        conn = getattr(self._local, "connection", None)
+        generation = getattr(self._local, "generation", -1)
+        if conn is not None and generation == self._generation and not self._closed:
+            return conn
         with self._connections_lock:
             if self._closed:
                 raise RuntimeError("database manager is closed")
