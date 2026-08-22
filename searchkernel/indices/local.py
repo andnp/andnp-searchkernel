@@ -16,6 +16,7 @@ import math
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -59,6 +60,11 @@ from searchkernel.indices.local_vectors import (
     VectorSnapshot,
 )
 from searchkernel.indices.vector_revision import record_embedding_revision
+from searchkernel.indices.vector_routing import (
+    AdaptiveVectorRouter,
+    VectorRouteKey,
+    VectorRouteMeasurement,
+)
 from searchkernel.ports.keyword_scoring import KeywordArtifactScorer
 from searchkernel.storage.db import (
     DatabaseManager,
@@ -2765,7 +2771,11 @@ class LocalVectorStore:
         )
         self._selection_key: tuple[str, int] | None = None
         self._selection_epoch: int | None = None
+        self._selection_filter_shape: str | None = None
         self._selection_use_faiss: bool | None = None
+        self._routing_lock = threading.RLock()
+        self._adaptive_router = AdaptiveVectorRouter()
+        self._last_routing_measurement: VectorRouteMeasurement | None = None
 
     @property
     def engine_name(self) -> str:
@@ -2778,6 +2788,146 @@ class LocalVectorStore:
     @property
     def faiss_configuration(self) -> FAISSConfiguration:
         return self._faiss_configuration
+
+    @property
+    def last_routing_measurement(self) -> VectorRouteMeasurement | None:
+        return self._last_routing_measurement
+
+    def _get_faiss_store(self) -> FAISSLocalVectorStore:
+        if self._faiss_store is None:
+            self._faiss_store = FAISSLocalVectorStore(
+                self._backend,
+                index_path=self._faiss_path,
+                configuration=self._faiss_configuration,
+            )
+        return self._faiss_store
+
+    @staticmethod
+    def _timed_search(
+        search: Callable[[], list[RecordHit]],
+    ) -> tuple[list[RecordHit], float]:
+        started = time.perf_counter()
+        hits = search()
+        return hits, (time.perf_counter() - started) * 1000.0
+
+    def _adaptive_search(
+        self,
+        query_vector: Vector,
+        k: int,
+        *,
+        model_name: str,
+        dim: int,
+        filters: SearchFilters | None,
+    ) -> list[RecordHit] | None:
+        if (
+            self._engine != "auto"
+            or self._faiss_configuration.search_strategy != "exact"
+        ):
+            return None
+        selection_key = (model_name, dim)
+        selection_epoch = self._backend.vector_epoch()
+        key = VectorRouteKey(
+            model_name,
+            dim,
+            selection_epoch,
+            AdaptiveVectorRouter.filter_shape(filters),
+        )
+        if (
+            self._selection_key == selection_key
+            and self._selection_epoch == selection_epoch
+            and self._selection_filter_shape
+            == AdaptiveVectorRouter.filter_shape(filters)
+            and self._selection_use_faiss is False
+        ):
+            return None
+        with self._routing_lock:
+            measurement = self._adaptive_router.get(key)
+            if measurement is not None:
+                self._selection_key = selection_key
+                self._selection_epoch = selection_epoch
+                self._selection_filter_shape = key.filter_shape
+                self._selection_use_faiss = measurement.selected == "faiss"
+                self._last_routing_measurement = measurement
+                if measurement.selected == "sqlite-exact":
+                    return None
+                faiss_store = self._get_faiss_store()
+                self._last_engine_name = "faiss"
+            else:
+                if (
+                    self._backend.vector_count(model_name, dim)
+                    < self._backend.faiss_threshold
+                ):
+                    self._selection_key = selection_key
+                    self._selection_epoch = selection_epoch
+                    self._selection_filter_shape = key.filter_shape
+                    self._selection_use_faiss = False
+                    return None
+                faiss_store = self._get_faiss_store()
+                # Exclude one-time snapshot and FAISS index construction from
+                # the steady-state routing decision.
+                self._backend.search_vector(
+                    query_vector,
+                    k,
+                    model_name=model_name,
+                    dim=dim,
+                    filters=filters,
+                )
+                faiss_store.search(
+                    query_vector,
+                    k,
+                    model_name=model_name,
+                    dim=dim,
+                    filters=filters,
+                )
+                exact_hits, sqlite_ms = self._timed_search(
+                    lambda: self._backend.search_vector(
+                        query_vector,
+                        k,
+                        model_name=model_name,
+                        dim=dim,
+                        filters=filters,
+                    )
+                )
+                faiss_hits, faiss_ms = self._timed_search(
+                    lambda: faiss_store.search(
+                        query_vector,
+                        k,
+                        model_name=model_name,
+                        dim=dim,
+                        filters=filters,
+                    )
+                )
+                same_results = [hit.storage_key for hit in exact_hits] == [
+                    hit.storage_key for hit in faiss_hits
+                ]
+                if (
+                    faiss_store.last_search_diagnostics.get("fallback")
+                    or not same_results
+                ):
+                    faiss_ms = float("inf")
+                measurement = self._adaptive_router.record(
+                    key,
+                    sqlite_ms=sqlite_ms,
+                    faiss_ms=faiss_ms,
+                )
+                self._selection_key = selection_key
+                self._selection_epoch = selection_epoch
+                self._selection_filter_shape = key.filter_shape
+                self._selection_use_faiss = measurement.selected == "faiss"
+                self._last_routing_measurement = measurement
+                self._last_engine_name = measurement.selected
+                return (
+                    faiss_hits
+                    if measurement.selected == "faiss"
+                    else exact_hits
+                )
+        return faiss_store.search(
+            query_vector,
+            k,
+            model_name=model_name,
+            dim=dim,
+            filters=filters,
+        )
 
     def _selected_store(
         self,
@@ -2806,15 +2956,7 @@ class LocalVectorStore:
             self._last_engine_name = "sqlite-exact"
             return None
         self._last_engine_name = "faiss"
-        if self._faiss_store is None:
-            from searchkernel.indices.faiss_local import FAISSLocalVectorStore
-
-            self._faiss_store = FAISSLocalVectorStore(
-                self._backend,
-                index_path=self._faiss_path,
-                configuration=self._faiss_configuration,
-            )
-        return self._faiss_store
+        return self._get_faiss_store()
 
     def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
         self._backend.upsert(records, model_name, dim)
@@ -2828,6 +2970,15 @@ class LocalVectorStore:
         dim: int,
         filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
+        adaptive_hits = self._adaptive_search(
+            query_vector,
+            k,
+            model_name=model_name,
+            dim=dim,
+            filters=filters,
+        )
+        if adaptive_hits is not None:
+            return adaptive_hits
         faiss_store = self._selected_store(model_name, dim)
         if faiss_store is not None:
             return faiss_store.search(

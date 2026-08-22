@@ -13,7 +13,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
-from searchkernel.domain import Record, RecordHit, RecordIdentity, Vector
+from searchkernel.domain import (
+    Record,
+    RecordHit,
+    RecordIdentity,
+    SearchFilters,
+    Vector,
+)
 from searchkernel.domain.vector_filters import (
     CompiledVectorFilter,
     compile_source_scoped_filters,
@@ -201,7 +207,7 @@ class FAISSLocalVectorStore:
         *,
         model_name: str,
         dim: int,
-        filters: dict[str, Any] | None = None,
+        filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
         if k < 1:
             return []
@@ -275,7 +281,7 @@ class FAISSLocalVectorStore:
         *,
         model_name: str,
         dim: int,
-        filters: dict[str, Any] | None = None,
+        filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
         return await asyncio.to_thread(
             self.search,
@@ -293,7 +299,7 @@ class FAISSLocalVectorStore:
         *,
         model_name: str,
         dim: int,
-        filters: dict[str, Any] | None = None,
+        filters: SearchFilters | None = None,
     ) -> float:
         exact = self._backend.search_vector(
             query_vector,
@@ -415,7 +421,7 @@ class FAISSLocalVectorStore:
         query: np.ndarray,
         k: int,
         *,
-        filters: dict[str, Any] | None,
+        filters: SearchFilters | None,
     ) -> list[RecordHit]:
         total = len(state.storage_keys)
         if total == 0:

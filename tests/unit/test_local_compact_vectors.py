@@ -8,7 +8,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from searchkernel.domain import Record, RecordIdentity, RecordStatus
+import searchkernel.indices.local as local_indices
+from searchkernel.domain import Record, RecordHit, RecordIdentity, RecordStatus
 from searchkernel.domain.vector_filters import compile_vector_filters
 from searchkernel.indices import (
     FAISSLocalVectorStore,
@@ -695,6 +696,81 @@ def test_auto_vector_engine_reuses_selection_until_vector_epoch_changes(
     vector.search([1.0, 0.0], 1, model_name="model", dim=2)
 
     assert calls == 1
+
+
+def test_auto_vector_engine_calibrates_exact_engines_once(monkeypatch) -> None:
+    """Auto routing selects the faster exact engine after one calibration."""
+    backend = LocalRecordBackend(faiss_threshold=1)
+    record = _record("one", [1.0, 0.0])
+    backend.upsert([record], "model", 2)
+    vector = LocalVectorStore(backend, engine="auto")
+
+    class _FakeFAISS:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.last_search_diagnostics = {"fallback": False}
+            self.calls = 0
+
+        def search(
+            self,
+            query_vector: list[float],
+            k: int,
+            *,
+            model_name: str,
+            dim: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit]:
+            self.calls += 1
+            return [RecordHit(record.identity, 1.0)]
+
+    monkeypatch.setattr(local_indices, "FAISSLocalVectorStore", _FakeFAISS)
+    clock_values = iter((0.0, 0.010, 0.010, 0.015))
+    monkeypatch.setattr(local_indices.time, "perf_counter", lambda: next(clock_values))
+
+    first = vector.search([1.0, 0.0], 1, model_name="model", dim=2)
+    second = vector.search([1.0, 0.0], 1, model_name="model", dim=2)
+
+    assert [hit.source_id for hit in first] == ["one"]
+    assert [hit.source_id for hit in second] == ["one"]
+    assert vector.engine_name == "faiss"
+    assert vector.last_routing_measurement is not None
+    assert vector.last_routing_measurement.selected == "faiss"
+    assert vector.last_routing_measurement.faiss_ms < (
+        vector.last_routing_measurement.sqlite_ms
+    )
+
+
+def test_auto_vector_engine_pins_sqlite_when_exact_results_differ(monkeypatch) -> None:
+    """Auto routing rejects a FAISS probe that changes exact result identity."""
+    backend = LocalRecordBackend(faiss_threshold=1)
+    records = [_record("one", [1.0, 0.0]), _record("two", [0.0, 1.0])]
+    backend.upsert(records, "model", 2)
+    vector = LocalVectorStore(backend, engine="auto")
+
+    class _MismatchedFAISS:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.last_search_diagnostics = {"fallback": False}
+
+        def search(
+            self,
+            query_vector: list[float],
+            k: int,
+            *,
+            model_name: str,
+            dim: int,
+            filters: dict[str, object] | None = None,
+        ) -> list[RecordHit]:
+            return [RecordHit(records[1].identity, 1.0)]
+
+    monkeypatch.setattr(local_indices, "FAISSLocalVectorStore", _MismatchedFAISS)
+    clock_values = iter((0.0, 0.010, 0.010, 0.015))
+    monkeypatch.setattr(local_indices.time, "perf_counter", lambda: next(clock_values))
+
+    hits = vector.search([1.0, 0.0], 1, model_name="model", dim=2)
+
+    assert [hit.source_id for hit in hits] == ["one"]
+    assert vector.engine_name == "sqlite-exact"
+    assert vector.last_routing_measurement is not None
+    assert vector.last_routing_measurement.selected == "sqlite-exact"
 
 
 def test_snapshot_reload_corruption_and_deletion(tmp_path: Path) -> None:
