@@ -18,10 +18,10 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, TracebackType
 from typing import Any, ClassVar, Self
 
 import numpy as np
@@ -204,12 +204,89 @@ class _LocalEpochLane:
         }
 
 
-@dataclass(frozen=True, slots=True)
-class _SQLiteAccess:
-    """Serialised access to one SQLite database, shared by every engine."""
+class _SQLiteReadWriteLock:
+    """Coordinate SQLite access without sharing in-memory connections."""
 
-    db: SQLiteDatabase
-    lock: threading.RLock
+    def __init__(self, *, allow_parallel_reads: bool) -> None:
+        self._allow_parallel_reads = allow_parallel_reads
+        self._condition = threading.Condition()
+        self._readers = 0
+        self._writer = False
+        self._waiting_writers = 0
+
+    @contextmanager
+    def read(self):
+        if not self._allow_parallel_reads:
+            with self.write():
+                yield
+            return
+        with self._condition:
+            while self._writer or self._waiting_writers:
+                self._condition.wait()
+            self._readers += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._readers -= 1
+                if not self._readers:
+                    self._condition.notify_all()
+
+    @contextmanager
+    def write(self):
+        with self._condition:
+            self._waiting_writers += 1
+            try:
+                while self._writer or self._readers:
+                    self._condition.wait()
+            finally:
+                self._waiting_writers -= 1
+            self._writer = True
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._writer = False
+                self._condition.notify_all()
+
+
+class _SQLiteLock:
+    """Adapt an access context to the record-writer lock protocol."""
+
+    def __init__(self, context: AbstractContextManager[None]) -> None:
+        self._context = context
+
+    def __enter__(self) -> object:
+        return self._context.__enter__()
+
+    def __exit__(
+        self,
+        t: type[BaseException] | None,
+        v: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self._context.__exit__(t, v, tb)
+
+
+class _SQLiteAccess:
+    """Coordinate SQLite access across the engines sharing one backend."""
+
+    def __init__(self, db: SQLiteDatabase) -> None:
+        self.db = db
+        self._lock = _SQLiteReadWriteLock(
+            allow_parallel_reads=isinstance(db, DatabaseManager)
+        )
+
+    @property
+    def lock(self) -> _SQLiteLock:
+        """Provide the write lock expected by the record writer protocol."""
+        return _SQLiteLock(self._lock.write())
+
+    def read_lock(self) -> _SQLiteLock:
+        return _SQLiteLock(self._lock.read())
+
+    def write_lock(self) -> _SQLiteLock:
+        return _SQLiteLock(self._lock.write())
 
     def connection(self) -> sqlite3.Connection:
         return self.db.get_connection()
@@ -270,7 +347,7 @@ class _GraphEngine:
         )
 
     def graph_integrity_errors(self) -> list[str]:
-        with self._access.lock:
+        with self._access.read_lock():
             conn = self._access.connection()
             rows = conn.execute(
                 """
@@ -358,7 +435,7 @@ class _GraphEngine:
         best: dict[str, tuple[str, float]] = {}
         source_column = "target_id" if incoming else "source_id"
         target_column = "source_id" if incoming else "target_id"
-        with self._access.lock:
+        with self._access.read_lock():
             conn = self._access.connection()
             for hop in range(depth):
                 if not frontier:
@@ -463,7 +540,7 @@ class _GraphEngine:
         }
         source_column = "target_id" if incoming else "source_id"
         target_column = "source_id" if incoming else "target_id"
-        with self._access.lock:
+        with self._access.read_lock():
             conn = self._access.connection()
             for hop in range(depth):
                 owners: dict[str, list[str]] = {}
@@ -554,7 +631,7 @@ class _GraphEngine:
             rows.append((source_id, target_id, row[2], row[3]))
         if not rows:
             return
-        with self._access.lock:
+        with self._access.write_lock():
             conn = self._access.connection()
             try:
                 endpoint_keys = sorted(
@@ -628,7 +705,7 @@ class _GraphEngine:
             )
         if not rows:
             return
-        with self._access.lock:
+        with self._access.write_lock():
             conn = self._access.connection()
             try:
                 changes_before = conn.total_changes
@@ -665,6 +742,7 @@ class _VectorEngine:
     ) -> None:
         self._access = access
         self._snapshot_lock = snapshot_lock
+        self._storage_stats_lock = threading.RLock()
         self._vector_snapshots = vector_snapshots
         self._vector_storage_stats = vector_storage_stats
         self._vector_snapshot_max_rows = vector_snapshot_max_rows
@@ -679,7 +757,7 @@ class _VectorEngine:
 
     def vector_storage_stats(self, model_name: str, dim: int) -> tuple[int, int]:
         key = (model_name, dim)
-        with self._access.lock:
+        with self._storage_stats_lock, self._access.read_lock():
             conn = self._access.connection()
             vector_epoch = _LocalEpochLane.read(
                 conn, _LocalEpochLane._LANE_KEYS["vector"]
@@ -689,14 +767,18 @@ class _VectorEngine:
                 return cached[1], cached[2]
             row = conn.execute(
                 """
-                SELECT COUNT(*), COALESCE(SUM(length(embedding)), 0)
-                FROM local_vectors_v2
-                WHERE encoder_namespace = ? AND dim = ?
-                """,
+                    SELECT COUNT(*), COALESCE(SUM(length(embedding)), 0)
+                    FROM local_vectors_v2
+                    WHERE encoder_namespace = ? AND dim = ?
+                    """,
                 (model_name, dim),
             ).fetchone()
             stats = (int(row[0]), int(row[1])) if row else (0, 0)
-            self._vector_storage_stats[key] = (vector_epoch, stats[0], stats[1])
+            self._vector_storage_stats[key] = (
+                vector_epoch,
+                stats[0],
+                stats[1],
+            )
             return stats
 
     def _vector_batch_limit(self, dim: int) -> int:
@@ -720,7 +802,7 @@ class _VectorEngine:
     ) -> VectorSnapshot:
         key = (model_name, dim)
         with self._snapshot_lock:
-            with self._access.lock:
+            with self._access.read_lock():
                 conn = self._access.connection()
                 current_epoch = _LocalEpochLane.read(
                     conn, _LocalEpochLane._LANE_KEYS["vector"]
@@ -759,11 +841,12 @@ class _VectorEngine:
                 materialize_metadata=materialize_metadata,
             )
             self._vector_snapshots[key] = snapshot
-            self._vector_storage_stats[key] = (
-                snapshot_epoch,
-                len(rows),
-                sum(len(row["embedding"]) for row in rows),
-            )
+            with self._storage_stats_lock:
+                self._vector_storage_stats[key] = (
+                    snapshot_epoch,
+                    len(rows),
+                    sum(len(row["embedding"]) for row in rows),
+                )
             return snapshot
 
     @staticmethod
@@ -895,7 +978,7 @@ class _VectorEngine:
             else None
         )
         while True:
-            with self._access.lock:
+            with self._access.read_lock():
                 conn = self._access.connection()
                 clauses = ["v.encoder_namespace = ?", "v.dim = ?"]
                 parameters: list[object] = [model_name, dim]
@@ -925,15 +1008,13 @@ class _VectorEngine:
                 row for row in rows if _matches_compiled_vector_filter(row, predicate)
             ]
             if eligible_rows:
-                matrix = np.vstack(
-                    [
-                        PackedVectorCodec.decode(
-                            row["embedding"],
-                            dim,
-                            context=f"stored embedding for {row['storage_key']}",
-                        )
+                matrix = PackedVectorCodec.decode_batch(
+                    [row["embedding"] for row in eligible_rows],
+                    dim,
+                    contexts=[
+                        f"stored embedding for {row['storage_key']}"
                         for row in eligible_rows
-                    ]
+                    ],
                 )
                 scores = matrix @ query
                 best_keys.extend(row["storage_key"] for row in eligible_rows)
@@ -967,7 +1048,7 @@ class _VectorEngine:
         last_storage_key: str | None = None
         batch_limit = self._vector_batch_limit(dim)
         while True:
-            with self._access.lock:
+            with self._access.read_lock():
                 conn = self._access.connection()
                 if last_storage_key is None:
                     rows = conn.execute(
@@ -1375,26 +1456,36 @@ class _KeywordEngine:
             limit = max(k, math.ceil(k * self._keyword_overfetch_multiplier))
         if filters and not set(filters).issubset(_KEYWORD_SQL_FILTERS):
             limit = min(limit * _FILTERED_KEYWORD_OVERFETCH, _FALLBACK_SCAN_MAX_ROWS)
+        needs_filter_match = bool(filters) and not set(filters).issubset(
+            _KEYWORD_SQL_FILTERS
+        )
+        selected_columns = [
+            "r.storage_key",
+            "r.workspace_id",
+            "r.source_kind",
+            "r.source_id",
+            "r.status",
+        ]
+        if needs_artifact_rerank:
+            selected_columns.extend(
+                ["r.title", "r.body", "r.indexed_text", "r.uri", "r.keywords"]
+            )
+            if needs_filter_match:
+                selected_columns.append("r.metadata")
+        elif needs_filter_match:
+            selected_columns.extend(["r.metadata", "r.uri"])
+        projection = ", ".join(selected_columns)
+
         def fetch_rows(current_query: str) -> list[sqlite3.Row]:
             clauses, parameters = self._keyword_filter_sql(filters)
             clauses.insert(0, f"{_LOCAL_FTS_TABLE} MATCH ?")
             parameters.insert(0, current_query)
-            with self._access.lock:
+            with self._access.read_lock():
                 conn = self._access.connection()
                 return conn.execute(
                     f"""
                     SELECT
-                        r.storage_key,
-                        r.workspace_id,
-                        r.source_kind,
-                        r.source_id,
-                        r.status,
-                        r.title,
-                        r.body,
-                        r.indexed_text,
-                        r.uri,
-                        r.keywords,
-                        r.metadata,
+                        {projection},
                         -bm25({_LOCAL_FTS_TABLE}, 5.0, 1.0, 4.0, 2.0) AS score
                     FROM {_LOCAL_FTS_TABLE}
                     JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
@@ -1408,7 +1499,7 @@ class _KeywordEngine:
         def build_hits(rows: Sequence[sqlite3.Row]) -> list[RecordHit]:
             hits: list[RecordHit] = []
             for row in rows:
-                if filters and not self._matches(row, filters):
+                if needs_filter_match and not self._matches(row, filters):
                     continue
                 score = float(row["score"])
                 if needs_artifact_rerank:
@@ -1461,16 +1552,32 @@ class _KeywordEngine:
         prefix_query = " OR ".join(
             f"{term[:3]}*" for term in terms
         )
+        needs_filter_match = bool(filters) and not set(filters).issubset(
+            _KEYWORD_SQL_FILTERS
+        )
         clauses, parameters = self._keyword_filter_sql(filters)
         clauses.insert(0, f"{_LOCAL_FTS_TABLE} MATCH ?")
         parameters.insert(0, prefix_query)
-        with self._access.lock:
+        selected_columns = [
+            "r.storage_key",
+            "r.workspace_id",
+            "r.source_kind",
+            "r.source_id",
+            "r.status",
+            "r.title",
+            "r.body",
+            "r.indexed_text",
+            "r.uri",
+            "r.keywords",
+        ]
+        if needs_filter_match:
+            selected_columns.append("r.metadata")
+        projection = ", ".join(selected_columns)
+        with self._access.read_lock():
             conn = self._access.connection()
             rows = conn.execute(
                 f"""
-                SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                       r.status, r.title, r.body, r.indexed_text, r.uri,
-                       r.keywords, r.metadata
+                SELECT {projection}
                 FROM {_LOCAL_FTS_TABLE}
                 JOIN local_records r ON r.rowid = {_LOCAL_FTS_TABLE}.rowid
                 WHERE {" AND ".join(clauses)}
@@ -1482,7 +1589,7 @@ class _KeywordEngine:
             ).fetchall()
         hits: list[RecordHit] = []
         for row in rows:
-            if filters and not self._matches(row, filters):
+            if needs_filter_match and not self._matches(row, filters):
                 continue
             text = " ".join(
                 (
@@ -1534,7 +1641,7 @@ class _KeywordEngine:
         scanned_rows = 0
         scan_complete = False
         while True:
-            with self._access.lock:
+            with self._access.read_lock():
                 conn = self._access.connection()
                 rows = conn.execute(
                     f"""
@@ -1760,7 +1867,7 @@ class _KeywordEngine:
         """Return whether the external-content keyword index matches records."""
         if not self._fts5_available:
             return False
-        with self._access.lock:
+        with self._access.write_lock():
             conn = self._access.connection()
             try:
                 conn.execute(
@@ -1810,7 +1917,7 @@ class _KeywordEngine:
 
     def rebuild_keyword_index(self) -> None:
         """Rebuild the keyword index from effective indexed text."""
-        with self._access.lock:
+        with self._access.write_lock():
             conn = self._access.connection()
             if not self._fts5_available:
                 self._keyword_search_diagnostic = (
@@ -2013,7 +2120,7 @@ class _SchemaManager:
 
     def mark_record_identity_current(self) -> None:
         """Record that the store has been rebuilt under the current identity scheme."""
-        with self._access.lock:
+        with self._access.write_lock():
             conn = self._access.connection()
             self._write_record_identity_version(conn)
             conn.commit()
@@ -2084,7 +2191,7 @@ class _HydrationEngine:
         if isinstance(record_id, RecordIdentity):
             source_kind = record_id.source_kind
             workspace_id = record_id.workspace_id
-        with self._access.lock:
+        with self._access.read_lock():
             conn = self._access.connection()
             conn.row_factory = sqlite3.Row
             row = conn.execute(
@@ -2121,7 +2228,7 @@ class _HydrationEngine:
         keys = list(dict.fromkeys(identity.storage_key for identity in identities))
         if not keys:
             return {}
-        with self._access.lock:
+        with self._access.read_lock():
             conn = self._access.connection()
             conn.row_factory = sqlite3.Row
             rows: list[sqlite3.Row] = []
@@ -2143,7 +2250,7 @@ class _HydrationEngine:
         storage_key = (
             record_id.storage_key if isinstance(record_id, RecordIdentity) else record_id
         )
-        with self._access.lock:
+        with self._access.read_lock():
             conn = self._access.connection()
             row = conn.execute(
                 """
@@ -2165,7 +2272,7 @@ class _HydrationEngine:
         parent_key = (
             parent_id.storage_key if isinstance(parent_id, RecordIdentity) else parent_id
         )
-        with self._access.lock:
+        with self._access.read_lock():
             conn = self._access.connection()
             rows = conn.execute(
                 """
@@ -2223,8 +2330,7 @@ class LocalRecordBackend:
             if db_path is not None
             else InMemorySQLiteDatabase(sqlite_tuning)
         )
-        self._lock = threading.RLock()
-        self._access = _SQLiteAccess(db=self._db, lock=self._lock)
+        self._access = _SQLiteAccess(self._db)
         self._graph_engine = _GraphEngine(self._access)
         self._snapshot_lock = threading.RLock()
         self._vector_storage_stats: dict[tuple[str, int], tuple[int, int, int]] = {}
@@ -2316,7 +2422,7 @@ class LocalRecordBackend:
                     "vector upsert requires an embedding for every record; "
                     f"missing embedding for {record.storage_key!r}"
                 )
-        with self._lock:
+        with self._access.write_lock():
             conn = self._db.get_connection()
             try:
                 existing_dims = {
@@ -2544,7 +2650,7 @@ class LocalRecordBackend:
         if not record_ids:
             return
         record_ids = list(dict.fromkeys(record_ids))
-        with self._lock:
+        with self._access.write_lock():
             conn = self._db.get_connection()
             try:
                 existing_records = 0
@@ -2653,7 +2759,7 @@ class LocalRecordBackend:
         return self._keyword_engine.rebuild_keyword_index()
 
     def epoch(self) -> int:
-        with self._lock:
+        with self._access.read_lock():
             conn = self._db.get_connection()
             return self._epoch_lane.read(conn, _LocalEpochLane._RECORD_KEY)
 
@@ -2667,12 +2773,12 @@ class LocalRecordBackend:
         return self._lane_epoch(_LocalEpochLane._LANE_KEYS["graph"])
 
     def epochs(self) -> dict[str, int]:
-        with self._lock:
+        with self._access.read_lock():
             conn = self._db.get_connection()
             return self._epoch_lane.read_lanes(conn)
 
     def _lane_epoch(self, key: str) -> int:
-        with self._lock:
+        with self._access.read_lock():
             conn = self._db.get_connection()
             return self._epoch_lane.read(conn, key)
 
@@ -2776,6 +2882,7 @@ class LocalVectorStore:
         self._routing_lock = threading.RLock()
         self._adaptive_router = AdaptiveVectorRouter()
         self._last_routing_measurement: VectorRouteMeasurement | None = None
+        self._warmed_faiss_epochs: set[tuple[str, int, int]] = set()
 
     @property
     def engine_name(self) -> str:
@@ -2872,13 +2979,17 @@ class LocalVectorStore:
                     dim=dim,
                     filters=filters,
                 )
-                faiss_store.search(
-                    query_vector,
-                    k,
-                    model_name=model_name,
-                    dim=dim,
-                    filters=filters,
-                )
+                faiss_epoch_key = (model_name, dim, selection_epoch)
+                if faiss_epoch_key not in self._warmed_faiss_epochs:
+                    faiss_store.search(
+                        query_vector,
+                        k,
+                        model_name=model_name,
+                        dim=dim,
+                        filters=filters,
+                    )
+                    if not faiss_store.last_search_diagnostics.get("fallback"):
+                        self._warmed_faiss_epochs.add(faiss_epoch_key)
                 exact_hits, sqlite_ms = self._timed_search(
                     lambda: self._backend.search_vector(
                         query_vector,
@@ -2897,6 +3008,8 @@ class LocalVectorStore:
                         filters=filters,
                     )
                 )
+                if not faiss_store.last_search_diagnostics.get("fallback"):
+                    self._warmed_faiss_epochs.add(faiss_epoch_key)
                 same_results = [hit.storage_key for hit in exact_hits] == [
                     hit.storage_key for hit in faiss_hits
                 ]

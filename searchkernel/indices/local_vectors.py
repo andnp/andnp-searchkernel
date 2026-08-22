@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from threading import RLock
 from typing import Any
 
 import numpy as np
@@ -112,6 +113,45 @@ class PackedVectorCodec:
             raise ValueError(f"{context} must have a non-zero finite norm")
         return np.ascontiguousarray(vector)
 
+    @staticmethod
+    def decode_batch(
+        payloads: Sequence[bytes | bytearray | memoryview],
+        dim: int,
+        *,
+        contexts: Sequence[str] | None = None,
+    ) -> np.ndarray:
+        if dim < 1:
+            raise ValueError("stored embeddings dimension must be positive")
+        if contexts is not None and len(contexts) != len(payloads):
+            raise ValueError("stored embedding contexts must match payloads")
+        expected_size = dim * np.dtype("<f4").itemsize
+        normalized_payloads: list[bytes] = []
+        for index, payload in enumerate(payloads):
+            context = contexts[index] if contexts is not None else "stored embedding"
+            if not isinstance(payload, (bytes, bytearray, memoryview)):
+                raise ValueError(f"{context} must be packed bytes")  # noqa: TRY004
+            if len(payload) != expected_size:
+                raise ValueError(
+                    f"{context} byte length mismatch: expected {expected_size}, "
+                    f"got {len(payload)}"
+                )
+            normalized_payloads.append(bytes(payload))
+        matrix = np.frombuffer(b"".join(normalized_payloads), dtype="<f4").reshape(
+            len(normalized_payloads), dim
+        )
+        finite_rows = np.isfinite(matrix).all(axis=1)
+        if not finite_rows.all():
+            bad_row = int(np.flatnonzero(~finite_rows)[0])
+            context = contexts[bad_row] if contexts is not None else "stored embedding"
+            raise ValueError(f"{context} must contain only finite values")
+        norms = np.linalg.norm(matrix.astype(np.float64), axis=1)
+        bad_norm = ~np.isfinite(norms) | (norms == 0.0)
+        if bad_norm.any():
+            bad_row = int(np.flatnonzero(bad_norm)[0])
+            context = contexts[bad_row] if contexts is not None else "stored embedding"
+            raise ValueError(f"{context} must have a non-zero finite norm")
+        return matrix
+
     @classmethod
     def migrate_json(
         cls,
@@ -152,6 +192,18 @@ class VectorSnapshot:
         repr=False,
         compare=False,
     )
+    _metadata_string_columns: dict[str, np.ndarray] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _metadata_column_lock: RLock = field(
+        default_factory=RLock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def _position_index(self) -> dict[str, int]:
         """Build (and cache) a storage_key -> row position lookup."""
@@ -160,6 +212,18 @@ class VectorSnapshot:
             cached = {key: index for index, key in enumerate(self.storage_keys)}
             object.__setattr__(self, "_position_by_key", cached)
         return cached
+
+    def _metadata_string_column(self, field_name: str) -> np.ndarray:
+        with self._metadata_column_lock:
+            cached = self._metadata_string_columns.get(field_name)
+            if cached is None:
+                cached = np.asarray(
+                    [str(metadata.get(field_name)) for metadata in self.metadata],
+                    dtype=str,
+                )
+                cached.setflags(write=False)
+                self._metadata_string_columns[field_name] = cached
+            return cached
 
     @classmethod
     def from_rows(
@@ -279,6 +343,17 @@ class VectorSnapshot:
             return np.asarray(eligible, dtype=bool)
         if len(self.metadata) != len(self.storage_keys):
             raise ValueError("metadata must be materialized for this filter")
+        if predicate.metadata_equals is not None:
+            for field_name, value in predicate.metadata_equals:
+                eligible &= self._metadata_string_column(field_name) == value
+        if predicate.metadata_in is not None:
+            for field_name, allowed_values in predicate.metadata_in:
+                eligible &= np.isin(
+                    self._metadata_string_column(field_name),
+                    tuple(allowed_values),
+                )
+        if self._can_prefilter_metadata(predicate):
+            return np.asarray(eligible, dtype=bool)
         result = np.zeros(len(self.storage_keys), dtype=bool)
         for position in np.flatnonzero(eligible):
             workspace_id = self.workspace_ids[position]
@@ -292,6 +367,19 @@ class VectorSnapshot:
                 uri=self.uris[position],
             )
         return result
+
+    @staticmethod
+    def _can_prefilter_metadata(predicate: CompiledVectorFilter) -> bool:
+        return (
+            (predicate.metadata_equals is not None or predicate.metadata_in is not None)
+            and not predicate.source_scoped_filters
+            and predicate.project_values is None
+            and predicate.excluded_projects is None
+            and predicate.included_paths is None
+            and predicate.excluded_paths is None
+            and predicate.document_values is None
+            and predicate.excluded_documents is None
+        )
 
     @staticmethod
     def _can_prefilter_scalars(
