@@ -70,15 +70,22 @@ class HuggingFaceReranker:
     4. Score = P(yes)
     """
 
+    _batch_size = 8
+
     def __init__(
         self,
         model_name: str = "Qwen/Qwen3-Reranker-0.6B",
         device: str | None = None,
+        *,
+        batch_size: int = 8,
     ):
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self.model_name = model_name
         self._device = device or ("cuda" if self._has_cuda() else "cpu")
+        self._batch_size = batch_size
 
         # Load tokenizer and model
         tokenizer: object = AutoTokenizer.from_pretrained(model_name)
@@ -126,9 +133,8 @@ class HuggingFaceReranker:
         scores = []
 
         # Process in reasonable batches to avoid OOM
-        batch_size = 8
-        for i in range(0, len(documents), batch_size):
-            batch_docs = documents[i : i + batch_size]
+        for i in range(0, len(documents), self._batch_size):
+            batch_docs = documents[i : i + self._batch_size]
             batch_scores = self._score_batch(query, batch_docs)
             scores.extend(batch_scores)
 
