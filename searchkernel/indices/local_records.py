@@ -227,7 +227,7 @@ class _RecordWriter:
             )
             for key, row in old_rows.items()
         }
-        changed_rows: list[Record] = []
+        changed_rows: list[tuple[Record, tuple[Any, ...]]] = []
         fts_changed_keys: set[str] = set()
         keyword_changed = False
         for record in rows:
@@ -235,7 +235,7 @@ class _RecordWriter:
             previous = canonical_values.get(record.storage_key)
             if previous == values[1:]:
                 continue
-            changed_rows.append(record)
+            changed_rows.append((record, values))
             canonical_values[record.storage_key] = values[1:]
             if previous is None or (
                 previous[3] != values[4]
@@ -295,7 +295,7 @@ class _RecordWriter:
                     keywords = excluded.keywords,
                     status = excluded.status
                 """,
-                [self._record_values(record) for record in changed_rows],
+                [values for _, values in changed_rows],
             )
 
         if self._fts5_available():
