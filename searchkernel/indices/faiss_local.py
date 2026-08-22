@@ -431,7 +431,9 @@ class FAISSLocalVectorStore:
             total if exact else min(total, self.configuration.max_scan_candidates)
         )
         scan = (
-            total
+            min(k, total)
+            if exact and not filters
+            else total
             if exact
             else min(
                 candidate_budget,
