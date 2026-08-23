@@ -3158,10 +3158,13 @@ async def test_diagnostics_count_duplicates_after_final_post_processing() -> Non
 
 
 async def test_scalar_graph_fallback_is_bounded() -> None:
+    """Scalar fallback keeps active neighbor loads within its configured bound."""
     records = {record_id: _record(record_id) for record_id in ("a", "b", "c", "d")}
     lock = threading.Lock()
+    first_wave = threading.Barrier(2)
     active = 0
     maximum_active = 0
+    calls_started = 0
 
     class Graph:
         def upsert_edges(
@@ -3183,12 +3186,15 @@ async def test_scalar_graph_fallback_is_bounded() -> None:
             depth: int = 1,
             max_neighbors: int | None = None,
         ) -> Sequence[GraphNeighbor]:
-            nonlocal active, maximum_active
+            nonlocal active, calls_started, maximum_active
             with lock:
+                calls_started += 1
+                call_number = calls_started
                 active += 1
                 maximum_active = max(maximum_active, active)
             try:
-                time.sleep(0.03)
+                if call_number <= 2:
+                    first_wave.wait(timeout=1)
                 return []
             finally:
                 with lock:
@@ -3204,6 +3210,68 @@ async def test_scalar_graph_fallback_is_bounded() -> None:
     await pipeline.async_search("what relates to these records?", limit=4)
 
     assert maximum_active == 2
+
+
+async def test_bidirectional_graph_expansion_overlaps_directional_loads() -> None:
+    """Both graph directions start before either direction is released."""
+    records = {
+        record_id: _record(record_id)
+        for record_id in ("seed", "outgoing", "incoming")
+    }
+    started: set[str] = set()
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class Graph(FakeGraphMutations):
+        async def neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+            max_neighbors: int | None = None,
+        ) -> Sequence[GraphNeighbor]:
+            assert isinstance(record_id, RecordIdentity)
+            started.add("outgoing")
+            if len(started) == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=1)
+            await release.wait()
+            return [GraphNeighbor(records["outgoing"].identity, "related", 0.8)]
+
+        async def incoming_neighbors(
+            self,
+            record_id: RecordIdentity | str,
+            edge_types: list[str] | None = None,
+            depth: int = 1,
+            max_neighbors: int | None = None,
+        ) -> Sequence[GraphNeighbor]:
+            assert isinstance(record_id, RecordIdentity)
+            started.add("incoming")
+            if len(started) == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=1)
+            await release.wait()
+            return [GraphNeighbor(records["incoming"].identity, "related", 0.7)]
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("seed", 1.0)]),
+        graph_store=Graph(),
+        hydrator=_hydrator(records),
+    )
+    search = asyncio.create_task(
+        pipeline.async_search("which pages are neighbors of seed?", limit=3)
+    )
+    await asyncio.wait_for(both_started.wait(), timeout=1)
+    release.set()
+
+    outcome = await search
+
+    assert started == {"outgoing", "incoming"}
+    assert [result.record_id for result in outcome.results] == [
+        "seed",
+        "outgoing",
+        "incoming",
+    ]
 
 
 async def test_batch_graph_failures_keep_strict_and_lenient_modes() -> None:

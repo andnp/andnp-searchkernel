@@ -1472,10 +1472,13 @@ class RecordSearchPipeline:
                 plan,
                 signals=dataclass_replace(plan.signals, graph_direction="outgoing"),
             )
-            outgoing = await self._load_graph_neighbors(
-                graph_store, graph_seeds, outgoing_plan, filters
-            )
-            incoming_neighbors: dict[str, Sequence[GraphNeighbor]] = {}
+            tasks: list[asyncio.Task[dict[str, Sequence[GraphNeighbor]]]] = [
+                asyncio.create_task(
+                    self._load_graph_neighbors(
+                        graph_store, graph_seeds, outgoing_plan, filters
+                    )
+                )
+            ]
             if getattr(graph_store, "direction", None) != "both" and getattr(
                 graph_store, "_direction", None
             ) != "both" and any(
@@ -1488,9 +1491,22 @@ class RecordSearchPipeline:
                         plan.signals, graph_direction="incoming"
                     ),
                 )
-                incoming_neighbors = await self._load_graph_neighbors(
-                    graph_store, graph_seeds, incoming_plan, filters
+                tasks.append(
+                    asyncio.create_task(
+                        self._load_graph_neighbors(
+                            graph_store, graph_seeds, incoming_plan, filters
+                        )
+                    )
                 )
+            loaded = await _gather_tasks(tasks)
+            outgoing = cast(
+                dict[str, Sequence[GraphNeighbor]], loaded[0]
+            )
+            incoming_neighbors = (
+                cast(dict[str, Sequence[GraphNeighbor]], loaded[1])
+                if len(loaded) == 2
+                else {}
+            )
             merged: dict[str, dict[tuple[str, str], GraphNeighbor]] = {}
             for values in (outgoing, incoming_neighbors):
                 for seed_key, neighbors in values.items():
@@ -1589,12 +1605,24 @@ class RecordSearchPipeline:
                     ),
                 )
 
-        loaded = await _gather_tasks(
-            [asyncio.create_task(load(seed)) for seed in graph_seeds]
-        )
+        results: dict[int, tuple[str, Sequence[GraphNeighbor]]] = {}
+        next_seed_index = 0
+
+        async def worker() -> None:
+            nonlocal next_seed_index
+            while next_seed_index < len(graph_seeds):
+                seed_index = next_seed_index
+                next_seed_index += 1
+                results[seed_index] = await load(graph_seeds[seed_index])
+
+        workers = [
+            asyncio.create_task(worker())
+            for _ in range(min(self._config.max_graph_concurrency, len(graph_seeds)))
+        ]
+        await _gather_tasks(workers)
         return {
             **normalized,
-            **dict(cast(list[tuple[str, Sequence[GraphNeighbor]]], loaded)),
+            **dict(results[index] for index in range(len(graph_seeds))),
         }
 
     async def _query_embedding(self, query: str) -> tuple[Vector, str, int]:
