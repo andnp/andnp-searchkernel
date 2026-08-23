@@ -94,11 +94,9 @@ from searchkernel.ports.search_results import (
     SearchTrace,
 )
 from searchkernel.ports.stores import (
-    AsyncBatchVectorStore,
     AsyncGraphStore,
     AsyncKeywordStore,
     AsyncVectorStore,
-    BatchVectorStore,
     CacheStore,
     GraphStore,
     KeywordStore,
@@ -112,7 +110,6 @@ __all__ = [
     "MAX_SNIPPET_LENGTH",
     "MAX_TOP_K",
     "ActiveModelStore",
-    "AsyncBatchVectorStore",
     "AsyncEmbeddingProvider",
     "AsyncGraphStore",
     "AsyncKeywordStore",
@@ -123,7 +120,6 @@ __all__ = [
     "BatchGraphStore",
     "BatchParentRecordExpander",
     "BatchRecordHydrator",
-    "BatchVectorStore",
     "CacheStore",
     "CallerAuthorizationContext",
     "CandidateFilterSupport",
