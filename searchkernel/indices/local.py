@@ -832,6 +832,10 @@ class _VectorEngine:
         materialize_metadata: bool = False,
     ) -> VectorSnapshot:
         key = (model_name, dim)
+        metadata_rows: list[sqlite3.Row] | None = None
+        cached_for_metadata: VectorSnapshot | None = None
+        rows: list[sqlite3.Row] | None = None
+        snapshot_epoch: int | None = None
         with self._snapshot_lock:
             with self._access.read_lock():
                 conn = self._access.connection()
@@ -848,22 +852,48 @@ class _VectorEngine:
                     )
                 ):
                     return cached
-                metadata_columns = ", r.metadata, r.uri" if materialize_metadata else ""
-                rows = conn.execute(
-                    f"""
-                    SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                           r.status{metadata_columns}, v.embedding, v.format_version,
-                           v.normalization_policy
-                    FROM local_records r
-                    JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
-                    WHERE v.encoder_namespace = ? AND v.dim = ?
-                    ORDER BY r.storage_key
-                    """,
-                    (model_name, dim),
-                ).fetchall()
-                snapshot_epoch = _LocalEpochLane.read(
-                    conn, _LocalEpochLane._LANE_KEYS["vector"]
+                if (
+                    cached is not None
+                    and cached.epoch == current_epoch
+                    and materialize_metadata
+                ):
+                    cached_for_metadata = cached
+                    metadata_rows = conn.execute(
+                        """
+                        SELECT r.storage_key, r.metadata, r.uri
+                        FROM local_records r
+                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                        WHERE v.encoder_namespace = ? AND v.dim = ?
+                        ORDER BY r.storage_key
+                        """,
+                        (model_name, dim),
+                    ).fetchall()
+                else:
+                    metadata_columns = ", r.metadata, r.uri" if materialize_metadata else ""
+                    rows = conn.execute(
+                        f"""
+                        SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                               r.status{metadata_columns}, v.embedding, v.format_version,
+                               v.normalization_policy
+                        FROM local_records r
+                        JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                        WHERE v.encoder_namespace = ? AND v.dim = ?
+                        ORDER BY r.storage_key
+                        """,
+                        (model_name, dim),
+                    ).fetchall()
+                    snapshot_epoch = _LocalEpochLane.read(
+                        conn, _LocalEpochLane._LANE_KEYS["vector"]
+                    )
+            if cached_for_metadata is not None:
+                assert metadata_rows is not None
+                snapshot = cached_for_metadata.with_materialized_metadata(
+                    metadata_rows
                 )
+                self._vector_snapshots[key] = snapshot
+                return snapshot
+            assert rows is not None
+            assert snapshot_epoch is not None
             snapshot = VectorSnapshot.from_rows(
                 rows,
                 encoder_namespace=model_name,

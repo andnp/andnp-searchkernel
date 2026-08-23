@@ -313,6 +313,34 @@ class VectorSnapshot:
             uris=tuple(uris),
         )
 
+    def with_materialized_metadata(self, rows: Sequence[Any]) -> VectorSnapshot:
+        """Attach row metadata while sharing the immutable search state."""
+        metadata: list[dict[str, Any]] = []
+        uris: list[str | None] = []
+        for position, row in enumerate(rows):
+            if (
+                position >= len(self.storage_keys)
+                or row["storage_key"] != self.storage_keys[position]
+            ):
+                raise ValueError("metadata rows do not match snapshot ordering")
+            metadata.append(dict(metadata_mapping(row["metadata"])))
+            uris.append(row["uri"])
+        if len(metadata) != len(self.storage_keys):
+            raise ValueError("metadata rows do not match snapshot length")
+        return VectorSnapshot(
+            encoder_namespace=self.encoder_namespace,
+            dim=self.dim,
+            epoch=self.epoch,
+            matrix=self.matrix,
+            storage_keys=self.storage_keys,
+            source_ids=self.source_ids,
+            workspace_ids=self.workspace_ids,
+            source_kinds=self.source_kinds,
+            statuses=self.statuses,
+            metadata=tuple(metadata),
+            uris=tuple(uris),
+        )
+
     def filter_mask(
         self,
         filters: Mapping[str, Any] | None,
