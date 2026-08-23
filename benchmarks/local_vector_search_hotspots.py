@@ -85,7 +85,12 @@ def _build_corpus(
             body=f"benchmark body text for record {index}",
             created_at=_TIMESTAMP,
             updated_at=_TIMESTAMP,
-            metadata={"project_id": f"p{index % 11}"},
+            metadata={
+                "project_id": f"p{index % 11}",
+                "file_path": f"src/file-{index % 101}.py",
+                "doc_id": f"doc-{index % 97}",
+                "acl": ["allowed"] if index % 3 else ["blocked"],
+            },
             embedding=vectors[index].tolist(),
         )
         for index in range(record_count)
@@ -153,12 +158,39 @@ def run_benchmark(
                 "statuses": ["active"],
             },
         ),
-        "search_metadata_filtered": lambda: backend.search_vector(
+        "search_project_filtered": lambda: backend.search_vector(
             query_list,
             10,
             model_name=_MODEL_NAME,
             dim=dim,
             filters={"project_ids": ["p3"]},
+        ),
+        "search_path_filtered": lambda: backend.search_vector(
+            query_list,
+            10,
+            model_name=_MODEL_NAME,
+            dim=dim,
+            filters={"paths": ["file-3.py"]},
+        ),
+        "search_document_filtered": lambda: backend.search_vector(
+            query_list,
+            10,
+            model_name=_MODEL_NAME,
+            dim=dim,
+            filters={"document_ids": ["doc-3"]},
+        ),
+        "search_source_scoped_filtered": lambda: backend.search_vector(
+            query_list,
+            10,
+            model_name=_MODEL_NAME,
+            dim=dim,
+            filters={
+                "source_scoped_filters": {
+                    "note": {
+                        "metadata_contains_any": {"acl": ["allowed"]}
+                    }
+                }
+            },
         ),
     }
 
