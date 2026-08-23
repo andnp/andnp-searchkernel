@@ -1477,6 +1477,7 @@ class PGVectorStore:
             cursor.execute("SELECT DISTINCT table_name FROM vector_tables;")
             table_names = [row[0] for row in cursor.fetchall()]
 
+            deleted_vector_count = 0
             for table_name in table_names:
                 _execute(
                     cursor,
@@ -1485,15 +1486,17 @@ class PGVectorStore:
                     ),
                     (storage_ids,),
                 )
+                deleted_vector_count += max(cursor.rowcount, 0)
 
             cursor.execute(
                 "DELETE FROM records WHERE record_id = ANY(%s);", (storage_ids,)
             )
+            deleted_record_count = max(cursor.rowcount, 0)
 
             _POSTGRES_EPOCH_LANE.bump(
                 cursor,
-                keyword=True,
-                vector=True,
+                keyword=deleted_record_count > 0,
+                vector=deleted_vector_count > 0,
                 graph=graph_changed,
             )
 
@@ -1577,16 +1580,18 @@ class PGVectorStore:
                     ).format(remaining_clause),
                     (deleted_vector_ids,),
                 )
+                deleted_record_count = max(cursor.rowcount, 0)
             else:
                 graph_changed = False
                 cursor.execute(
                     "DELETE FROM records WHERE record_id = ANY(%s);",
                     (deleted_vector_ids,),
                 )
+                deleted_record_count = max(cursor.rowcount, 0)
 
             _POSTGRES_EPOCH_LANE.bump(
                 cursor,
-                keyword=True,
+                keyword=deleted_record_count > 0,
                 vector=True,
                 graph=graph_changed,
             )

@@ -546,6 +546,76 @@ class TestVectorStore:
             )
         ]
 
+    def test_global_delete_unknown_records_preserves_mutation_epochs(
+        self, pg_conn, fixture_records
+    ):
+        """Deleting unknown records leaves every mutation epoch unchanged.
+
+        A no-op global deletion must not invalidate keyword or vector caches.
+        """
+        store = PGVectorStore(pg_conn)
+        store.upsert(fixture_records[:1], model_name="empty-model", dim=4)
+        before = store.epochs()
+
+        store.delete([RecordIdentity(None, "note", "missing").storage_key])
+
+        assert store.epochs() == before
+
+    def test_model_delete_unknown_records_preserves_mutation_epochs(
+        self, pg_conn, fixture_records
+    ):
+        """Deleting unknown model vectors leaves every epoch unchanged.
+
+        A model-scoped no-op must not invalidate any mutation-dependent cache.
+        """
+        store = PGVectorStore(pg_conn)
+        store.upsert(fixture_records[:1], model_name="model-one", dim=4)
+        before = store.epochs()
+
+        store.delete_for_model(
+            [RecordIdentity(None, "note", "missing").storage_key],
+            "model-one",
+            4,
+        )
+
+        assert store.epochs() == before
+
+    def test_model_delete_only_bumps_vector_epoch_when_record_survives(
+        self, pg_conn
+    ):
+        """Deleting one model vector preserves keyword and graph epochs.
+
+        A canonical record retained by another model has no keyword mutation.
+        """
+        store = PGVectorStore(pg_conn)
+        now = datetime.now(UTC)
+        record = Record(
+            source_kind="note",
+            source_id="shared-model",
+            title="Shared model",
+            body="Shared model",
+            created_at=now,
+            updated_at=now,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        store.upsert([record], "model-one", 4)
+        store.upsert([record], "model-two", 4)
+        before = store.epochs()
+
+        store.delete_for_model([record.storage_key], "model-one", 4)
+
+        after = store.epochs()
+        assert after == {
+            "keyword": before["keyword"],
+            "vector": before["vector"] + 1,
+            "graph": before["graph"],
+        }
+        embedding = record.embedding
+        assert embedding is not None
+        assert store.search(
+            embedding, k=1, model_name="model-two", dim=4
+        )
+
     def test_delete_rejects_bare_source_id(self, pg_conn, fixture_records):
         store = PGVectorStore(pg_conn)
         store.upsert(fixture_records[:1], model_name="test-model", dim=4)
