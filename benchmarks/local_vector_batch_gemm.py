@@ -13,10 +13,44 @@ import json
 import statistics
 import time
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
 
+from searchkernel.domain import Record
+from searchkernel.indices import LocalRecordBackend
+
+
+def _library_entry_parity() -> bool:
+    """Verify the benchmark's contract through the concrete local entry point."""
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    records = [
+        Record(
+            workspace_id="workspace",
+            source_kind="note",
+            source_id=f"record-{index}",
+            title=f"record-{index}",
+            body=f"record-{index}",
+            created_at=timestamp,
+            updated_at=timestamp,
+            embedding=vector.tolist(),
+        )
+        for index, vector in enumerate(
+            np.asarray([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], dtype=np.float32)
+        )
+    ]
+    backend = LocalRecordBackend()
+    backend.upsert(records, "benchmark", 2)
+    queries = [[1.0, 0.0], [0.0, 1.0]]
+    batch = backend.search_vector_batch(queries, 2, model_name="benchmark", dim=2)
+    scalar = [
+        backend.search_vector(query, 2, model_name="benchmark", dim=2)
+        for query in queries
+    ]
+    return [
+        [hit.storage_key for hit in result] for result in batch
+    ] == [[hit.storage_key for hit in result] for result in scalar]
 
 def _top_k(scores: np.ndarray, keys: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
     candidates = np.argpartition(-scores, min(k, len(scores)) - 1)[:k]
@@ -136,6 +170,7 @@ def run_benchmark(
             "maximum_regression_ratio": 0.05,
         },
         "results": results,
+        "library_entry_parity": _library_entry_parity(),
         "passed": all(result["parity"] and result["gate"] for result in results),
     }
 
