@@ -179,7 +179,16 @@ def _vector_table_name(model_name: str, dim: int) -> str:
 
 def _vector_literal(vec: Vector) -> str:
     """Serialize a Python vector to pgvector's `[v1,v2,...]` text format."""
-    return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+    components: list[str] = []
+    for value in vec:
+        try:
+            component = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("embedding values must be finite numbers") from exc
+        if not math.isfinite(component):
+            raise ValueError("embedding values must be finite numbers")
+        components.append(repr(component))
+    return "[" + ",".join(components) + "]"
 
 
 def _parse_vector_literal(value: str) -> Vector:

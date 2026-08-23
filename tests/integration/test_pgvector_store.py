@@ -227,7 +227,7 @@ class TestVectorStore:
     def test_duplicate_storage_keys_keep_last_record_and_vector(
         self, pg_conn, fixture_records
     ):
-        """Duplicate storage keys use the final record without a cardinality error."""
+        """Duplicate keys use the final vector without a cardinality error."""
         store = PGVectorStore(pg_conn)
         first = fixture_records[0]
         last = replace(
@@ -250,7 +250,33 @@ class TestVectorStore:
         ) == ("[0,0,0,1]",)
         assert pg_conn.execute_one("SELECT COUNT(*) FROM records;") == (1,)
 
-    def test_upsert_repairs_payload_when_revision_matches(self, pg_conn, fixture_records):
+    @pytest.mark.parametrize(
+        ("embedding", "message"),
+        [
+            (cast(Vector, [1.0, float("nan"), 0.0, 0.0]), "finite numbers"),
+            (cast(Vector, [1.0, float("inf"), 0.0, 0.0]), "finite numbers"),
+            (cast(Vector, [1.0, object(), 0.0, 0.0]), "finite numbers"),
+        ],
+    )
+    def test_invalid_vector_elements_roll_back_storage(
+        self, pg_conn, fixture_records, embedding, message
+    ):
+        """Invalid vector elements fail before canonical rows are committed."""
+        store = PGVectorStore(pg_conn)
+        record = replace(
+            fixture_records[0], source_id="invalid-vector", embedding=embedding
+        )
+
+        with pytest.raises(ValueError, match=message):
+            store.upsert([record], model_name="invalid-vector-model", dim=4)
+
+        assert store.epochs() == {"keyword": 0, "vector": 0, "graph": 0}
+        assert pg_conn.execute_one("SELECT COUNT(*) FROM records;") == (0,)
+        assert pg_conn.execute_one("SELECT COUNT(*) FROM vector_tables;") == (0,)
+
+    def test_upsert_repairs_damaged_payload_when_revision_matches(
+        self, pg_conn, fixture_records
+    ):
         """A matching revision does not hide a damaged stored vector."""
         store = PGVectorStore(pg_conn)
         record = fixture_records[0]
