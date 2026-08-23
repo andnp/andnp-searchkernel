@@ -181,6 +181,130 @@ def test_repeated_canonical_sync_preserves_results_without_keyword_epoch_changes
     assert hydrated.body == "raw body"
 
 
+def test_record_insert_update_delete_preserves_epoch_and_search_contract(
+    tmp_path: Path,
+) -> None:
+    """Insert, update, and delete keep records and keyword epochs coherent."""
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    record = _record("note", "mutation", "initial body")
+
+    backend.index([record])
+    inserted = backend.epochs()
+    hydrated = backend.hydrate_record(record.storage_key)
+    assert hydrated is not None
+    assert hydrated.storage_key == record.storage_key
+    assert hydrated.body == record.body
+    assert [hit.source_id for hit in backend.search_keyword("initial", 10)] == [
+        "mutation"
+    ]
+
+    record.body = "updated body"
+    backend.index([record])
+    updated = backend.epochs()
+    assert updated["keyword"] == inserted["keyword"] + 1
+    hydrated = backend.hydrate_record(record.storage_key)
+    assert hydrated is not None
+    assert hydrated.body == "updated body"
+    assert backend.search_keyword("initial", 10) == []
+    assert [hit.source_id for hit in backend.search_keyword("updated", 10)] == [
+        "mutation"
+    ]
+
+    backend.delete([record.storage_key])
+    deleted = backend.epochs()
+    assert deleted["keyword"] == updated["keyword"] + 1
+    assert backend.hydrate_record(record.storage_key) is None
+    assert backend.search_keyword("updated", 10) == []
+
+
+def test_vector_only_upsert_changes_vector_epoch_without_keyword_churn(
+    tmp_path: Path,
+) -> None:
+    """Changing only an embedding invalidates vector readers, not FTS readers."""
+    backend, _keyword, vector, _graph = _backend(tmp_path)
+    record = _record("note", "vector-only", "stable keyword")
+    record.embedding = [1.0, 0.0]
+
+    vector.upsert([record], "test", 2)
+    before = backend.epochs()
+    record.embedding = [0.0, 1.0]
+    vector.upsert([record], "test", 2)
+
+    after = backend.epochs()
+    assert after["vector"] == before["vector"] + 1
+    assert after["keyword"] == before["keyword"]
+    assert [hit.source_id for hit in backend.search_keyword("stable", 10)] == [
+        "vector-only"
+    ]
+    assert vector.search(
+        [0.0, 1.0], 1, model_name="test", dim=2
+    )[0].source_id == "vector-only"
+
+
+def test_keyword_only_upsert_changes_keyword_epoch_without_vector_churn(
+    tmp_path: Path,
+) -> None:
+    """Changing record text invalidates keyword readers, not vector readers."""
+    backend, _keyword, _vector, _graph = _backend(tmp_path)
+    record = _record("note", "keyword-only", "old keyword")
+
+    backend.index([record])
+    before = backend.epochs()
+    record.body = "new keyword"
+    backend.index([record])
+
+    after = backend.epochs()
+    assert after["keyword"] == before["keyword"] + 1
+    assert after["vector"] == before["vector"]
+    assert backend.search_keyword("old", 10) == []
+    assert [hit.source_id for hit in backend.search_keyword("new", 10)] == [
+        "keyword-only"
+    ]
+
+
+def test_graph_mutation_changes_only_graph_lane_epoch(tmp_path: Path) -> None:
+    """Adding a graph edge invalidates graph readers without lane cross-talk."""
+    backend, _keyword, _vector, graph = _backend(tmp_path)
+    source = _record("note", "graph-source", "source")
+    target = _record("note", "graph-target", "target")
+    backend.index([source, target])
+    before = backend.epochs()
+
+    graph.upsert_edges([(source.storage_key, target.storage_key, "related", 0.5)])
+
+    after = backend.epochs()
+    assert after["graph"] == before["graph"] + 1
+    assert after["keyword"] == before["keyword"]
+    assert after["vector"] == before["vector"]
+    assert [neighbor.identity.storage_key for neighbor in graph.neighbors(source.storage_key)] == [
+        target.storage_key
+    ]
+
+
+def test_failed_upsert_rolls_back_records_vectors_and_epochs(tmp_path: Path) -> None:
+    """A failed mixed upsert leaves prior records, vectors, and epochs intact."""
+    backend, _keyword, vector, _graph = _backend(tmp_path)
+    good = _record("note", "good", "original")
+    good.embedding = [1.0, 0.0]
+    vector.upsert([good], "test", 2)
+    before = backend.epochs()
+
+    good.body = "replacement"
+    bad = _record("note", "bad", "invalid", metadata={"invalid": object()})
+    bad.embedding = [0.0, 1.0]
+    with pytest.raises(TypeError):
+        vector.upsert([good, bad], "test", 2)
+
+    restored = backend.hydrate_record(good.storage_key)
+    assert restored is not None
+    assert restored.body == "original"
+    assert backend.hydrate_record(bad.storage_key) is None
+    assert backend.epochs() == before
+    assert vector.search([1.0, 0.0], 1, model_name="test", dim=2)[0].source_id == (
+        "good"
+    )
+
+
 def test_changed_indexed_fields_update_keyword_results_and_hydrated_record(
     tmp_path,
 ) -> None:

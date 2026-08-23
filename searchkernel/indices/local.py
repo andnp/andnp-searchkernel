@@ -2390,128 +2390,24 @@ class _HydrationEngine:
         }
 
 
-class LocalRecordBackend:
-    """Shared durable state for the local vector, keyword, and graph stores."""
+class _LocalMutationCoordinator:
+    """Coordinate local record mutations and their durable epoch effects."""
 
     def __init__(
         self,
-        db_path: Path | None = None,
+        access: _SQLiteAccess,
         *,
-        db_manager: SQLiteDatabase | None = None,
-        sqlite_tuning: SQLiteTuning | None = None,
-        keyword_overfetch_multiplier: float = 4.0,
-        keyword_artifact_scorer: KeywordArtifactScorer | None = None,
-        vector_engine: str = "exact",
-        faiss_threshold: int = 50_000,
-        vector_snapshot_max_rows: int = 100_000,
-        vector_snapshot_max_bytes: int = _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES,
+        record_writer: _RecordWriter,
+        fts5_available: Callable[[], bool],
     ) -> None:
-        if db_manager is not None and db_path is not None:
-            raise ValueError("pass db_path or db_manager, not both")
-        if db_manager is not None and sqlite_tuning is not None:
-            raise ValueError("sqlite_tuning belongs to a new database manager")
-        if not math.isfinite(keyword_overfetch_multiplier) or keyword_overfetch_multiplier < 1.0:
-            raise ValueError("keyword_overfetch_multiplier must be finite and at least 1")
-        if vector_engine not in {"exact", "faiss", "auto"}:
-            raise ValueError("vector_engine must be exact, faiss, or auto")
-        if faiss_threshold < 1:
-            raise ValueError("faiss_threshold must be positive")
-        if vector_snapshot_max_rows < 1:
-            raise ValueError("vector_snapshot_max_rows must be positive")
-        if vector_snapshot_max_bytes < 1:
-            raise ValueError("vector_snapshot_max_bytes must be positive")
-        # An injected manager belongs to the caller; only managers created by
-        # this backend may be closed by the backend.
-        self._owns_database = db_manager is None
-        self._db = db_manager or (
-            DatabaseManager(db_path, tuning=sqlite_tuning)
-            if db_path is not None
-            else InMemorySQLiteDatabase(sqlite_tuning)
-        )
-        self._access = _SQLiteAccess(self._db)
-        self._graph_engine = _GraphEngine(self._access)
-        self._snapshot_lock = threading.RLock()
-        self._vector_storage_stats: dict[tuple[str, int], tuple[int, int, int]] = {}
-        self._vector_snapshots: dict[tuple[str, int], VectorSnapshot] = (
-            _VectorSnapshotCache(self._vector_storage_stats)
-        )
-        self._epoch_lane = _LocalEpochLane()
-        self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
-        self._keyword_artifact_scorer = keyword_artifact_scorer or FilesystemArtifactScorer()
-        self._vector_engine = vector_engine
-        self._faiss_threshold = faiss_threshold
-        self._vector_snapshot_max_rows = vector_snapshot_max_rows
-        self._vector_snapshot_max_bytes = vector_snapshot_max_bytes
-        self._vector_snapshot_engine = _VectorEngine(
-            self._access,
-            snapshot_lock=self._snapshot_lock,
-            vector_snapshots=self._vector_snapshots,
-            vector_storage_stats=self._vector_storage_stats,
-            vector_snapshot_max_rows=self._vector_snapshot_max_rows,
-            vector_snapshot_max_bytes=self._vector_snapshot_max_bytes,
-            matches=self._matches,
-            status_values=self._status_values,
-            filter_values=self._filter_values,
-            filter_sql=lambda filters: self._keyword_engine._keyword_filter_sql(
-                filters
-            ),
-        )
-        self._keyword_engine = _KeywordEngine(
-            self._access,
-            status_values=self._status_values,
-            filter_values=self._filter_values,
-            matches=self._matches,
-            metadata_keyword_text=_keyword_scoring.metadata_keyword_text,
-            metadata_uri=_keyword_scoring.metadata_uri,
-            keyword_overfetch_multiplier=self._keyword_overfetch_multiplier,
-            artifact_scorer=self._keyword_artifact_scorer,
-        )
-        self._record_writer = _RecordWriter(
-            self._access,
-            metadata_keyword_text=_keyword_scoring.metadata_keyword_text,
-            metadata_uri=_keyword_scoring.metadata_uri,
-            fts5_available=lambda: self._keyword_engine._fts5_available,
-            epoch_bump=self._epoch_lane.bump,
-        )
-        self._schema_manager = _SchemaManager(
-            self._access,
-            initialize_keyword_schema=self._keyword_engine.initialize_schema,
-            initialize_graph_schema=self._graph_engine.initialize_schema,
-        )
-        self._hydration_engine = _HydrationEngine(self._access)
-        self._schema_manager.initialize_schema()
-
-    @property
-    def db_manager(self) -> SQLiteDatabase:
-        return self._db
-
-    def close(self) -> None:
-        """Close the database created by this backend, if it owns one."""
-        if self._owns_database:
-            self._db.close()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
-        self.close()
-
-    @property
-    def record_identity_stale(self) -> bool:
-        """Whether stored records were written under an older identity scheme."""
-        return self._schema_manager.record_identity_stale
-
-    def mark_record_identity_current(self) -> None:
-        """Record that the store has been rebuilt under the current identity scheme."""
-        self._schema_manager.mark_record_identity_current()
-
+        self._access = access
+        self._record_writer = record_writer
+        self._fts5_available = fts5_available
 
     def index(self, records: list[Record]) -> None:
-        """Index records for keyword retrieval."""
         self._record_writer._upsert_records(records)
 
     def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
-        """Persist records and their optional model-specific embeddings."""
         if dim < 1:
             raise ValueError("dim must be positive")
         rows = list(records)
@@ -2524,7 +2420,7 @@ class LocalRecordBackend:
                     f"missing embedding for {record.storage_key!r}"
                 )
         with self._access.write_lock():
-            conn = self._db.get_connection()
+            conn = self._access.connection()
             try:
                 existing_dims = {
                     int(row[0])
@@ -2616,7 +2512,7 @@ class LocalRecordBackend:
                         for storage_key, embedding, revision in changed_vectors
                     ],
                 )
-                self._epoch_lane.bump(
+                _LocalEpochLane.bump(
                     conn,
                     keyword=keyword_changed,
                     vector=vector_affected,
@@ -2625,6 +2521,233 @@ class LocalRecordBackend:
             except Exception:
                 conn.rollback()
                 raise
+
+    def delete(self, record_ids: list[str]) -> None:
+        if not record_ids:
+            return
+        record_ids = list(dict.fromkeys(record_ids))
+        with self._access.write_lock():
+            conn = self._access.connection()
+            try:
+                existing_records = 0
+                existing_vectors = 0
+                deleted_graph_edges = 0
+                existing_rows: list[sqlite3.Row] = []
+                for key_chunk in iter_ordered_key_chunks(
+                    record_ids, limit=DEFAULT_KEY_CHUNK_LIMIT
+                ):
+                    placeholders = ",".join("?" for _ in key_chunk)
+                    existing_rows.extend(
+                        conn.execute(
+                            f"""
+                            SELECT storage_key, rowid, title, body, indexed_text, uri, keywords
+                            FROM local_records
+                            WHERE storage_key IN ({placeholders})
+                            """,
+                            key_chunk,
+                        ).fetchall()
+                    )
+                    existing_vectors += int(
+                        conn.execute(
+                            f"""
+                            SELECT COUNT(*) FROM local_vectors_v2
+                            WHERE storage_key IN ({placeholders})
+                            """,
+                            key_chunk,
+                        ).fetchone()[0]
+                    )
+                existing_records = len(existing_rows)
+                if self._fts5_available():
+                    conn.executemany(
+                        f"""
+                        INSERT INTO {_LOCAL_FTS_TABLE}
+                            ({_LOCAL_FTS_TABLE}, rowid, title, body, uri, keywords)
+                        VALUES ('delete', ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            (
+                                row["rowid"],
+                                row["title"],
+                                row["indexed_text"] or row["body"],
+                                row["uri"],
+                                row["keywords"],
+                            )
+                            for row in existing_rows
+                        ],
+                    )
+                for key_chunk in iter_ordered_key_chunks(
+                    record_ids, limit=DEFAULT_KEY_CHUNK_LIMIT
+                ):
+                    placeholders = ",".join("?" for _ in key_chunk)
+                    deleted_graph_edges += conn.execute(
+                        f"""
+                        DELETE FROM local_graph_edges
+                        WHERE source_id IN ({placeholders})
+                           OR target_id IN ({placeholders})
+                        """,
+                        (*key_chunk, *key_chunk),
+                    ).rowcount
+                    conn.execute(
+                        f"DELETE FROM local_vectors_v2 WHERE storage_key IN ({placeholders})",
+                        key_chunk,
+                    )
+                    conn.execute(
+                        f"DELETE FROM local_records WHERE storage_key IN ({placeholders})",
+                        key_chunk,
+                    )
+                _LocalEpochLane.bump(
+                    conn,
+                    keyword=existing_records > 0,
+                    vector=existing_vectors > 0,
+                    graph=deleted_graph_edges > 0,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+    def epoch(self) -> int:
+        with self._access.read_lock():
+            return _LocalEpochLane.read(
+                self._access.connection(), _LocalEpochLane._RECORD_KEY
+            )
+
+    def lane_epoch(self, lane: str) -> int:
+        with self._access.read_lock():
+            return _LocalEpochLane.read(self._access.connection(), lane)
+
+    def epochs(self) -> dict[str, int]:
+        with self._access.read_lock():
+            return _LocalEpochLane.read_lanes(self._access.connection())
+
+
+class LocalRecordBackend:
+    """Shared durable state for the local vector, keyword, and graph stores."""
+
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        *,
+        db_manager: SQLiteDatabase | None = None,
+        sqlite_tuning: SQLiteTuning | None = None,
+        keyword_overfetch_multiplier: float = 4.0,
+        keyword_artifact_scorer: KeywordArtifactScorer | None = None,
+        vector_engine: str = "exact",
+        faiss_threshold: int = 50_000,
+        vector_snapshot_max_rows: int = 100_000,
+        vector_snapshot_max_bytes: int = _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES,
+    ) -> None:
+        if db_manager is not None and db_path is not None:
+            raise ValueError("pass db_path or db_manager, not both")
+        if db_manager is not None and sqlite_tuning is not None:
+            raise ValueError("sqlite_tuning belongs to a new database manager")
+        if not math.isfinite(keyword_overfetch_multiplier) or keyword_overfetch_multiplier < 1.0:
+            raise ValueError("keyword_overfetch_multiplier must be finite and at least 1")
+        if vector_engine not in {"exact", "faiss", "auto"}:
+            raise ValueError("vector_engine must be exact, faiss, or auto")
+        if faiss_threshold < 1:
+            raise ValueError("faiss_threshold must be positive")
+        if vector_snapshot_max_rows < 1:
+            raise ValueError("vector_snapshot_max_rows must be positive")
+        if vector_snapshot_max_bytes < 1:
+            raise ValueError("vector_snapshot_max_bytes must be positive")
+        # An injected manager belongs to the caller; only managers created by
+        # this backend may be closed by the backend.
+        self._owns_database = db_manager is None
+        self._db = db_manager or (
+            DatabaseManager(db_path, tuning=sqlite_tuning)
+            if db_path is not None
+            else InMemorySQLiteDatabase(sqlite_tuning)
+        )
+        self._access = _SQLiteAccess(self._db)
+        self._graph_engine = _GraphEngine(self._access)
+        self._snapshot_lock = threading.RLock()
+        self._vector_storage_stats: dict[tuple[str, int], tuple[int, int, int]] = {}
+        self._vector_snapshots: dict[tuple[str, int], VectorSnapshot] = (
+            _VectorSnapshotCache(self._vector_storage_stats)
+        )
+        self._keyword_overfetch_multiplier = keyword_overfetch_multiplier
+        self._keyword_artifact_scorer = keyword_artifact_scorer or FilesystemArtifactScorer()
+        self._vector_engine = vector_engine
+        self._faiss_threshold = faiss_threshold
+        self._vector_snapshot_max_rows = vector_snapshot_max_rows
+        self._vector_snapshot_max_bytes = vector_snapshot_max_bytes
+        self._vector_snapshot_engine = _VectorEngine(
+            self._access,
+            snapshot_lock=self._snapshot_lock,
+            vector_snapshots=self._vector_snapshots,
+            vector_storage_stats=self._vector_storage_stats,
+            vector_snapshot_max_rows=self._vector_snapshot_max_rows,
+            vector_snapshot_max_bytes=self._vector_snapshot_max_bytes,
+            matches=self._matches,
+            status_values=self._status_values,
+            filter_values=self._filter_values,
+            filter_sql=lambda filters: self._keyword_engine._keyword_filter_sql(
+                filters
+            ),
+        )
+        self._keyword_engine = _KeywordEngine(
+            self._access,
+            status_values=self._status_values,
+            filter_values=self._filter_values,
+            matches=self._matches,
+            metadata_keyword_text=_keyword_scoring.metadata_keyword_text,
+            metadata_uri=_keyword_scoring.metadata_uri,
+            keyword_overfetch_multiplier=self._keyword_overfetch_multiplier,
+            artifact_scorer=self._keyword_artifact_scorer,
+        )
+        self._record_writer = _RecordWriter(
+            self._access,
+            metadata_keyword_text=_keyword_scoring.metadata_keyword_text,
+            metadata_uri=_keyword_scoring.metadata_uri,
+            fts5_available=lambda: self._keyword_engine._fts5_available,
+            epoch_bump=_LocalEpochLane.bump,
+        )
+        self._mutation_coordinator = _LocalMutationCoordinator(
+            self._access,
+            record_writer=self._record_writer,
+            fts5_available=lambda: self._keyword_engine._fts5_available,
+        )
+        self._schema_manager = _SchemaManager(
+            self._access,
+            initialize_keyword_schema=self._keyword_engine.initialize_schema,
+            initialize_graph_schema=self._graph_engine.initialize_schema,
+        )
+        self._hydration_engine = _HydrationEngine(self._access)
+        self._schema_manager.initialize_schema()
+
+    @property
+    def db_manager(self) -> SQLiteDatabase:
+        return self._db
+
+    def close(self) -> None:
+        """Close the database created by this backend, if it owns one."""
+        if self._owns_database:
+            self._db.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()
+
+    @property
+    def record_identity_stale(self) -> bool:
+        """Whether stored records were written under an older identity scheme."""
+        return self._schema_manager.record_identity_stale
+
+    def mark_record_identity_current(self) -> None:
+        """Record that the store has been rebuilt under the current identity scheme."""
+        self._schema_manager.mark_record_identity_current()
+
+
+    def index(self, records: list[Record]) -> None:
+        """Index records for keyword retrieval."""
+        self._mutation_coordinator.index(records)
+
+    def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
+        """Persist records and their optional model-specific embeddings."""
+        self._mutation_coordinator.upsert(records, model_name, dim)
 
     @staticmethod
     def _status_values(filters: SearchFilters | None) -> set[str]:
@@ -2750,88 +2873,7 @@ class LocalRecordBackend:
         return self._hydration_engine.chunk_records(parent_id)
 
     def delete(self, record_ids: list[str]) -> None:
-        if not record_ids:
-            return
-        record_ids = list(dict.fromkeys(record_ids))
-        with self._access.write_lock():
-            conn = self._db.get_connection()
-            try:
-                existing_records = 0
-                existing_vectors = 0
-                deleted_graph_edges = 0
-                existing_rows: list[sqlite3.Row] = []
-                for key_chunk in iter_ordered_key_chunks(
-                    record_ids, limit=DEFAULT_KEY_CHUNK_LIMIT
-                ):
-                    placeholders = ",".join("?" for _ in key_chunk)
-                    existing_rows.extend(
-                        conn.execute(
-                            f"""
-                            SELECT storage_key, rowid, title, body, indexed_text, uri, keywords
-                            FROM local_records
-                            WHERE storage_key IN ({placeholders})
-                            """,
-                            key_chunk,
-                        ).fetchall()
-                    )
-                    existing_vectors += int(
-                        conn.execute(
-                            f"""
-                            SELECT COUNT(*) FROM local_vectors_v2
-                            WHERE storage_key IN ({placeholders})
-                            """,
-                            key_chunk,
-                        ).fetchone()[0]
-                    )
-                existing_records = len(existing_rows)
-                if self._fts5_available:
-                    conn.executemany(
-                        f"""
-                        INSERT INTO {_LOCAL_FTS_TABLE}
-                            ({_LOCAL_FTS_TABLE}, rowid, title, body, uri, keywords)
-                        VALUES ('delete', ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            (
-                                row["rowid"],
-                                row["title"],
-                                row["indexed_text"] or row["body"],
-                                row["uri"],
-                                row["keywords"],
-                            )
-                            for row in existing_rows
-                        ],
-                    )
-                for key_chunk in iter_ordered_key_chunks(
-                    record_ids, limit=DEFAULT_KEY_CHUNK_LIMIT
-                ):
-                    placeholders = ",".join("?" for _ in key_chunk)
-                    deleted_graph_edges += conn.execute(
-                        f"""
-                        DELETE FROM local_graph_edges
-                        WHERE source_id IN ({placeholders})
-                           OR target_id IN ({placeholders})
-                        """,
-                        (*key_chunk, *key_chunk),
-                    ).rowcount
-                    conn.execute(
-                        f"DELETE FROM local_vectors_v2 WHERE storage_key IN ({placeholders})",
-                        key_chunk,
-                    )
-                    conn.execute(
-                        f"DELETE FROM local_records WHERE storage_key IN ({placeholders})",
-                        key_chunk,
-                    )
-                self._epoch_lane.bump(
-                    conn,
-                    keyword=existing_records > 0,
-                    vector=existing_vectors > 0,
-                    graph=deleted_graph_edges > 0,
-                )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        self._mutation_coordinator.delete(record_ids)
 
     @property
     def _fts5_available(self) -> bool:
@@ -2862,28 +2904,19 @@ class LocalRecordBackend:
         return self._keyword_engine.rebuild_keyword_index()
 
     def epoch(self) -> int:
-        with self._access.read_lock():
-            conn = self._db.get_connection()
-            return self._epoch_lane.read(conn, _LocalEpochLane._RECORD_KEY)
+        return self._mutation_coordinator.epoch()
 
     def keyword_epoch(self) -> int:
-        return self._lane_epoch(_LocalEpochLane._LANE_KEYS["keyword"])
+        return self._mutation_coordinator.lane_epoch(_LocalEpochLane._LANE_KEYS["keyword"])
 
     def vector_epoch(self) -> int:
-        return self._lane_epoch(_LocalEpochLane._LANE_KEYS["vector"])
+        return self._mutation_coordinator.lane_epoch(_LocalEpochLane._LANE_KEYS["vector"])
 
     def graph_epoch(self) -> int:
-        return self._lane_epoch(_LocalEpochLane._LANE_KEYS["graph"])
+        return self._mutation_coordinator.lane_epoch(_LocalEpochLane._LANE_KEYS["graph"])
 
     def epochs(self) -> dict[str, int]:
-        with self._access.read_lock():
-            conn = self._db.get_connection()
-            return self._epoch_lane.read_lanes(conn)
-
-    def _lane_epoch(self, key: str) -> int:
-        with self._access.read_lock():
-            conn = self._db.get_connection()
-            return self._epoch_lane.read(conn, key)
+        return self._mutation_coordinator.epochs()
 
     def upsert_edges(
         self,
