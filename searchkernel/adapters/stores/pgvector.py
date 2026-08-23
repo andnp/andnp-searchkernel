@@ -1145,6 +1145,9 @@ class PGVectorStore:
     def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
         """Upsert records with embeddings.
 
+        The records and vector rows commit together, while the existing
+        keyword projection remains owned by :meth:`PGKeywordStore.index`.
+
         Args:
             records: Records with embedding set
             model_name: Embedding model name
@@ -1301,7 +1304,6 @@ class PGVectorStore:
 
             _POSTGRES_EPOCH_LANE.bump(
                 cursor,
-                keyword=bool(records),
                 vector=bool(changed_vector_ids),
             )
 

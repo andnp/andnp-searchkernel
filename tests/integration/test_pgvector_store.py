@@ -139,10 +139,10 @@ def fixture_records():
 class TestVectorStore:
     """Tests for VectorStore port implementation."""
 
-    def test_repeated_upsert_skips_vector_write_but_preserves_keyword_epoch(
+    def test_repeated_upsert_skips_vector_write_and_keyword_epoch(
         self, pg_conn, fixture_records
     ):
-        """An identical retry preserves the vector row and vector epoch."""
+        """An identical retry preserves both index lanes and the vector row."""
         store = PGVectorStore(pg_conn)
         record = fixture_records[0]
         table_name = _vector_table_name("repeat-model", 4)
@@ -161,7 +161,7 @@ class TestVectorStore:
         store.upsert([record], model_name="repeat-model", dim=4)
 
         assert store.epochs() == {
-            "keyword": before["keyword"] + 1,
+            "keyword": before["keyword"],
             "vector": before["vector"],
             "graph": before["graph"],
         }
@@ -204,7 +204,7 @@ class TestVectorStore:
         )
 
         assert store.epochs() == {
-            "keyword": before["keyword"] + 1,
+            "keyword": before["keyword"],
             "vector": before["vector"] + 1,
             "graph": before["graph"],
         }
@@ -277,7 +277,7 @@ class TestVectorStore:
         store.upsert([record], model_name=model_name, dim=4)
 
         assert store.epochs() == {
-            "keyword": before["keyword"] + 1,
+            "keyword": before["keyword"],
             "vector": before["vector"] + 1,
             "graph": before["graph"],
         }
@@ -551,12 +551,12 @@ class TestVectorStore:
 
         vector_store.upsert(fixture_records, model_name="test-model", dim=4)
         after_vector = vector_store.epochs()
-        assert after_vector == {"keyword": 1, "vector": 1, "graph": 0}
+        assert after_vector == {"keyword": 0, "vector": 1, "graph": 0}
         assert vector_store.epoch() == total + 1
 
         keyword_store.index(fixture_records)
         after_keyword = keyword_store.epochs()
-        assert after_keyword == {"keyword": 2, "vector": 1, "graph": 0}
+        assert after_keyword == {"keyword": 1, "vector": 1, "graph": 0}
         assert keyword_store.epoch() == total + 2
 
         edge = GraphEdge(
@@ -566,14 +566,14 @@ class TestVectorStore:
             1.0,
         )
         graph_store.upsert_edges([edge])
-        assert graph_store.epochs() == {"keyword": 2, "vector": 1, "graph": 1}
+        assert graph_store.epochs() == {"keyword": 1, "vector": 1, "graph": 1}
         assert graph_store.epochs() == keyword_store.epochs()
         assert graph_store.graph_epoch() == 1
         assert vector_store.epoch() == total + 3
 
         cache_store.set("epoch-check", {"ok": True}, epoch=3)
         cache_store.invalidate_epoch(0)
-        assert vector_store.epochs() == {"keyword": 2, "vector": 1, "graph": 1}
+        assert vector_store.epochs() == {"keyword": 1, "vector": 1, "graph": 1}
         assert vector_store.epoch() == total + 3
 
     def test_per_model_isolation(self, pg_conn, fixture_records):

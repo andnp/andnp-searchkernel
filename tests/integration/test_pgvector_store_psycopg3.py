@@ -186,7 +186,7 @@ class TestPsycopg3VectorStore:
         store.upsert([changed], model_name=model_name, dim=4)
 
         assert store.epochs() == {
-            "keyword": before["keyword"] + 1,
+            "keyword": before["keyword"],
             "vector": before["vector"] + 1,
             "graph": before["graph"],
         }
