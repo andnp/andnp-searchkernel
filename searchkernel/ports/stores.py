@@ -89,6 +89,21 @@ class VectorStore(Protocol):
         ...
 
 
+class BatchVectorStore(Protocol):
+    """Optional boundary for exact vector retrieval over query batches."""
+
+    def search_batch(
+        self,
+        query_vectors: Sequence[Vector],
+        k: int,
+        *,
+        model_name: str,
+        dim: int,
+        filters: Sequence[SearchFilters | None] | None = None,
+    ) -> Sequence[Sequence[RecordHit]]:
+        ...
+
+
 @runtime_checkable
 class KeywordStore(Protocol):
     """Indexes and searches records by keyword/BM25."""
@@ -202,6 +217,21 @@ class AsyncVectorStore(Protocol):
         dim: int,
         filters: SearchFilters | None = None,
     ) -> Sequence[RecordHit]:
+        ...
+
+
+class AsyncBatchVectorStore(Protocol):
+    """Async optional boundary for exact vector retrieval over query batches."""
+
+    async def search_batch(
+        self,
+        query_vectors: Sequence[Vector],
+        k: int,
+        *,
+        model_name: str,
+        dim: int,
+        filters: Sequence[SearchFilters | None] | None = None,
+    ) -> Sequence[Sequence[RecordHit]]:
         ...
 
 
