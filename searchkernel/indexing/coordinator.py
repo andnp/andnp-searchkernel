@@ -136,6 +136,174 @@ class _BatchOutcome:
     successful: bool = False
 
 
+class _BatchStageRunner:
+    """Execute one prepared batch without deciding durable replay policy."""
+
+    def __init__(
+        self,
+        *,
+        planner: SemanticWorkPlanner,
+        cache: EmbeddingCache,
+        encoder: EmbeddingEncoder,
+        materializer: VectorMaterializer,
+        record_ingestor: RecordIngestor | None,
+        stages: Sequence[IndexStage],
+    ) -> None:
+        self._planner = planner
+        self._cache = cache
+        self._encoder = encoder
+        self._materializer = materializer
+        self._record_ingestor = record_ingestor
+        self._stages = stages
+
+    async def run(
+        self,
+        batch: PreparedIndexBatch,
+        *,
+        records: Sequence[Record],
+        source_kind: str,
+        workspace_id: str | None,
+        batch_index: int,
+        checkpoint: Cursor,
+        failure_mode: IngestionFailureMode,
+        progress: ProgressCallback | None,
+        availability: SearchAvailability | None,
+        progress_records: list[CoordinatorProgress],
+    ) -> _BatchOutcome:
+        outcome = _BatchOutcome(records=())
+
+        if self._record_ingestor is not None:
+            try:
+                ingestion = await self._record_ingestor.index_records(
+                    records,
+                    checkpoint=checkpoint,
+                    failure_mode=failure_mode,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                failed = _failed_receipt(
+                    source_kind,
+                    workspace_id,
+                    checkpoint,
+                    records,
+                    error,
+                )
+                if failure_mode == "strict":
+                    raise IngestionError(failed) from error
+                return _BatchOutcome(
+                    records=failed.records,
+                    successful=False,
+                )
+
+            outcome.records = ingestion.records
+            await _report_progress(
+                progress,
+                CoordinatorProgress(
+                    source_kind=source_kind,
+                    workspace_id=workspace_id,
+                    batch_index=batch_index,
+                    stage="records",
+                    checkpoint=checkpoint,
+                    ingestion=ingestion,
+                    availability=availability,
+                ),
+                progress_records,
+            )
+            if ingestion.failed:
+                if failure_mode == "strict":
+                    raise IngestionError(ingestion)
+                return outcome
+        else:
+            outcome.records = tuple(
+                RecordIngestionResult(
+                    source_kind=record.source_kind,
+                    source_id=record.source_id,
+                    workspace_id=record.workspace_id,
+                    status="committed",
+                )
+                for record in records
+            )
+            for stage in self._stages:
+                try:
+                    result = await asyncio.to_thread(stage.apply, batch)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    failed = tuple(
+                        _failed_result(record, None, str(error))
+                        for record in records
+                    )
+                    if failure_mode == "strict":
+                        raise IngestionError(
+                            IngestionReceipt(
+                                source_kind=source_kind,
+                                workspace_id=workspace_id,
+                                checkpoint=checkpoint,
+                                records=failed,
+                            )
+                        ) from error
+                    return _BatchOutcome(records=failed, successful=False)
+                if inspect.isawaitable(result):
+                    result = await result
+                if not isinstance(result, StageResult):
+                    raise TypeError("index stages must return StageResult")
+                outcome.stage_results.append(result)
+                await _report_progress(
+                    progress,
+                    CoordinatorProgress(
+                        source_kind=source_kind,
+                        workspace_id=workspace_id,
+                        batch_index=batch_index,
+                        stage=result.stage,
+                        checkpoint=checkpoint,
+                        stage_result=result,
+                        availability=availability,
+                    ),
+                    progress_records,
+                )
+
+        try:
+            semantic = await self._planner.execute_async(
+                batch.semantic_inputs,
+                self._cache,
+                self._encoder,
+                self._materializer,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            failed = tuple(
+                _failed_result(record, None, str(error)) for record in records
+            )
+            if failure_mode == "strict":
+                raise IngestionError(
+                    IngestionReceipt(
+                        source_kind=source_kind,
+                        workspace_id=workspace_id,
+                        checkpoint=checkpoint,
+                        records=failed,
+                    )
+                ) from error
+            return _BatchOutcome(records=failed, successful=False)
+
+        outcome.semantic = semantic
+        await _report_progress(
+            progress,
+            CoordinatorProgress(
+                source_kind=source_kind,
+                workspace_id=workspace_id,
+                batch_index=batch_index,
+                stage="semantic",
+                checkpoint=checkpoint,
+                semantic=semantic,
+                availability=availability,
+            ),
+            progress_records,
+        )
+        outcome.successful = True
+        return outcome
+
 class ResumableSemanticCoordinator:
     """Coordinate bounded, commit-before-semantic indexing work.
 
@@ -193,6 +361,14 @@ class ResumableSemanticCoordinator:
         self._record_ingestor = record_ingestor
         self._stages = selected_stages
         self._checkpoint_store = checkpoint_store
+        self._batch_runner = _BatchStageRunner(
+            planner=self._planner,
+            cache=self._cache,
+            encoder=self._encoder,
+            materializer=self._materializer,
+            record_ingestor=record_ingestor,
+            stages=selected_stages,
+        )
 
     async def run(
         self,
@@ -269,7 +445,7 @@ class ResumableSemanticCoordinator:
                         terminal_cursor,
                     )
                     current_checkpoint = terminal_cursor
-                    await self._report(
+                    await _report_progress(
                         progress,
                         CoordinatorProgress(
                             source_kind=source.source_kind,
@@ -286,7 +462,7 @@ class ResumableSemanticCoordinator:
 
             try:
                 prepared = await self._prepare(records, prepare_batch)
-                outcome = await self._process_batch(
+                outcome = await self._batch_runner.run(
                     prepared,
                     records=records,
                     source_kind=source.source_kind,
@@ -343,7 +519,7 @@ class ResumableSemanticCoordinator:
                     terminal_cursor,
                 )
                 current_checkpoint = terminal_cursor
-                await self._report(
+                await _report_progress(
                     progress,
                     CoordinatorProgress(
                         source_kind=source.source_kind,
@@ -411,7 +587,7 @@ class ResumableSemanticCoordinator:
 
             records = tuple(prepared.record for prepared in batch.records)
             try:
-                outcome = await self._process_batch(
+                outcome = await self._batch_runner.run(
                     batch,
                     records=records,
                     source_kind=source_kind,
@@ -476,7 +652,7 @@ class ResumableSemanticCoordinator:
                         candidate,
                     )
                     current_checkpoint = candidate
-                    await self._report(
+                    await _report_progress(
                         progress,
                         CoordinatorProgress(
                             source_kind=source_kind,
@@ -570,169 +746,20 @@ class ResumableSemanticCoordinator:
             raise TypeError("prepare_batch must return PreparedIndexBatch")
         return prepared
 
-    async def _process_batch(
-        self,
-        batch: PreparedIndexBatch,
-        *,
-        records: Sequence[Record],
-        source_kind: str,
-        workspace_id: str | None,
-        batch_index: int,
-        checkpoint: Cursor,
-        failure_mode: IngestionFailureMode,
-        progress: ProgressCallback | None,
-        availability: SearchAvailability | None,
-        progress_records: list[CoordinatorProgress],
-    ) -> _BatchOutcome:
-        outcome = _BatchOutcome(records=())
-
-        if self._record_ingestor is not None:
-            try:
-                ingestion = await self._record_ingestor.index_records(
-                    records,
-                    checkpoint=checkpoint,
-                    failure_mode=failure_mode,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                failed = _failed_receipt(
-                    source_kind,
-                    workspace_id,
-                    checkpoint,
-                    records,
-                    error,
-                )
-                if failure_mode == "strict":
-                    raise IngestionError(failed) from error
-                return _BatchOutcome(
-                    records=failed.records,
-                    successful=False,
-                )
-
-            outcome.records = ingestion.records
-            await self._report(
-                progress,
-                CoordinatorProgress(
-                    source_kind=source_kind,
-                    workspace_id=workspace_id,
-                    batch_index=batch_index,
-                    stage="records",
-                    checkpoint=checkpoint,
-                    ingestion=ingestion,
-                    availability=availability,
-                ),
-                progress_records,
-            )
-            if ingestion.failed:
-                if failure_mode == "strict":
-                    raise IngestionError(ingestion)
-                return outcome
-        else:
-            outcome.records = tuple(
-                RecordIngestionResult(
-                    source_kind=record.source_kind,
-                    source_id=record.source_id,
-                    workspace_id=record.workspace_id,
-                    status="committed",
-                )
-                for record in records
-            )
-            for stage in self._stages:
-                try:
-                    result = await asyncio.to_thread(stage.apply, batch)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    failed = tuple(
-                        _failed_result(record, None, str(error))
-                        for record in records
-                    )
-                    if failure_mode == "strict":
-                        raise IngestionError(
-                            IngestionReceipt(
-                                source_kind=source_kind,
-                                workspace_id=workspace_id,
-                                checkpoint=checkpoint,
-                                records=failed,
-                            )
-                        ) from error
-                    return _BatchOutcome(records=failed, successful=False)
-                if inspect.isawaitable(result):
-                    result = await result
-                if not isinstance(result, StageResult):
-                    raise TypeError("index stages must return StageResult")
-                outcome.stage_results.append(result)
-                await self._report(
-                    progress,
-                    CoordinatorProgress(
-                        source_kind=source_kind,
-                        workspace_id=workspace_id,
-                        batch_index=batch_index,
-                        stage=result.stage,
-                        checkpoint=checkpoint,
-                        stage_result=result,
-                        availability=availability,
-                    ),
-                    progress_records,
-                )
-
-        try:
-            semantic = await self._planner.execute_async(
-                batch.semantic_inputs,
-                self._cache,
-                self._encoder,
-                self._materializer,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            failed = tuple(
-                _failed_result(record, None, str(error)) for record in records
-            )
-            if failure_mode == "strict":
-                raise IngestionError(
-                    IngestionReceipt(
-                        source_kind=source_kind,
-                        workspace_id=workspace_id,
-                        checkpoint=checkpoint,
-                        records=failed,
-                    )
-                ) from error
-            return _BatchOutcome(records=failed, successful=False)
-
-        outcome.semantic = semantic
-        await self._report(
-            progress,
-            CoordinatorProgress(
-                source_kind=source_kind,
-                workspace_id=workspace_id,
-                batch_index=batch_index,
-                stage="semantic",
-                checkpoint=checkpoint,
-                semantic=semantic,
-                availability=availability,
-            ),
-            progress_records,
-        )
-        outcome.successful = True
-        return outcome
-
-    async def _report(
-        self,
-        callback: ProgressCallback | None,
-        event: CoordinatorProgress,
-        progress_records: list[CoordinatorProgress],
-    ) -> None:
-        progress_records.append(event)
-        if callback is None:
-            return
-        if inspect.iscoroutinefunction(callback):
-            await callback(event)
-            return
-        result = await asyncio.to_thread(callback, event)
-        if inspect.isawaitable(result):
-            await result
+async def _report_progress(
+    callback: ProgressCallback | None,
+    event: CoordinatorProgress,
+    progress_records: list[CoordinatorProgress],
+) -> None:
+    progress_records.append(event)
+    if callback is None:
+        return
+    if inspect.iscoroutinefunction(callback):
+        await callback(event)
+        return
+    result = await asyncio.to_thread(callback, event)
+    if inspect.isawaitable(result):
+        await result
 
 
 async def _iter_source_batches(

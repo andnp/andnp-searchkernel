@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -234,6 +235,28 @@ class _LifecycleIngestor:
             checkpoint=None,
             records=tuple(outcomes),
         )
+
+
+class _BlockingIngestor:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def index_records(
+        self,
+        records: Sequence[Record],
+        *,
+        checkpoint: str | None = None,
+        failure_mode: IngestionFailureMode = "strict",
+    ) -> IngestionReceipt:
+        del records, checkpoint, failure_mode
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        raise AssertionError("blocking ingestor unexpectedly completed")
 
 
 def _coordinator(
@@ -753,6 +776,34 @@ async def test_generic_coordinator_passes_deletion_and_move_records_to_ingestor(
     assert ingestor.seen == ["old", "new", "new"]
     assert backend.hydrate_record(old.storage_key) is None
     assert backend.hydrate_record(moved.storage_key) is None
+    cache.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_in_flight_ingestion_propagates_to_the_batch_runner(
+    tmp_path: Path,
+) -> None:
+    """
+    Propagate cancellation from a coordinator task into active ingestion.
+    """
+    ingestor = _BlockingIngestor()
+    coordinator, cache, _, _ = _coordinator(
+        tmp_path,
+        record_ingestor=ingestor,
+    )
+    task = asyncio.create_task(
+        coordinator.run_source(
+            _CursorSource([_record("one", cursor="1")]),
+            batch_size=1,
+        )
+    )
+
+    await ingestor.started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ingestor.cancelled.is_set()
     cache.close()
 
 
