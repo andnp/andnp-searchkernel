@@ -7,9 +7,12 @@ import hashlib
 import json
 import math
 import threading
+import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal
 
 import numpy as np
 
@@ -131,6 +134,39 @@ class _CandidateMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class _CandidateMetadataSidecar:
+    path: Path
+    offsets: dict[str, tuple[int, int]]
+
+
+class _SidecarMetadataReader:
+    def __init__(self, sidecar: _CandidateMetadataSidecar, handle: BinaryIO) -> None:
+        self._sidecar = sidecar
+        self._handle = handle
+
+    def get(self, storage_key: str) -> _CandidateMetadata | None:
+        location = self._sidecar.offsets.get(storage_key)
+        if location is None:
+            return None
+        offset, length = location
+        self._handle.seek(offset)
+        raw = self._handle.read(length)
+        if len(raw) != length or not raw.endswith(b"\n"):
+            raise ValueError("FAISS metadata sidecar record is truncated")
+        value = json.loads(raw)
+        if value.get("storage_key") != storage_key:
+            raise ValueError("FAISS metadata sidecar key mismatch")
+        return _CandidateMetadata(
+            source_id=value["source_id"],
+            workspace_id=value["workspace_id"],
+            source_kind=value["source_kind"],
+            status=value["status"],
+            metadata=dict(metadata_mapping(value["metadata"])),
+            uri=value["uri"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class _FAISSState:
     index: Any
     encoder_namespace: str
@@ -140,6 +176,7 @@ class _FAISSState:
     storage_keys: tuple[str, ...]
     id_to_storage_key: dict[int, str]
     candidate_metadata: dict[str, _CandidateMetadata]
+    metadata_sidecar: _CandidateMetadataSidecar | None = None
     eligibility_masks: dict[tuple[str, str], frozenset[int]] = field(
         default_factory=dict,
         init=False,
@@ -461,44 +498,48 @@ class FAISSLocalVectorStore:
         )
         predicate = compiled_filter or compile_vector_filters(filters)
         eligibility_ids = (
-            self._eligibility_mask(state, predicate) if exact else None
+            self._eligibility_mask(state, predicate)
+            if exact and state.metadata_sidecar is None
+            else None
         )
         hits: dict[str, RecordHit] = {}
-        for scan_round in range(self.configuration.max_scan_rounds):
-            self._last_search_diagnostics["scan_rounds"] = scan_round + 1
-            with self._state_lock:
-                scores, ids = state.index.search(
-                    np.asarray(query[None, :], dtype=np.float32),
-                    scan,
+        with self._metadata_reader(state) as reader:
+            for scan_round in range(self.configuration.max_scan_rounds):
+                self._last_search_diagnostics["scan_rounds"] = scan_round + 1
+                with self._state_lock:
+                    scores, ids = state.index.search(
+                        np.asarray(query[None, :], dtype=np.float32),
+                        scan,
+                    )
+                valid_storage_keys = self._validated_storage_keys(
+                    state,
+                    (int(faiss_id) for faiss_id in ids[0]),
+                    predicate,
+                    reader=reader,
+                    eligible_ids=eligibility_ids,
                 )
-            valid_storage_keys = self._validated_storage_keys(
-                state,
-                (int(faiss_id) for faiss_id in ids[0]),
-                predicate,
-                eligible_ids=eligibility_ids,
-            )
-            returned_count = int(np.count_nonzero(ids[0] != -1))
-            for score, faiss_id in zip(scores[0], ids[0], strict=True):
-                storage_key = valid_storage_keys.get(int(faiss_id))
-                if storage_key is None:
-                    continue
-                if storage_key in hits:
-                    continue
-                hits[storage_key] = RecordHit(
-                    RecordIdentity.from_storage_key(storage_key),
-                    float(score),
-                )
-                if len(hits) >= k:
+                returned_count = int(np.count_nonzero(ids[0] != -1))
+                for score, faiss_id in zip(scores[0], ids[0], strict=True):
+                    storage_key = valid_storage_keys.get(int(faiss_id))
+                    if storage_key is None:
+                        continue
+                    if storage_key in hits:
+                        continue
+                    hits[storage_key] = RecordHit(
+                        RecordIdentity.from_storage_key(storage_key),
+                        float(score),
+                    )
+                    if len(hits) >= k:
+                        break
+                if len(hits) >= k or scan >= candidate_budget:
+                    self._last_search_diagnostics["candidate_budget_hit"] = (
+                        not exact and scan >= candidate_budget and len(hits) < k
+                    )
                     break
-            if len(hits) >= k or scan >= candidate_budget:
-                self._last_search_diagnostics["candidate_budget_hit"] = (
-                    not exact and scan >= candidate_budget and len(hits) < k
-                )
-                break
-            if returned_count < scan:
-                break
-            scan = min(candidate_budget, max(scan + 1, scan * 2))
-            self._last_search_diagnostics["scan_limit"] = scan
+                if returned_count < scan:
+                    break
+                scan = min(candidate_budget, max(scan + 1, scan * 2))
+                self._last_search_diagnostics["scan_limit"] = scan
         return sorted(
             hits.values(),
             key=lambda hit: (-hit.score, hit.storage_key),
@@ -548,12 +589,26 @@ class FAISSLocalVectorStore:
             state.eligibility_masks[key] = eligible
             return eligible
 
+    @contextmanager
+    def _metadata_reader(
+        self,
+        state: _FAISSState,
+    ) -> Iterator[
+        Mapping[str, _CandidateMetadata] | _SidecarMetadataReader | None
+    ]:
+        if state.metadata_sidecar is None:
+            yield state.candidate_metadata
+            return
+        with state.metadata_sidecar.path.open("rb") as handle:
+            yield _SidecarMetadataReader(state.metadata_sidecar, handle)
+
     @staticmethod
     def _validated_storage_keys(
         state: _FAISSState,
         faiss_ids: Any,
         predicate: CompiledVectorFilter,
         *,
+        reader: Mapping[str, _CandidateMetadata] | _SidecarMetadataReader | None = None,
         eligible_ids: frozenset[int] | None = None,
     ) -> dict[int, str]:
         valid: dict[int, str] = {}
@@ -563,11 +618,9 @@ class FAISSLocalVectorStore:
                 if storage_key is not None and faiss_id in eligible_ids:
                     valid[faiss_id] = storage_key
                 continue
-            metadata = (
-                state.candidate_metadata.get(storage_key)
-                if storage_key is not None
-                else None
-            )
+            if storage_key is None:
+                continue
+            metadata = reader.get(storage_key) if reader is not None else None
             if (
                 storage_key is not None
                 and metadata is not None
@@ -596,47 +649,95 @@ class FAISSLocalVectorStore:
             index_path = self._index_path / f"{digest}.faiss"
         return index_path, index_path.with_suffix(".json")
 
+    def _manifest_path(self, model_name: str, dim: int) -> Path:
+        index_path, _ = self._paths(model_name, dim)
+        return index_path.with_suffix(".manifest.json")
+
+    @staticmethod
+    def _metadata_value(metadata: _CandidateMetadata) -> dict[str, Any]:
+        return {
+            "source_id": metadata.source_id,
+            "workspace_id": metadata.workspace_id,
+            "source_kind": metadata.source_kind,
+            "status": metadata.status,
+            "metadata": metadata.metadata,
+            "uri": metadata.uri,
+        }
+
+    @staticmethod
+    def _common_persistence_metadata(state: _FAISSState) -> dict[str, Any]:
+        return {
+            "format_version": VECTOR_FORMAT_VERSION,
+            "normalization_policy": NORMALIZATION_POLICY,
+            "encoder_namespace": state.encoder_namespace,
+            "dim": state.dim,
+            "search_strategy": "exact",
+            "epoch": state.epoch,
+        }
+
+    def _persistence_metadata(self, state: _FAISSState) -> dict[str, Any]:
+        return {
+            **self._common_persistence_metadata(state),
+            "search_strategy": self.search_strategy,
+            "configuration": self.configuration.as_dict(),
+            "configuration_fingerprint": self.configuration.fingerprint,
+            "build_fingerprint": self.configuration.build_fingerprint,
+            "query_policy_fingerprint": (
+                self.configuration.query_policy_fingerprint
+            ),
+            "ids": list(state.ids),
+            "storage_keys": list(state.storage_keys),
+            "tombstones": [],
+        }
+
     def _persist_state(self, state: _FAISSState) -> None:
         try:
             import faiss
 
-            index_path, metadata_path = self._paths(
+            index_path, _ = self._paths(
                 state.encoder_namespace,
                 state.dim,
             )
-            atomic_write_binary(index_path, bytes(faiss.serialize_index(state.index)))
-            atomic_write_json(
-                metadata_path,
-                {
-                    "format_version": VECTOR_FORMAT_VERSION,
-                    "normalization_policy": NORMALIZATION_POLICY,
-                    "encoder_namespace": state.encoder_namespace,
-                    "dim": state.dim,
-                    "search_strategy": self.search_strategy,
-                    "configuration": self.configuration.as_dict(),
-                    "configuration_fingerprint": self.configuration.fingerprint,
-                    "build_fingerprint": self.configuration.build_fingerprint,
-                    "query_policy_fingerprint": (
-                        self.configuration.query_policy_fingerprint
-                    ),
-                    "epoch": state.epoch,
-                    "ids": list(state.ids),
-                    "storage_keys": list(state.storage_keys),
-                    "candidate_metadata": [
-                        {
-                            "source_id": metadata.source_id,
-                            "workspace_id": metadata.workspace_id,
-                            "source_kind": metadata.source_kind,
-                            "status": metadata.status,
-                            "metadata": metadata.metadata,
-                            "uri": metadata.uri,
-                        }
-                        for storage_key in state.storage_keys
-                        for metadata in (state.candidate_metadata[storage_key],)
-                    ],
-                    "tombstones": [],
-                },
+            index_bytes = bytes(faiss.serialize_index(state.index))
+            generation = (
+                f"{state.epoch}-{self.configuration.build_fingerprint[:16]}-"
+                f"{time.time_ns()}"
             )
+            generation_index = index_path.with_name(
+                f"{index_path.stem}.{generation}.faiss"
+            )
+            generation_metadata = index_path.with_name(
+                f"{index_path.stem}.{generation}.jsonl"
+            )
+            lines: list[bytes] = []
+            offsets: dict[str, dict[str, int]] = {}
+            offset = 0
+            for storage_key in state.storage_keys:
+                line = json.dumps(
+                    {
+                        "storage_key": storage_key,
+                        **self._metadata_value(state.candidate_metadata[storage_key]),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8") + b"\n"
+                lines.append(line)
+                offsets[storage_key] = {"offset": offset, "length": len(line)}
+                offset += len(line)
+            metadata_bytes = b"".join(lines)
+            atomic_write_binary(generation_index, index_bytes)
+            atomic_write_binary(generation_metadata, metadata_bytes)
+            manifest = {
+                **self._persistence_metadata(state),
+                "persistence_format": "split",
+                "generation": generation,
+                "index_file": generation_index.name,
+                "metadata_file": generation_metadata.name,
+                "index_size": len(index_bytes),
+                "metadata_size": len(metadata_bytes),
+                "metadata_offsets": offsets,
+            }
+            atomic_write_json(self._manifest_path(state.encoder_namespace, state.dim), manifest)
         except Exception as exc:  # noqa: BLE001 - optional persistence is best effort
             self._last_search_diagnostics["persistence_error"] = (
                 f"{type(exc).__name__}: {exc}"
@@ -650,71 +751,186 @@ class FAISSLocalVectorStore:
         epoch: int,
     ) -> _FAISSState | None:
         try:
-            import faiss
-
-            index_path, metadata_path = self._paths(model_name, dim)
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            build_fingerprint = metadata.get("build_fingerprint")
-            configuration_matches = (
-                build_fingerprint == self.configuration.build_fingerprint
-                if build_fingerprint is not None
-                else metadata.get("configuration_fingerprint")
-                == self.configuration.fingerprint
-            )
-            if (
-                metadata["format_version"] != VECTOR_FORMAT_VERSION
-                or metadata["normalization_policy"] != NORMALIZATION_POLICY
-                or metadata["encoder_namespace"] != model_name
-                or metadata["dim"] != dim
-                or not configuration_matches
-                or metadata["epoch"] != epoch
-            ):
-                return None
-            ids = tuple(int(value) for value in metadata["ids"])
-            storage_keys = tuple(metadata["storage_keys"])
-            if (
-                len(ids) != len(storage_keys)
-                or len(set(ids)) != len(ids)
-                or len(set(storage_keys)) != len(storage_keys)
-            ):
-                return None
-            candidate_metadata_values = metadata["candidate_metadata"]
-            if not isinstance(candidate_metadata_values, list) or len(
-                candidate_metadata_values
-            ) != len(storage_keys):
-                return None
-            candidate_metadata = {
-                storage_key: _CandidateMetadata(
-                    source_id=value["source_id"],
-                    workspace_id=value["workspace_id"],
-                    source_kind=value["source_kind"],
-                    status=value["status"],
-                    metadata=dict(metadata_mapping(value["metadata"])),
-                    uri=value["uri"],
+            manifest_path = self._manifest_path(model_name, dim)
+            if manifest_path.is_file():
+                split_state = self._load_split_state(
+                    model_name, dim, epoch, manifest_path
                 )
-                for storage_key, value in zip(
-                    storage_keys, candidate_metadata_values, strict=True
-                )
-            }
-            index = faiss.deserialize_index(np.frombuffer(index_path.read_bytes(), dtype=np.uint8))
-            if index.d != dim or index.ntotal != len(ids):
-                return None
-            self._restore_hnsw_settings(index)
-            return _FAISSState(
-                index=index,
-                encoder_namespace=model_name,
-                dim=dim,
-                epoch=epoch,
-                ids=ids,
-                storage_keys=storage_keys,
-                id_to_storage_key=dict(zip(ids, storage_keys, strict=True)),
-                candidate_metadata=candidate_metadata,
-            )
+                if split_state is not None:
+                    return split_state
+            return self._load_legacy_state(model_name, dim, epoch)
         except Exception as exc:  # noqa: BLE001 - stale or corrupt indexes rebuild
             self._last_search_diagnostics["persistence_reason"] = (
                 f"{type(exc).__name__}: {exc}"
             )
             return None
+
+    def _load_split_state(
+        self,
+        model_name: str,
+        dim: int,
+        epoch: int,
+        manifest_path: Path,
+    ) -> _FAISSState | None:
+        import faiss
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        index_path, _ = self._paths(model_name, dim)
+        generation = manifest["generation"]
+        expected_prefix = f"{epoch}-{self.configuration.build_fingerprint[:16]}-"
+        if (
+            not isinstance(generation, str)
+            or not generation.startswith(expected_prefix)
+            or not generation[len(expected_prefix) :].isdigit()
+        ):
+            return None
+        index_name = f"{index_path.stem}.{generation}.faiss"
+        metadata_name = f"{index_path.stem}.{generation}.jsonl"
+        if (
+            manifest.get("persistence_format") != "split"
+            or manifest.get("index_file") != index_name
+            or manifest.get("metadata_file") != metadata_name
+            or Path(index_name).name != index_name
+            or Path(metadata_name).name != metadata_name
+        ):
+            return None
+        build_fingerprint = manifest.get("build_fingerprint")
+        if (
+            manifest.get("format_version") != VECTOR_FORMAT_VERSION
+            or manifest.get("normalization_policy") != NORMALIZATION_POLICY
+            or manifest.get("encoder_namespace") != model_name
+            or manifest.get("dim") != dim
+            or build_fingerprint != self.configuration.build_fingerprint
+            or manifest.get("epoch") != epoch
+        ):
+            return None
+        ids, storage_keys = self._load_persisted_keys(manifest)
+        offsets = self._load_metadata_offsets(manifest, storage_keys)
+        generation_index = index_path.with_name(index_name)
+        generation_metadata = index_path.with_name(metadata_name)
+        if (
+            not generation_index.is_file()
+            or not generation_metadata.is_file()
+            or generation_index.stat().st_size != manifest["index_size"]
+            or generation_metadata.stat().st_size != manifest["metadata_size"]
+        ):
+            return None
+        index = faiss.deserialize_index(
+            np.frombuffer(generation_index.read_bytes(), dtype=np.uint8)
+        )
+        if index.d != dim or index.ntotal != len(ids):
+            return None
+        self._restore_hnsw_settings(index)
+        return _FAISSState(
+            index=index,
+            encoder_namespace=model_name,
+            dim=dim,
+            epoch=epoch,
+            ids=ids,
+            storage_keys=storage_keys,
+            id_to_storage_key=dict(zip(ids, storage_keys, strict=True)),
+            candidate_metadata={},
+            metadata_sidecar=_CandidateMetadataSidecar(
+                generation_metadata, offsets
+            ),
+        )
+
+    @staticmethod
+    def _load_persisted_keys(
+        metadata: Mapping[str, Any],
+    ) -> tuple[tuple[int, ...], tuple[str, ...]]:
+        ids = tuple(int(value) for value in metadata["ids"])
+        storage_keys = tuple(str(value) for value in metadata["storage_keys"])
+        if (
+            len(ids) != len(storage_keys)
+            or len(set(ids)) != len(ids)
+            or len(set(storage_keys)) != len(storage_keys)
+        ):
+            raise ValueError("FAISS persisted keys are not unique")
+        return ids, storage_keys
+
+    @staticmethod
+    def _load_metadata_offsets(
+        metadata: Mapping[str, Any],
+        storage_keys: tuple[str, ...],
+    ) -> dict[str, tuple[int, int]]:
+        raw_offsets = metadata["metadata_offsets"]
+        if not isinstance(raw_offsets, dict) or set(raw_offsets) != set(storage_keys):
+            raise ValueError("FAISS metadata offsets do not match storage keys")
+        metadata_size = int(metadata["metadata_size"])
+        offsets: dict[str, tuple[int, int]] = {}
+        previous_end = 0
+        for storage_key in storage_keys:
+            raw_location = raw_offsets[storage_key]
+            offset = int(raw_location["offset"])
+            length = int(raw_location["length"])
+            if offset < previous_end or length < 1 or offset + length > metadata_size:
+                raise ValueError("FAISS metadata offsets are invalid")
+            offsets[storage_key] = (offset, length)
+            previous_end = offset + length
+        return offsets
+
+    def _load_legacy_state(
+        self,
+        model_name: str,
+        dim: int,
+        epoch: int,
+    ) -> _FAISSState | None:
+        import faiss
+
+        index_path, metadata_path = self._paths(model_name, dim)
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        build_fingerprint = metadata.get("build_fingerprint")
+        configuration_matches = (
+            build_fingerprint == self.configuration.build_fingerprint
+            if build_fingerprint is not None
+            else metadata.get("configuration_fingerprint")
+            == self.configuration.fingerprint
+        )
+        if (
+            metadata["format_version"] != VECTOR_FORMAT_VERSION
+            or metadata["normalization_policy"] != NORMALIZATION_POLICY
+            or metadata["encoder_namespace"] != model_name
+            or metadata["dim"] != dim
+            or not configuration_matches
+            or metadata["epoch"] != epoch
+        ):
+            return None
+        ids, storage_keys = self._load_persisted_keys(metadata)
+        candidate_metadata_values = metadata["candidate_metadata"]
+        if not isinstance(candidate_metadata_values, list) or len(
+            candidate_metadata_values
+        ) != len(storage_keys):
+            return None
+        candidate_metadata = {
+            storage_key: _CandidateMetadata(
+                source_id=value["source_id"],
+                workspace_id=value["workspace_id"],
+                source_kind=value["source_kind"],
+                status=value["status"],
+                metadata=dict(metadata_mapping(value["metadata"])),
+                uri=value["uri"],
+            )
+            for storage_key, value in zip(
+                storage_keys, candidate_metadata_values, strict=True
+            )
+        }
+        index = faiss.deserialize_index(
+            np.frombuffer(index_path.read_bytes(), dtype=np.uint8)
+        )
+        if index.d != dim or index.ntotal != len(ids):
+            return None
+        self._restore_hnsw_settings(index)
+        return _FAISSState(
+            index=index,
+            encoder_namespace=model_name,
+            dim=dim,
+            epoch=epoch,
+            ids=ids,
+            storage_keys=storage_keys,
+            id_to_storage_key=dict(zip(ids, storage_keys, strict=True)),
+            candidate_metadata=candidate_metadata,
+        )
 
     def _restore_hnsw_settings(self, index: Any) -> None:
         if self.search_strategy != "approximate":

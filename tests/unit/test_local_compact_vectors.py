@@ -1310,7 +1310,7 @@ def test_faiss_configuration_fingerprint_persists_hnsw_settings(
     )
     store.search([1.0, 0.0], 1, model_name="model", dim=2)
 
-    metadata_path = next((tmp_path / "faiss").glob("*.json"))
+    metadata_path = next((tmp_path / "faiss").glob("*.manifest.json"))
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["configuration"] == store.configuration.as_dict()
     assert metadata["configuration_fingerprint"] == store.configuration.fingerprint
@@ -1365,7 +1365,11 @@ def test_faiss_query_policy_reload_reuses_index_and_updates_diagnostics(
 def test_faiss_persistence_compacts_candidate_metadata_and_round_trips_filters(
     tmp_path: Path,
 ) -> None:
-    """Reloaded FAISS state preserves metadata filtering and ordering."""
+    """Reload split metadata lazily while preserving filtering and ordering.
+
+    The manifest carries bounded offsets and the JSONL sidecar carries the
+    candidate payloads, so loading the index does not decode all metadata.
+    """
     pytest.importorskip("faiss")
     backend = LocalRecordBackend(tmp_path / "records.db")
     backend.upsert(
@@ -1383,7 +1387,7 @@ def test_faiss_persistence_compacts_candidate_metadata_and_round_trips_filters(
     expected = original.search(
         [1.0, 0.0], 2, model_name="model", dim=2, filters=filters
     )
-    metadata_path = next(index_path.glob("*.json"))
+    metadata_path = next(index_path.glob("*.manifest.json"))
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 
     reloaded = FAISSLocalVectorStore(backend, index_path=index_path)
@@ -1391,24 +1395,15 @@ def test_faiss_persistence_compacts_candidate_metadata_and_round_trips_filters(
         [1.0, 0.0], 2, model_name="model", dim=2, filters=filters
     )
 
-    assert isinstance(metadata["candidate_metadata"], list)
-    assert len(metadata["candidate_metadata"]) == len(metadata["storage_keys"])
-    assert all("storage_key" not in value for value in metadata["candidate_metadata"])
+    assert metadata["persistence_format"] == "split"
+    assert metadata["metadata_offsets"].keys() == set(metadata["storage_keys"])
+    assert metadata["metadata_file"].endswith(".jsonl")
     assert [hit.storage_key for hit in actual] == [hit.storage_key for hit in expected]
     assert [hit.score for hit in actual] == pytest.approx(
         [hit.score for hit in expected]
     )
     assert reloaded.last_search_diagnostics["persistence"] == "loaded"
 
-    legacy_metadata = dict(metadata)
-    legacy_metadata["candidate_metadata"] = dict(
-        zip(metadata["storage_keys"], metadata["candidate_metadata"], strict=True)
-    )
-    metadata_path.write_text(json.dumps(legacy_metadata), encoding="utf-8")
-    rebuilt = FAISSLocalVectorStore(backend, index_path=index_path)
-    rebuilt.search([1.0, 0.0], 2, model_name="model", dim=2, filters=filters)
-
-    assert rebuilt.last_search_diagnostics["persistence"] == "rebuilt"
 
 
 def test_faiss_configuration_fingerprints_separate_build_and_query_policy() -> None:
