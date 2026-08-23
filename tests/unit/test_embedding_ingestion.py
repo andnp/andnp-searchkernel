@@ -3,7 +3,17 @@ from dataclasses import dataclass
 
 import pytest
 
-from searchkernel.ingestion import EmbeddingInput, embed_and_upsert
+from searchkernel.ingestion import (
+    EmbeddingInput,
+    async_embed_and_upsert,
+    async_embed_in_batches,
+    embed_and_upsert,
+    embed_in_batches,
+)
+from searchkernel.ingestion.embedding import (
+    async_iter_embed_batches,
+    iter_embed_batches,
+)
 from searchkernel.ports.embedding import EmbeddingWrite
 
 
@@ -138,6 +148,10 @@ def test_embed_and_upsert_rejects_provider_count_mismatch_before_writes() -> Non
 
 
 def test_embed_and_upsert_rejects_late_provider_count_mismatch_after_prior_writes() -> None:
+    """A later provider mismatch fails without hiding earlier committed writes.
+
+    The operation validates each bounded provider response before pairing it.
+    """
     class _LateShortProvider(_Provider):
         def embed(self, texts: list[str]) -> list[list[float]]:
             self.calls.append(texts)
@@ -154,3 +168,127 @@ def test_embed_and_upsert_rejects_late_provider_count_mismatch_after_prior_write
             batch_size=2,
         )
     assert [row["source_id"] for row in sink.rows] == ["memory-0", "memory-1"]
+
+
+@pytest.mark.parametrize(
+    ("texts", "batch_size", "expected_calls"),
+    [
+        ([], 2, []),
+        (["text-0", "text-1"], 2, [["text-0", "text-1"]]),
+        (["text-0", "text-1", "text-2"], 2, [["text-0", "text-1"], ["text-2"]]),
+    ],
+)
+def test_embed_in_batches_handles_empty_exact_and_partial_inputs(
+    texts: list[str],
+    batch_size: int,
+    expected_calls: list[list[str]],
+) -> None:
+    """The synchronous batch API preserves order across batch boundaries.
+
+    Empty input must avoid provider calls, while partial tails remain intact.
+    """
+    provider = _Provider()
+
+    vectors = embed_in_batches(texts, provider=provider, batch_size=batch_size)
+
+    assert vectors == [[float(len(text))] for text in texts]
+    assert provider.calls == expected_calls
+
+
+def test_embed_in_batches_rejects_invalid_size_and_provider_mismatch() -> None:
+    """Invalid batch sizes and short provider responses fail explicitly.
+
+    A mismatch must not be silently truncated into a shorter result.
+    """
+    with pytest.raises(ValueError, match="batch_size"):
+        embed_in_batches(["text"], provider=_Provider(), batch_size=0)
+
+    class _ShortProvider(_Provider):
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            self.calls.append(texts)
+            return []
+
+    with pytest.raises(ValueError, match="returned 0 vectors for 1 inputs"):
+        embed_in_batches(["text"], provider=_ShortProvider(), batch_size=1)
+
+
+def test_iter_embed_batches_is_lazy_and_yields_partial_tail() -> None:
+    """The lazy iterator defers source consumption until requested.
+
+    Each yielded list is bounded and the final partial batch is preserved.
+    """
+    provider = _Provider()
+    consumed: list[str] = []
+
+    def texts():
+        for index in range(5):
+            consumed.append(f"text-{index}")
+            yield f"text-{index}"
+
+    batches = iter_embed_batches(texts(), provider=provider, batch_size=2)
+
+    assert consumed == []
+    assert next(batches) == [[6.0], [6.0]]
+    assert consumed == ["text-0", "text-1"]
+    assert list(batches) == [[[6.0], [6.0]], [[6.0]]]
+
+
+@pytest.mark.asyncio
+async def test_async_batch_wrappers_match_synchronous_results() -> None:
+    """Async batch wrappers produce the same vectors and acceptance counts.
+
+    The wrappers preserve the synchronous contracts while yielding control.
+    """
+    provider = _Provider()
+    inputs = _inputs(3)
+
+    vectors = await async_embed_in_batches(
+        [item.text for item in inputs], provider=provider, batch_size=2
+    )
+    result = await async_embed_and_upsert(
+        inputs, provider=provider, sink=_Sink(), batch_size=2
+    )
+
+    assert vectors == [[6.0], [6.0], [6.0]]
+    assert result.attempted == result.stored == 3
+    assert result.rejected == 0
+    assert result.batches == 2
+
+
+@pytest.mark.asyncio
+async def test_async_lazy_iterator_validates_batches_and_keeps_tail() -> None:
+    """The async iterator mirrors lazy synchronous batch behavior.
+
+    It yields provider results in bounded lists, including a short final list.
+    """
+    provider = _Provider()
+
+    batches = async_iter_embed_batches(
+        (f"text-{index}" for index in range(3)),
+        provider=provider,
+        batch_size=2,
+    )
+
+    assert [batch async for batch in batches] == [
+        [[6.0], [6.0]],
+        [[6.0]],
+    ]
+
+
+def test_embed_and_upsert_rejects_batch_sink_acceptance_mismatch() -> None:
+    """A batch sink must return one acceptance result per write.
+
+    Returning fewer statuses would make stored and rejected counts ambiguous.
+    """
+    class _MismatchedBatchSink(_BatchSink):
+        def upsert_batch(self, writes: Sequence[EmbeddingWrite]) -> Sequence[bool]:
+            self.batches.append(list(writes))
+            return [True]
+
+    with pytest.raises(ValueError, match="acceptance results for 2 writes"):
+        embed_and_upsert(
+            _inputs(2),
+            provider=_Provider(),
+            sink=_MismatchedBatchSink(),
+            batch_size=2,
+        )
