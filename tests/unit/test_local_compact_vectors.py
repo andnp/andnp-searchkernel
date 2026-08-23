@@ -1773,3 +1773,22 @@ def test_bounded_vector_batch_rejects_malformed_query() -> None:
             model_name="model",
             dim=2,
         )
+
+
+def test_bounded_vector_batch_falls_back_when_snapshot_limit_is_exceeded() -> None:
+    """Snapshot limits select the scalar block path without changing results."""
+    backend = LocalRecordBackend(vector_snapshot_max_rows=1)
+    records = [_record("one", [1.0, 0.0]), _record("two", [0.0, 1.0])]
+    backend.upsert(records, "model", 2)
+
+    actual = backend.search_vector_batch(
+        [[1.0, 0.0], [0.0, 1.0]], 2, model_name="model", dim=2
+    )
+    expected = [
+        backend.search_vector(query, 2, model_name="model", dim=2)
+        for query in [[1.0, 0.0], [0.0, 1.0]]
+    ]
+
+    assert [[hit.storage_key for hit in hits] for hits in actual] == [
+        [hit.storage_key for hit in hits] for hits in expected
+    ]
