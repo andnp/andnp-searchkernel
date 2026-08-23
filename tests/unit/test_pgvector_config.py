@@ -6,12 +6,14 @@ import pytest
 from searchkernel.adapters.stores import create_schema as exported_create_schema
 from searchkernel.adapters.stores import pgvector
 from searchkernel.adapters.stores.pgvector import (
+    PGKeywordStore,
     PGVectorFeatureSupport,
     PGVectorStore,
     Psycopg3Connection,
     bounded_scan_limits,
 )
-from searchkernel.domain import Record
+from searchkernel.domain import Record, RecordIdentity
+from searchkernel.indices.vector_revision import record_embedding_revision
 
 
 def test_schema_bootstrap_has_public_compatibility_entry_points() -> None:
@@ -119,16 +121,21 @@ class _Pool:
 class _SearchCursor:
     def __init__(self) -> None:
         self.statements: list[str] = []
+        self.rows: list[object] | None = None
 
     def execute(self, statement: object, params: object = None) -> None:
         self.statements.append(str(statement))
 
     def fetchone(self):
+        if "SELECT dim, table_name" in self.statements[-1]:
+            return (2, "vectors__model__2")
         if "vector_tables" in self.statements[-1]:
             return (1,)
         return ("0.8.0",)
 
     def fetchall(self):
+        if self.rows is not None:
+            return self.rows
         return [("workspace", "note", "one", 0.1)]
 
     def close(self) -> None:
@@ -162,6 +169,26 @@ class _SearchPool:
 
     def put_connection(self, conn: object) -> None:
         pass
+
+
+class _KeywordScorer:
+    def looks_like_identifier_query(self, query: str) -> bool:
+        return query == "artifact"
+
+    def identifier_tokens(self, query: str) -> list[str]:
+        return [query]
+
+    def score(
+        self,
+        query: str,
+        *,
+        title: str,
+        body: str,
+        indexed_text: str | None,
+        headers: str,
+        uri: str,
+    ) -> float:
+        return 2.0
 
 
 class _ConnectionPoolFactory:
@@ -248,6 +275,44 @@ def test_bounded_scan_limits_grow_without_exceeding_hard_bounds() -> None:
     ) == [10]
 
 
+def test_get_many_reuses_table_and_revision_readiness() -> None:
+    """Repeated vector reads repair legacy schema state only once.
+
+    The first read remains compatible with a legacy table, while the second
+    read reuses both stable table metadata and schema readiness.
+    """
+    now = datetime.now(UTC)
+    record = Record(
+        source_kind="note",
+        source_id="one",
+        title="Title",
+        body="Body",
+        created_at=now,
+        updated_at=now,
+        embedding=[1.0, 0.0],
+    )
+    revision = record_embedding_revision(record, "model", 2)
+    pool = _SearchPool()
+    for connection in pool.connections:
+        connection.cursor_value.rows = [
+            (record.storage_key, "[1.0,0.0]", revision)
+        ]
+    store = PGVectorStore(pool)
+
+    first = store.get_many([record], model_name="model", dim=2)
+    second = store.get_many([record], model_name="model", dim=2)
+
+    assert first == {record.storage_key: [1.0, 0.0]}
+    assert second == first
+    statements = [
+        statement
+        for connection in pool.connections
+        for statement in connection.cursor_value.statements
+    ]
+    assert sum("FROM vector_tables" in statement for statement in statements) == 1
+    assert sum("ALTER TABLE" in statement for statement in statements) == 1
+
+
 def test_hnsw_settings_are_applied_only_when_server_supports_them() -> None:
     cursor = _Cursor("0.8.0")
     store = PGVectorStore(
@@ -326,6 +391,63 @@ def test_cached_dimension_mismatch_rolls_back_before_returning() -> None:
 
     assert store.search([1.0, 0.0], 1, model_name="model", dim=2) == []
     assert pool.connections[0].rollback_calls == 1
+
+
+def test_keyword_search_uses_a_narrow_projection_without_reranking() -> None:
+    """Plain keyword hits need only identity and base relevance columns.
+
+    The returned identity and score must remain unchanged when reranking data
+    is omitted from the database projection.
+    """
+    pool = _SearchPool()
+    cursor = pool.connections[0].cursor_value
+    cursor.rows = [("workspace", "note", "one", 0.75)]
+
+    hits = PGKeywordStore(pool).search("plain", 1)
+
+    assert len(hits) == 1
+    assert hits[0].identity == RecordIdentity("workspace", "note", "one")
+    assert hits[0].score == 0.75
+    statement = cursor.statements[0]
+    assert "r.title" not in statement
+    assert "r.body" not in statement
+    assert "r.indexed_text" not in statement
+    assert "r.metadata" not in statement
+
+
+def test_keyword_search_keeps_reranking_projection_and_scores() -> None:
+    """Artifact reranking still receives its full row and applies its boost.
+
+    Identifier-aware searches retain their existing score and metadata
+    contract even though plain searches use a smaller projection.
+    """
+    pool = _SearchPool()
+    cursor = pool.connections[0].cursor_value
+    cursor.rows = [
+        (
+            "workspace",
+            "note",
+            "one",
+            0.75,
+            "record:workspace:note:one",
+            "Title",
+            "Body",
+            "Indexed",
+            "uri",
+            {"tags": ["artifact"]},
+        )
+    ]
+
+    hits = PGKeywordStore(pool, artifact_scorer=_KeywordScorer()).search(
+        "artifact", 1
+    )
+
+    assert len(hits) == 1
+    assert hits[0].identity == RecordIdentity("workspace", "note", "one")
+    assert hits[0].score == 2.75
+    statement = cursor.statements[0]
+    assert "r.title" in statement
+    assert "r.metadata" in statement
 
 
 @pytest.mark.parametrize(

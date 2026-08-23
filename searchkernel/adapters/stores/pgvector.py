@@ -1015,6 +1015,7 @@ class PGVectorStore:
         self.max_scan_rounds = max_scan_rounds
         self._feature_support: PGVectorFeatureSupport | None = None
         self._vector_tables: dict[str, tuple[int, str]] = {}
+        self._revision_ready_tables: set[str] = set()
         self._last_search_diagnostics: dict[str, Any] = {}
 
     @property
@@ -1616,14 +1617,19 @@ class PGVectorStore:
         cursor = None
         try:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT dim, table_name FROM vector_tables WHERE model_name = %s;",
-                (model_name,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                return {}
-            existing_dim, table_name = row
+            cached_table = self._vector_tables.get(model_name)
+            if cached_table is None:
+                cursor.execute(
+                    "SELECT dim, table_name FROM vector_tables WHERE model_name = %s;",
+                    (model_name,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return {}
+                existing_dim, table_name = row
+                self._vector_tables[model_name] = (existing_dim, table_name)
+            else:
+                existing_dim, table_name = cached_table
             if existing_dim != dim:
                 raise ModelDimensionMismatchError(
                     f"Dimension mismatch for model {model_name}: "
@@ -1632,12 +1638,13 @@ class PGVectorStore:
             # A table created before revision tracking existed has no such
             # column; add it (idempotent) rather than assume every existing
             # deployment has already upserted since that column was added.
-            _execute(
-                cursor,
-                self._sql.SQL(
-                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS revision TEXT;"
-                ).format(table=self._sql.Identifier(table_name))
-            )
+            if table_name not in self._revision_ready_tables:
+                _execute(
+                    cursor,
+                    self._sql.SQL(
+                        "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS revision TEXT;"
+                    ).format(table=self._sql.Identifier(table_name))
+                )
 
             storage_keys = [record.storage_key for record in records]
             _execute(
@@ -1650,6 +1657,7 @@ class PGVectorStore:
             )
             stored = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
             conn.commit()
+            self._revision_ready_tables.add(table_name)
         finally:
             if cursor is not None:
                 cursor.close()
@@ -1825,13 +1833,19 @@ class PGKeywordStore:
                 limit = max(k, math.ceil(k * self._keyword_overfetch_multiplier))
 
             query_expression, query_value = _postgres_tsquery(query)
+            projection = (
+                "r.workspace_id, r.source_kind, r.source_id, "
+                "ts_rank(r.tsvector_body, search_query.query) AS relevance, "
+                "r.record_id, r.title, r.body, r.indexed_text, r.uri, r.metadata"
+                if needs_artifact_rerank
+                else "r.workspace_id, r.source_kind, r.source_id, "
+                "ts_rank(r.tsvector_body, search_query.query) AS relevance"
+            )
             sql = f"""
                 WITH search_query AS (
                     SELECT {query_expression} AS query
                 )
-                SELECT r.workspace_id, r.source_kind, r.source_id,
-                       ts_rank(r.tsvector_body, search_query.query) AS relevance,
-                       r.record_id, r.title, r.body, r.indexed_text, r.uri, r.metadata
+                SELECT {projection}
                 FROM records AS r
                 CROSS JOIN search_query
                 WHERE r.tsvector_body @@ search_query.query
