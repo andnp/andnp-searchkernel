@@ -1893,6 +1893,50 @@ def test_block_vector_search_intersects_candidate_and_metadata_filters(
     assert [hit.source_id for hit in hits] == ["a", "c"]
 
 
+@pytest.mark.parametrize(
+    ("filters", "expected"),
+    [
+        ({"project_ids": ["keep"]}, ["project"]),
+        ({"paths": ["guide.md"]}, ["path"]),
+        ({"document_ids": ["guide"]}, ["document"]),
+    ],
+)
+def test_vector_typed_metadata_filters_preserve_eligible_records(
+    tmp_path, filters, expected
+) -> None:
+    """Project, path, and document filters preserve vector eligibility."""
+    records = [
+        _record(
+            "note",
+            "project",
+            "project",
+            metadata={"project_id": "keep"},
+        ),
+        _record(
+            "note",
+            "path",
+            "path",
+            metadata={"file_path": "src/guide.md"},
+        ),
+        _record("note", "document", "document", metadata={"doc_id": "guide"}),
+        _record("note", "other", "other", metadata={"project_id": "drop"}),
+    ]
+    for record in records:
+        record.embedding = [1.0, 0.0]
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert(records, "test", 2)
+
+    hits = backend.search_vector(
+        [1.0, 0.0],
+        10,
+        model_name="test",
+        dim=2,
+        filters=filters,
+    )
+
+    assert [hit.source_id for hit in hits] == expected
+
+
 def test_block_vector_search_matches_snapshot_for_compound_filters(tmp_path) -> None:
     """Snapshot and block paths preserve compound filter result parity."""
     records = _cosine_ranked_records()
