@@ -48,6 +48,33 @@ class _ListStore:
             self.entries[key] = entry
 
 
+class _CancellationBarrierStore(_MemoryStore):
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        super().__init__()
+        self._loop = loop
+        self.started = asyncio.Event()
+        self.cancel_requested = asyncio.Event()
+        self.ready_to_publish = asyncio.Event()
+        self.allow_publish = Event()
+        self.allow_finish = Event()
+        self.finished = asyncio.Event()
+        self.cancel_task: asyncio.Task[object] | None = None
+
+    def set(self, key: str, entry: ValidatedCacheEntry[str, str]) -> None:
+        self._loop.call_soon_threadsafe(self.started.set)
+        self._loop.call_soon_threadsafe(self._cancel_leader)
+        assert self.allow_publish.wait(timeout=5.0)
+        self._loop.call_soon_threadsafe(self.ready_to_publish.set)
+        assert self.allow_finish.wait(timeout=5.0)
+        super().set(key, entry)
+        self._loop.call_soon_threadsafe(self.finished.set)
+
+    def _cancel_leader(self) -> None:
+        assert self.cancel_task is not None
+        self.cancel_task.cancel()
+        self.cancel_requested.set()
+
+
 class _ObjectStore:
     def __init__(self) -> None:
         self.entries: dict[str, ValidatedCacheEntry[object, str]] = {}
@@ -212,6 +239,40 @@ async def test_async_misses_are_single_flight_and_support_async_validation() -> 
     assert await asyncio.gather(first, second) == ["shared", "shared"]
     assert calls == 1
     assert cache.metrics.coalesced_waiters == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_async_leader_drains_started_background_write() -> None:
+    """
+    Propagate cancellation only after an already-started cache write finishes.
+
+    The caller must not observe cancellation while the worker can still publish
+    a cache entry in the background.
+    """
+    loop = asyncio.get_running_loop()
+    store = _CancellationBarrierStore(loop)
+    cache = ValidatedReadThroughCache(store)
+    task = asyncio.create_task(
+        cache.async_get_or_load(
+            "key",
+            validate=lambda _key, _token: True,
+            load=lambda: ValidatedCacheValue("value", "v1"),
+        )
+    )
+    store.cancel_task = task
+
+    await store.started.wait()
+    await store.cancel_requested.wait()
+    store.allow_publish.set()
+    await store.ready_to_publish.wait()
+    assert not task.done()
+    store.allow_finish.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert store.finished.is_set()
+    assert store.get("key") is not None
 
 
 @pytest.mark.asyncio

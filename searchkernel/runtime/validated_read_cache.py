@@ -191,7 +191,7 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
         self._record(misses=1)
         inflight, is_leader = self._start_or_join(key)
         if not is_leader:
-            await asyncio.wrap_future(inflight.completed)
+            await asyncio.shield(asyncio.wrap_future(inflight.completed))
             return self._finish_waiter(inflight)
         return await self._load_as_async_leader(key, inflight, stale_entry, load)
 
@@ -324,7 +324,14 @@ class ValidatedReadThroughCache[KeyT, ValueT, TokenT]:
                 validation_token=copy.deepcopy(loaded.validation_token),
                 cached_at=self._clock(),
             )
-            await asyncio.to_thread(self._write_entry, key, entry)
+            write_task = asyncio.create_task(
+                asyncio.to_thread(self._write_entry, key, entry)
+            )
+            try:
+                await asyncio.shield(write_task)
+            except asyncio.CancelledError:
+                await write_task
+                raise
             value = self._copy_value(loaded.value)
             self._complete_success(key, inflight, loaded.value)
             return value
