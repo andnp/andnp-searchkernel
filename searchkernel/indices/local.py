@@ -107,6 +107,33 @@ _KEYWORD_INIT_BATCH_SIZE = 1_000
 _FUZZY_QUERY_MAX_TERMS = 4
 _FUZZY_TERM_RATIO = 0.82
 _METADATA_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_TYPED_VECTOR_FILTER_NAMES = frozenset(
+    {
+        "excluded_files",
+        "excluded_paths",
+        "excluded_file_paths",
+        "excluded_source_files",
+        "excluded_project_ids",
+        "excluded_projects",
+        "excluded_doc_ids",
+        "excluded_document_ids",
+        "excluded_documents",
+        "doc_id",
+        "doc_ids",
+        "document_id",
+        "document_ids",
+        "file_path",
+        "file_paths",
+        "path",
+        "paths",
+        "project_filter",
+        "project_id",
+        "project_ids",
+        "source_file",
+        "source_files",
+        "source_scoped_filters",
+    }
+)
 _VECTOR_EMBEDDING_BYTES = np.dtype("<f4").itemsize
 _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 _VECTOR_GATHER_SELECTIVITY_THRESHOLD = 0.3
@@ -739,6 +766,9 @@ class _VectorEngine:
         matches: Callable[[sqlite3.Row, SearchFilters | None], bool],
         status_values: Callable[[SearchFilters | None], set[str]],
         filter_values: Callable[[Any], list[Any]],
+        filter_sql: Callable[
+            [SearchFilters | None], tuple[list[str], list[Any]]
+        ],
     ) -> None:
         self._access = access
         self._snapshot_lock = snapshot_lock
@@ -750,6 +780,7 @@ class _VectorEngine:
         self._matches = matches
         self._status_values = status_values
         self._filter_values = filter_values
+        self._filter_sql = filter_sql
 
     def vector_count(self, model_name: str, dim: int) -> int:
         row_count, _ = self.vector_storage_stats(model_name, dim)
@@ -882,6 +913,58 @@ class _VectorEngine:
         )
         return [(index, int(positions[index])) for index in ordered[:k]]
 
+    @staticmethod
+    def _has_typed_filter(predicate: CompiledVectorFilter) -> bool:
+        return bool(
+            predicate.source_scoped_filters
+            or predicate.project_values is not None
+            or predicate.excluded_projects is not None
+            or predicate.included_paths is not None
+            or predicate.excluded_paths is not None
+            or predicate.document_values is not None
+            or predicate.excluded_documents is not None
+        )
+
+    def _eligible_storage_keys(
+        self,
+        filters: SearchFilters | None,
+        *,
+        model_name: str,
+        dim: int,
+    ) -> list[str]:
+        sql_filters = dict(filters or {})
+        sql_filters.pop("metadata_equals", None)
+        sql_filters.pop("metadata_in", None)
+        clauses, parameters = self._filter_sql(sql_filters)
+        clauses.extend(["v.encoder_namespace = ?", "v.dim = ?"])
+        parameters.extend([model_name, dim])
+        with self._access.read_lock():
+            conn = self._access.connection()
+            rows = conn.execute(
+                f"""
+                SELECT r.storage_key
+                FROM local_records r
+                JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                WHERE {' AND '.join(clauses)}
+                ORDER BY r.storage_key
+                """,
+                parameters,
+            ).fetchall()
+        return [row["storage_key"] for row in rows]
+
+    @staticmethod
+    def _push_typed_filters(
+        filters: SearchFilters | None,
+        eligible_keys: Sequence[str],
+    ) -> dict[str, Any]:
+        pushed = dict(filters or {})
+        for name in _TYPED_VECTOR_FILTER_NAMES:
+            pushed.pop(name, None)
+        pushed.pop("candidate_ids", None)
+        pushed.pop("candidate_storage_keys", None)
+        pushed["candidate_storage_keys"] = list(eligible_keys)
+        return pushed
+
     def search_vector(
         self,
         query_vector: Vector,
@@ -902,6 +985,17 @@ class _VectorEngine:
             query_vector, dim, context="query vector"
         )
         predicate = compiled_filter or compile_vector_filters(filters)
+        search_filters = filters
+        if self._has_typed_filter(predicate):
+            eligible_keys = self._eligible_storage_keys(
+                filters,
+                model_name=model_name,
+                dim=dim,
+            )
+            if not eligible_keys:
+                return []
+            search_filters = self._push_typed_filters(filters, eligible_keys)
+            predicate = compile_vector_filters(search_filters)
         row_count, byte_count = self.vector_storage_stats(model_name, dim)
         if (
             row_count > self._vector_snapshot_max_rows
@@ -912,11 +1006,11 @@ class _VectorEngine:
                 k,
                 model_name=model_name,
                 dim=dim,
-                filters=filters,
+                filters=search_filters,
                 compiled_filter=predicate,
             )
         materialize_metadata = not VectorSnapshot._can_prefilter_scalars(
-            filters, predicate
+            search_filters, predicate
         )
         snapshot = self._get_vector_snapshot(
             model_name,
@@ -924,8 +1018,8 @@ class _VectorEngine:
             materialize_metadata=materialize_metadata,
         )
         eligible = snapshot.filter_mask(
-            dict(filters) if filters is not None else None,
-            status_values=self._status_values(filters),
+            search_filters,
+            status_values=self._status_values(search_filters),
             filter_values=self._filter_values,
             compiled_filter=predicate,
         )
@@ -2358,6 +2452,9 @@ class LocalRecordBackend:
             matches=self._matches,
             status_values=self._status_values,
             filter_values=self._filter_values,
+            filter_sql=lambda filters: self._keyword_engine._keyword_filter_sql(
+                filters
+            ),
         )
         self._keyword_engine = _KeywordEngine(
             self._access,
