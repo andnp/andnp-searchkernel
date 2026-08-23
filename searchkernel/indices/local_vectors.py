@@ -80,6 +80,55 @@ class PackedVectorCodec:
         return cls._validated_array(values, dim, context=context).tobytes()
 
     @classmethod
+    def encode_batch(
+        cls,
+        values: Sequence[Sequence[float] | np.ndarray],
+        dim: int,
+        *,
+        contexts: Sequence[str] | None = None,
+        context: str = "embedding",
+    ) -> list[bytes]:
+        if dim < 1:
+            raise ValueError(f"{context} dimension must be positive")
+        if contexts is not None and len(contexts) != len(values):
+            raise ValueError("embedding contexts must match values")
+        if not values:
+            return []
+
+        def scalar_encode() -> list[bytes]:
+            return [
+                cls.encode(
+                    value,
+                    dim,
+                    context=contexts[index] if contexts is not None else context,
+                )
+                for index, value in enumerate(values)
+            ]
+
+        try:
+            raw = np.asarray(values, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError):
+            return scalar_encode()
+        if raw.ndim != 2 or raw.shape != (len(values), dim):
+            return scalar_encode()
+        if not np.isfinite(raw).all():
+            return scalar_encode()
+
+        vectors = np.asarray(raw, dtype="<f4")
+        if not np.isfinite(vectors).all():
+            return scalar_encode()
+        payloads: list[bytes] = []
+        for vector in vectors:
+            norm = float(np.linalg.norm(vector.astype(np.float64)))
+            if not np.isfinite(norm) or norm == 0.0:
+                return scalar_encode()
+            normalized = np.asarray(vector / norm, dtype="<f4")
+            if not np.isfinite(normalized).all():
+                return scalar_encode()
+            payloads.append(np.ascontiguousarray(normalized).tobytes())
+        return payloads
+
+    @classmethod
     def normalize(
         cls,
         values: Sequence[float] | np.ndarray,

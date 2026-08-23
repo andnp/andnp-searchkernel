@@ -2469,18 +2469,27 @@ class _LocalMutationCoordinator:
                         f"Dimension mismatch for model {model_name!r}: "
                         f"expected {existing_dim}, got {dim}"
                     )
-                packed_vectors_by_key: dict[str, tuple[str, bytes, str]] = {}
+                embeddings: list[Sequence[float] | np.ndarray] = []
+                contexts: list[str] = []
                 for record in rows:
                     if record.embedding is not None:
-                        packed_vectors_by_key[record.storage_key] = (
-                            record.storage_key,
-                            PackedVectorCodec.encode(
-                                record.embedding,
-                                dim,
-                                context=f"embedding for {record.storage_key}",
-                            ),
-                            record_embedding_revision(record, model_name, dim),
-                        )
+                        embeddings.append(record.embedding)
+                        contexts.append(f"embedding for {record.storage_key}")
+                packed_embeddings = PackedVectorCodec.encode_batch(
+                    embeddings,
+                    dim,
+                    contexts=contexts,
+                )
+                packed_vectors_by_key = {
+                    record.storage_key: (
+                        record.storage_key,
+                        packed_embedding,
+                        record_embedding_revision(record, model_name, dim),
+                    )
+                    for record, packed_embedding in zip(
+                        rows, packed_embeddings, strict=True
+                    )
+                }
                 packed_vectors = list(packed_vectors_by_key.values())
                 existing_vectors: dict[str, sqlite3.Row] = {}
                 for key_chunk in iter_ordered_key_chunks(

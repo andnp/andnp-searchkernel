@@ -107,6 +107,20 @@ def test_batch_vector_decode_matches_scalar_validation() -> None:
     )
 
 
+def test_batch_vector_encode_preserves_scalar_payload_bytes() -> None:
+    """Batch encoding preserves the exact scalar little-endian payloads."""
+    values = [
+        [3.0, 4.0],
+        np.asarray([5.0, 12.0], dtype=np.float64),
+        [1.0, 1.0],
+    ]
+
+    batch = PackedVectorCodec.encode_batch(values, 2)
+    scalar = [PackedVectorCodec.encode(value, 2) for value in values]
+
+    assert batch == scalar
+
+
 def test_fts_projection_keeps_query_variants_correct_and_narrow(tmp_path: Path) -> None:
     """Plain, artifact, and metadata-filtered FTS queries keep their contracts.
 

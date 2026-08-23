@@ -70,6 +70,62 @@ def test_packed_vector_validation_is_explicit(
         PackedVectorCodec.encode(values, dim)
 
 
+def test_vector_upsert_rejects_malformed_batch_without_mutation(tmp_path: Path) -> None:
+    """A malformed vector rejects the whole batch before any row is stored."""
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    good = _record("good", [1.0, 0.0])
+    malformed = _record("malformed", [float("nan"), 0.0])
+
+    with pytest.raises(ValueError, match="embedding for .*malformed.*finite"):
+        backend.upsert([good, malformed], "model", 2)
+
+    connection = backend.db_manager.get_connection()
+    assert connection.execute("SELECT COUNT(*) FROM local_records").fetchone()[0] == 0
+    assert connection.execute("SELECT COUNT(*) FROM local_vectors_v2").fetchone()[0] == 0
+    assert backend.vector_epoch() == 0
+
+
+def test_vector_upsert_preserves_duplicate_last_write_and_idempotent_epoch() -> None:
+    """Duplicate keys keep the last vector and unchanged writes keep the epoch."""
+    backend = LocalRecordBackend()
+    first = _record("duplicate", [1.0, 0.0])
+    last = _record("duplicate", [0.0, 1.0])
+
+    backend.upsert([first, last], "model", 2)
+
+    connection = backend.db_manager.get_connection()
+    assert last.embedding is not None
+    stored = connection.execute(
+        "SELECT embedding FROM local_vectors_v2 WHERE storage_key = ?",
+        (last.storage_key,),
+    ).fetchone()[0]
+    assert stored == PackedVectorCodec.encode(last.embedding, 2)
+    assert connection.execute("SELECT COUNT(*) FROM local_vectors_v2").fetchone()[0] == 1
+    epoch = backend.vector_epoch()
+
+    backend.upsert([first, last], "model", 2)
+
+    assert backend.vector_epoch() == epoch
+    assert backend.search_vector(
+        [0.0, 1.0], 1, model_name="model", dim=2
+    )[0].storage_key == last.storage_key
+
+
+def test_vector_upsert_rejects_model_dimension_change_without_mutation() -> None:
+    """A model dimension change leaves its existing vector rows untouched."""
+    backend = LocalRecordBackend()
+    original = _record("original", [1.0, 0.0])
+    backend.upsert([original], "model", 2)
+    epoch = backend.vector_epoch()
+
+    with pytest.raises(ValueError, match="Dimension mismatch"):
+        backend.upsert([_record("new", [1.0, 0.0, 0.0])], "model", 3)
+
+    connection = backend.db_manager.get_connection()
+    assert connection.execute("SELECT COUNT(*) FROM local_vectors_v2").fetchone()[0] == 1
+    assert backend.vector_epoch() == epoch
+
+
 def test_local_vector_store_round_trip_uses_packed_schema(tmp_path: Path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     store = LocalVectorStore(backend)
