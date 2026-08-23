@@ -102,6 +102,23 @@ def test_calibrated_fusion_does_not_let_a_single_hit_lane_dominate() -> None:
     assert scores["strong-match"] > scores["weak-hit"]
 
 
+def test_calibrated_fusion_preserves_lane_scale_and_weights() -> None:
+    scores = fuse_calibrated_scores(
+        {
+            "keyword": [("keyword-best", 10.0), ("keyword-worst", 1.0)],
+            "vector": [("vector-best", 0.9), ("vector-worst", 0.1)],
+        },
+        strategy_weights={"keyword": 2.0, "vector": 3.0},
+    )
+
+    assert scores == {
+        "keyword-best": 2.0,
+        "keyword-worst": 0.0,
+        "vector-best": 3.0,
+        "vector-worst": 0.0,
+    }
+
+
 def test_calibrated_fusion_rejects_non_finite_lane_scores() -> None:
     with pytest.raises(ValueError, match="lane scores must be finite"):
         fuse_calibrated_scores({"keyword": [("record", float("nan"))]})

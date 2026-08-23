@@ -2582,6 +2582,46 @@ async def test_opt_in_query_expander_adds_bounded_synonyms() -> None:
     assert "synonym_expansion:applied" in outcome.diagnostics
 
 
+async def test_graph_and_query_expansion_compose_through_one_fusion_boundary() -> None:
+    class ExpandingKeyword(FakeKeywordStore):
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
+            self.queries.append((query, k, filters))
+            return _hits(
+                [("seed", 40.0)]
+                if query == "deploy issue"
+                else [("expanded", 1.0)]
+            )
+
+    def expand(query: str) -> str:
+        assert query == "deploy issue"
+        return "deploy issue outage"
+
+    records = {
+        record_id: _record(record_id)
+        for record_id in ("seed", "neighbor", "expanded")
+    }
+    pipeline = RecordSearchPipeline(
+        keyword_store=ExpandingKeyword([]),
+        graph_store=FakeGraphStore({"seed": [("neighbor", "related", 1.0)]}),
+        hydrator=_hydrator(records),
+        policy=RecordSearchPolicy(query_expander=expand),
+        config=RecordSearchConfig(synonym_expansion_enabled=True),
+    )
+
+    outcome = await pipeline.async_search("deploy issue", limit=3)
+
+    results_by_id = {result.record_id: result for result in outcome.results}
+    assert set(results_by_id) == {"seed", "neighbor", "expanded"}
+    assert results_by_id["seed"].provenance.strategies == ("keyword",)
+    assert results_by_id["neighbor"].provenance.strategies == ("graph",)
+    assert results_by_id["expanded"].provenance.strategies == ("expansion",)
+
+
 async def test_conditional_expansion_obeys_latency_budget() -> None:
     class AnyEmbedder(FakeEmbedder):
         def embed_query(self, query: str) -> list[float]:

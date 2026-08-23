@@ -115,6 +115,18 @@ def test_fit_isotonic_duplicate_x_with_conflicting_labels_averages() -> None:
     assert curve.confidence(5.0) == pytest.approx(0.5, abs=0.05)
 
 
+def test_fit_isotonic_interpolates_inside_a_pooled_plateau() -> None:
+    curve = fit_isotonic(
+        [0.0, 1.0, 2.0, 3.0],
+        [0, 1, 0, 1],
+        minimum_samples=0,
+    )
+
+    assert curve is not None
+    assert curve.confidence(1.0) == pytest.approx(1 / 3)
+    assert curve.confidence(2.0) == pytest.approx(2 / 3)
+
+
 def test_fit_isotonic_monotonic_across_sweep() -> None:
     rng = random.Random(1)
     scores = [rng.uniform(0.0, 20.0) for _ in range(400)]
