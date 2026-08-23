@@ -95,7 +95,6 @@ def _time(
         started = time.perf_counter()
         fn()
         samples.append((time.perf_counter() - started) * 1_000)
-    library_entry_parity = _library_entry_parity()
     return {
         "p50_ms": statistics.median(samples),
         "p95_ms": sorted(samples)[min(len(samples) - 1, int(len(samples) * 0.95))],
