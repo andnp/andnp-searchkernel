@@ -396,6 +396,8 @@ async def test_receipt_attributes_failures_to_the_stage_and_record() -> None:
         "keyword-failure",
         "vector-failure",
     ]
+    assert receipt.records[0].error is not None
+    assert receipt.records[1].error is not None
     assert "keyword stage:" in receipt.records[0].error
     assert "semantic stage:" in receipt.records[1].error
 
