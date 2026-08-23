@@ -8,10 +8,11 @@ running concurrently with other workers against the shared Postgres
 container; they need real per-worker isolation instead.
 """
 
-import os
 import socket
 import time
 import uuid
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -55,18 +56,35 @@ def _wait_for_postgres_ready(container, timeout: float = 60.0) -> None:
     )
 
 
-@pytest.fixture(scope="session", autouse=True)
-def pgvector_test_database(request):
-    """Provide SEARCHKERNEL_PG_DSN through Docker when not supplied."""
-    existing_dsn = os.environ.get("SEARCHKERNEL_PG_DSN")
-    if existing_dsn:
-        yield
-        return
+def _remove_container(client, container) -> None:
+    from docker.errors import NotFound
 
+    try:
+        container.remove(force=True)
+    except NotFound:
+        pass
+    finally:
+        client.close()
+
+
+@pytest.fixture(scope="session")
+def pg_cleanup_executor() -> Iterator[ThreadPoolExecutor]:
+    """Run PostgreSQL pool and container cleanup outside test teardown."""
+    executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pg-cleanup")
+    yield executor
+    executor.shutdown(wait=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def pg_dsn(
+    request: pytest.FixtureRequest,
+    pg_cleanup_executor: ThreadPoolExecutor,
+) -> Iterator[str]:
+    """Provide a pgvector DSN from a fixture-owned Docker container."""
     docker = pytest.importorskip(
         "docker", reason="Docker SDK is required for pgvector integration tests"
     )
-    from docker.errors import DockerException, ImageNotFound, NotFound
+    from docker.errors import DockerException, ImageNotFound
 
     try:
         client = docker.from_env()
@@ -101,21 +119,15 @@ def pgvector_test_database(request):
             pytest.skip(f"Could not start pgvector container: {exc}")
 
         _wait_for_postgres_ready(container)
-        os.environ["SEARCHKERNEL_PG_DSN"] = (
-            f"postgresql://postgres:searchkernel@127.0.0.1:{port}/searchkernel"
+        yield (
+            "postgresql://postgres:searchkernel@"
+            f"127.0.0.1:{port}/searchkernel"
         )
-        yield
     finally:
-        if existing_dsn is None:
-            os.environ.pop("SEARCHKERNEL_PG_DSN", None)
-        else:
-            os.environ["SEARCHKERNEL_PG_DSN"] = existing_dsn
         if container is not None:
-            try:
-                container.remove(force=True)
-            except NotFound:
-                pass
-        client.close()
+            pg_cleanup_executor.submit(_remove_container, client, container)
+        else:
+            client.close()
 
 
 def pg_worker_schema(config) -> str:

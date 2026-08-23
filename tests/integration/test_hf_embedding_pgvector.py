@@ -5,10 +5,9 @@ pgvector VectorStore, then runs an ANN search with an embed_query vector
 and asserts the semantically-correct document ranks #1.
 
 Loads the real Qwen3-Embedding-0.6B model and needs a live Postgres, so it
-is marked slow + serial. Set SEARCHKERNEL_PG_DSN to run it.
+is marked slow + serial and requires the Docker-backed pgvector fixture.
 """
 
-import os
 from datetime import UTC, datetime
 
 import pytest
@@ -30,12 +29,8 @@ def provider() -> HuggingFaceEmbeddingProvider:
 
 
 @pytest.fixture
-def pg_conn():
-    dsn = os.environ.get("SEARCHKERNEL_PG_DSN")
-    if not dsn:
-        pytest.skip("SEARCHKERNEL_PG_DSN not set")
-
-    conn_pool = PostgresConnection(dsn)
+def pg_conn(pg_dsn, pg_cleanup_executor):
+    conn_pool = PostgresConnection(pg_dsn)
     create_schema(conn_pool)
 
     conn = conn_pool.get_connection()
@@ -51,7 +46,7 @@ def pg_conn():
 
     yield conn_pool
 
-    conn_pool.close()
+    pg_cleanup_executor.submit(conn_pool.close)
 
 
 def _doc(source_id: str, title: str, body: str) -> Record:

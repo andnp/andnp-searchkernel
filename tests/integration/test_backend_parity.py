@@ -1,6 +1,5 @@
 """Local/Postgres parity checks for canonical record retrieval."""
 
-import os
 import re
 from datetime import UTC, datetime
 
@@ -90,11 +89,8 @@ def parity_records() -> list[Record]:
 
 
 @pytest.fixture
-def parity_backends(tmp_path, request):
-    dsn = os.environ.get("SEARCHKERNEL_PG_DSN")
-    if not dsn:
-        pytest.skip("SEARCHKERNEL_PG_DSN not set")
-
+def parity_backends(tmp_path, request, pg_dsn, pg_cleanup_executor):
+    dsn = pg_dsn
     schema = pg_worker_schema(request.config) + "_parity"
     bootstrap_pool = PostgresConnection(dsn, min_connections=1, max_connections=1)
     bootstrap_connection = bootstrap_pool.get_connection()
@@ -125,7 +121,7 @@ def parity_backends(tmp_path, request):
     try:
         yield LocalRecordBackend(tmp_path / "records.db"), PGKeywordStore(pg_pool), PGVectorStore(pg_pool)
     finally:
-        pg_pool.close()
+        pg_cleanup_executor.submit(pg_pool.close)
 
 
 def _keys(hits) -> set[str]:

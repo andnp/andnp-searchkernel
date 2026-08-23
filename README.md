@@ -106,10 +106,10 @@ for the HTTP source adapter.
 ## Validation and releases
 
 CI runs Ruff, Pyrefly, import-linter, the safe test suite, supported Python
-versions, and selected optional-import checks. Pgvector integration tests need
-Docker or `SEARCHKERNEL_PG_DSN`; real-embedding tests are outside the default
-offline gate. The performance roadmap records what those checks do and do not
-prove.
+versions, and selected optional-import checks. Pgvector integration tests
+provision a Docker `pgvector/pgvector:pg17` container; real-embedding tests are
+outside the default offline gate. The performance roadmap records what those
+checks do and do not prove.
 
 Merges to `main` with release-worthy Conventional Commits are released by
 the repository workflows. The package and runtime `__version__` are checked

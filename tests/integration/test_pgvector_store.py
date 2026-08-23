@@ -4,7 +4,6 @@ Tests VectorStore, KeywordStore, GraphStore, and CacheStore implementations
 against a live Postgres database with pgvector extension.
 """
 
-import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
@@ -33,17 +32,8 @@ from searchkernel.indices import LocalRecordBackend
 from tests.integration.conftest import pg_dsn_for_schema, pg_worker_schema
 
 
-@pytest.fixture(scope="session")
-def pg_dsn():
-    """Use the Docker-backed DSN installed by the integration conftest."""
-    dsn = os.environ.get("SEARCHKERNEL_PG_DSN")
-    if not dsn:
-        pytest.skip("SEARCHKERNEL_PG_DSN not set")
-    return dsn
-
-
 @pytest.fixture(scope="function")
-def pg_conn(pg_dsn, request):
+def pg_conn(pg_dsn, request, pg_cleanup_executor):
     """Create a test connection pool scoped to this xdist worker's own schema.
 
     Each xdist worker gets a private Postgres schema (pinned via search_path
@@ -89,7 +79,7 @@ def pg_conn(pg_dsn, request):
     yield conn_pool
 
     # Cleanup
-    conn_pool.close()
+    pg_cleanup_executor.submit(conn_pool.close)
 
 
 @pytest.fixture

@@ -190,10 +190,11 @@ The baseline does not establish:
 - parity between every local, FAISS, and pgvector configuration;
 - real-embedding quality or provider availability.
 
-Pgvector integration tests require Docker or `SEARCHKERNEL_PG_DSN`. Real
-embedding tests require locally cached models and remain outside the default
-offline gate. Skips caused by unavailable external services must be visible in
-CI output and must not be reported as backend coverage.
+Pgvector integration tests provision a Docker `pgvector/pgvector:pg17`
+container. Real embedding tests require locally cached models and remain
+outside the default offline gate. Skips caused by unavailable external
+services must be visible in CI output and must not be reported as backend
+coverage.
 
 ## 5. Roadmap
 

@@ -1,6 +1,5 @@
 """Unit-level coverage for PGKeywordStore's optional artifact-scorer hook."""
 
-import os
 import re
 from datetime import UTC, datetime
 
@@ -40,16 +39,8 @@ class _StubIdentifierScorer:
         return 100.0 if query.strip().lower() in headers.lower() else 0.0
 
 
-@pytest.fixture(scope="session")
-def pg_dsn():
-    dsn = os.environ.get("SEARCHKERNEL_PG_DSN")
-    if not dsn:
-        pytest.skip("SEARCHKERNEL_PG_DSN not set")
-    return dsn
-
-
 @pytest.fixture
-def pg_conn(pg_dsn, request):
+def pg_conn(pg_dsn, request, pg_cleanup_executor):
     schema = pg_worker_schema(request.config) + "_artifact_scorer"
     scoped_dsn = pg_dsn_for_schema(pg_dsn, schema)
 
@@ -78,7 +69,7 @@ def pg_conn(pg_dsn, request):
 
     yield conn_pool
 
-    conn_pool.close()
+    pg_cleanup_executor.submit(conn_pool.close)
 
 
 @pytest.fixture

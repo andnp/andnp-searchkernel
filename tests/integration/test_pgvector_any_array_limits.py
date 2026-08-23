@@ -1,6 +1,5 @@
 """Evidence checks for oversized PostgreSQL ANY(array) candidate filters."""
 
-import os
 from datetime import UTC, datetime
 
 import pytest
@@ -16,17 +15,8 @@ from searchkernel.domain import Record, RecordIdentity
 from tests.integration.conftest import pg_dsn_for_schema, pg_worker_schema
 
 
-@pytest.fixture(scope="session")
-def pg_dsn():
-    """Use the Docker-backed DSN installed by the integration conftest."""
-    dsn = os.environ.get("SEARCHKERNEL_PG_DSN")
-    if not dsn:
-        pytest.skip("Postgres unavailable: SEARCHKERNEL_PG_DSN not set")
-    return dsn
-
-
 @pytest.fixture(scope="function")
-def pg_conn(pg_dsn, request, connection_type):
+def pg_conn(pg_dsn, request, connection_type, pg_cleanup_executor):
     """Create an isolated connection pool using the selected supported driver."""
     schema = pg_worker_schema(request.config)
     scoped_dsn = pg_dsn_for_schema(pg_dsn, schema)
@@ -48,7 +38,7 @@ def pg_conn(pg_dsn, request, connection_type):
     try:
         yield conn_pool
     finally:
-        conn_pool.close()
+        pg_cleanup_executor.submit(conn_pool.close)
 
 
 @pytest.fixture(
