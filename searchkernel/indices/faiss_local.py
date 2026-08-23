@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -140,6 +140,12 @@ class _FAISSState:
     storage_keys: tuple[str, ...]
     id_to_storage_key: dict[int, str]
     candidate_metadata: dict[str, _CandidateMetadata]
+    eligibility_masks: dict[tuple[str, str], frozenset[int]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
 
 class FAISSLocalVectorStore:
@@ -454,6 +460,9 @@ class FAISSLocalVectorStore:
             }
         )
         predicate = compiled_filter or compile_vector_filters(filters)
+        eligibility_ids = (
+            self._eligibility_mask(state, predicate) if exact else None
+        )
         hits: dict[str, RecordHit] = {}
         for scan_round in range(self.configuration.max_scan_rounds):
             self._last_search_diagnostics["scan_rounds"] = scan_round + 1
@@ -466,6 +475,7 @@ class FAISSLocalVectorStore:
                 state,
                 (int(faiss_id) for faiss_id in ids[0]),
                 predicate,
+                eligible_ids=eligibility_ids,
             )
             returned_count = int(np.count_nonzero(ids[0] != -1))
             for score, faiss_id in zip(scores[0], ids[0], strict=True):
@@ -495,14 +505,64 @@ class FAISSLocalVectorStore:
         )[:k]
 
     @staticmethod
+    def _canonical_scalar_filter_key(
+        predicate: CompiledVectorFilter,
+    ) -> tuple[str, str] | None:
+        if (
+            not isinstance(predicate.workspace_id, str)
+            or predicate.source_kinds is None
+            or len(predicate.source_kinds) != 1
+            or predicate.statuses != frozenset({"active"})
+            or predicate.candidate_keys is not None
+            or predicate.excluded_storage_keys is not None
+            or predicate.requires_metadata
+        ):
+            return None
+        return predicate.workspace_id, next(iter(predicate.source_kinds))
+
+    def _eligibility_mask(
+        self,
+        state: _FAISSState,
+        predicate: CompiledVectorFilter,
+    ) -> frozenset[int] | None:
+        key = self._canonical_scalar_filter_key(predicate)
+        if key is None:
+            return None
+        with self._state_lock:
+            cached = state.eligibility_masks.get(key)
+            if cached is not None:
+                return cached
+            workspace_id, source_kind = key
+            eligible = frozenset(
+                faiss_id
+                for faiss_id, storage_key in zip(
+                    state.ids, state.storage_keys, strict=True
+                )
+                if (
+                    state.candidate_metadata[storage_key].workspace_id == workspace_id
+                    and state.candidate_metadata[storage_key].source_kind
+                    == source_kind
+                    and state.candidate_metadata[storage_key].status == "active"
+                )
+            )
+            state.eligibility_masks[key] = eligible
+            return eligible
+
+    @staticmethod
     def _validated_storage_keys(
         state: _FAISSState,
         faiss_ids: Any,
         predicate: CompiledVectorFilter,
+        *,
+        eligible_ids: frozenset[int] | None = None,
     ) -> dict[int, str]:
         valid: dict[int, str] = {}
         for faiss_id in faiss_ids:
             storage_key = state.id_to_storage_key.get(faiss_id)
+            if eligible_ids is not None:
+                if storage_key is not None and faiss_id in eligible_ids:
+                    valid[faiss_id] = storage_key
+                continue
             metadata = (
                 state.candidate_metadata.get(storage_key)
                 if storage_key is not None
