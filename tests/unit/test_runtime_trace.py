@@ -156,6 +156,52 @@ class TestQueryTrace:
         assert "provenance" in d
         assert d["provenance"]["model"] == "test_model"
 
+    def test_query_trace_serialization_preserves_legacy_shape_when_unset(self):
+        """Standalone traces omit unset outcome-summary fields.
+
+        Existing trace producers retain their serialized keys until they
+        explicitly provide an outcome summary.
+        """
+        trace = QueryTrace(query_text="test query")
+
+        serialized = trace.to_dict()
+
+        assert set(serialized) == {"query", "total_duration_ms", "spans"}
+
+    def test_query_trace_serializes_zero_and_false_outcome_summary_values(self):
+        """Serialized summaries retain meaningful zero and false values.
+
+        Optional fields are omitted only when unset, not when their value is
+        zero or false.
+        """
+        trace = QueryTrace(
+            query_text="test query",
+            result_count=0,
+            candidate_count=0,
+            failure_count=0,
+            missing_record_count=0,
+            degraded=False,
+        )
+
+        serialized = trace.to_dict()
+
+        assert {
+            name: serialized[name]
+            for name in (
+                "result_count",
+                "candidate_count",
+                "failure_count",
+                "missing_record_count",
+                "degraded",
+            )
+        } == {
+            "result_count": 0,
+            "candidate_count": 0,
+            "failure_count": 0,
+            "missing_record_count": 0,
+            "degraded": False,
+        }
+
     def test_query_trace_nested_spans(self):
         """Test nesting of context managers."""
         trace = QueryTrace(query_text="test query")

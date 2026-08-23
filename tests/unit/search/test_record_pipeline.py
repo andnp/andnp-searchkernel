@@ -2707,6 +2707,84 @@ async def test_trace_is_redacted_and_contains_routing_diagnostics() -> None:
     assert outcome.diagnostic_evidence.stage_timings_ms == outcome.stage_timings_ms
 
 
+async def test_trace_summarizes_successful_search_outcome() -> None:
+    """A successful captured trace summarizes finalized outcome counts.
+
+    The summary mirrors the returned outcome without exposing result details.
+    """
+    pipeline = RecordSearchPipeline(
+        keyword_store=FakeKeywordStore([("a", 1.0)]),
+        hydrator=_hydrator({"a": _record("a")}),
+        config=RecordSearchConfig(capture_trace=True),
+    )
+
+    outcome = await pipeline.async_search("query", limit=1)
+
+    assert outcome.trace is not None
+    trace = outcome.trace.to_dict()
+    assert {
+        name: trace[name]
+        for name in (
+            "result_count",
+            "candidate_count",
+            "failure_count",
+            "missing_record_count",
+            "degraded",
+        )
+    } == {
+        "result_count": 1,
+        "candidate_count": 1,
+        "failure_count": 0,
+        "missing_record_count": 0,
+        "degraded": False,
+    }
+
+
+async def test_trace_summarizes_degraded_search_outcome() -> None:
+    """A degraded captured trace reports failures without diagnostic arrays.
+
+    The scalar summary reflects the same failure state returned by the
+    provider-neutral search outcome.
+    """
+
+    class BrokenKeywordStore(FakeKeywordStore):
+        def search(
+            self,
+            query: str,
+            k: int,
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
+            raise RuntimeError("backend unavailable")
+
+    pipeline = RecordSearchPipeline(
+        keyword_store=BrokenKeywordStore([]),
+        hydrator=_hydrator({}),
+        config=RecordSearchConfig(capture_trace=True),
+        continue_on_error=True,
+    )
+
+    outcome = await pipeline.async_search("query", limit=1)
+
+    assert outcome.trace is not None
+    trace = outcome.trace.to_dict()
+    assert {
+        name: trace[name]
+        for name in (
+            "result_count",
+            "candidate_count",
+            "failure_count",
+            "missing_record_count",
+            "degraded",
+        )
+    } == {
+        "result_count": 0,
+        "candidate_count": 0,
+        "failure_count": 1,
+        "missing_record_count": 0,
+        "degraded": True,
+    }
+
+
 async def test_rerank_runs_once_with_a_bounded_candidate_set() -> None:
     class Reranker:
         model_name = "fake-reranker"

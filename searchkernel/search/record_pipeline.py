@@ -738,6 +738,13 @@ class RecordSearchPipeline:
         trace = execution.trace
         hydrated = execution.hydrated
         if trace is not None:
+            trace.result_count = len(hydrated)
+            trace.candidate_count = len(execution.acquired_candidates)
+            trace.failure_count = len(execution.failures)
+            trace.missing_record_count = len(execution.missing_record_ids)
+            trace.degraded = bool(
+                execution.failures or execution.missing_record_ids
+            )
             trace.provenance = {
                 **(trace.provenance or {}),
                 "diagnostics": tuple(execution.diagnostics),

@@ -67,6 +67,21 @@ class QueryTrace:
     provenance: dict[str, Any] | None = None
     """Optional SearchResultProvenance or similar metadata."""
 
+    result_count: int | None = None
+    """Number of results returned by the completed search."""
+
+    candidate_count: int | None = None
+    """Number of candidates acquired by the completed search."""
+
+    failure_count: int | None = None
+    """Number of failures captured by the completed search."""
+
+    missing_record_count: int | None = None
+    """Number of requested records missing during the completed search."""
+
+    degraded: bool | None = None
+    """Whether the completed search degraded due to failures or missing records."""
+
     def close(self) -> None:
         """Mark the query as completed and compute overall duration."""
         if self.end_time is None:
@@ -120,4 +135,13 @@ class QueryTrace:
             result["query"] = self.query_text
         if self.provenance is not None:
             result["provenance"] = self.provenance
+        for name, value in (
+            ("result_count", self.result_count),
+            ("candidate_count", self.candidate_count),
+            ("failure_count", self.failure_count),
+            ("missing_record_count", self.missing_record_count),
+            ("degraded", self.degraded),
+        ):
+            if value is not None:
+                result[name] = value
         return result
