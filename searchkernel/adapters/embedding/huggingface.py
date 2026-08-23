@@ -12,6 +12,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from searchkernel.domain import Vector
 
 if TYPE_CHECKING:
@@ -77,7 +79,7 @@ class HuggingFaceEmbeddingProvider:
             normalize_embeddings=True,
             convert_to_numpy=True,
         )
-        return self._validate_embeddings(embeddings.tolist(), len(texts))
+        return self._validate_embeddings(embeddings, len(texts))
 
     def embed_query(self, text: str) -> Vector:
         """Embed a single QUERY with the Qwen3 instruction prompt applied."""
@@ -101,11 +103,38 @@ class HuggingFaceEmbeddingProvider:
                 normalize_embeddings=True,
                 convert_to_numpy=True,
             )
-        return self._validate_embeddings(embeddings.tolist(), len(texts))
+        return self._validate_embeddings(embeddings, len(texts))
 
     def _validate_embeddings(
         self, embeddings: object, expected_count: int
     ) -> list[Vector]:
+        if isinstance(embeddings, np.ndarray):
+            if expected_count == 0 and embeddings.size == 0:
+                return []
+            if embeddings.ndim != 2:
+                count = len(embeddings) if embeddings.ndim > 0 else "an invalid number of"
+                raise RuntimeError(
+                    f"embedding model returned {count} vectors for {expected_count} inputs"
+                )
+            if len(embeddings) != expected_count:
+                raise RuntimeError(
+                    f"embedding model returned {len(embeddings)} vectors for {expected_count} inputs"
+                )
+            if embeddings.shape[1] != self.dim:
+                raise RuntimeError(
+                    f"embedding model returned invalid vector 0: expected dimension {self.dim}"
+                )
+            if embeddings.dtype.kind not in "biuf":
+                raise RuntimeError(
+                    "embedding model returned non-finite vector 0"
+                )
+            finite_rows = np.isfinite(embeddings).all(axis=1)
+            if not finite_rows.all():
+                invalid_index = int(np.flatnonzero(~finite_rows)[0])
+                raise RuntimeError(
+                    f"embedding model returned non-finite vector {invalid_index}"
+                )
+            return embeddings.tolist()
         if not isinstance(embeddings, list) or len(embeddings) != expected_count:
             raise RuntimeError(
                 f"embedding model returned {len(embeddings) if isinstance(embeddings, list) else 'an invalid number of'} "
