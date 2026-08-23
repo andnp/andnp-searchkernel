@@ -477,6 +477,97 @@ def test_candidate_storage_keys_and_metadata_filter_return_intersection() -> Non
     assert [hit.storage_key for hit in combined] == [hit.storage_key for hit in expected]
 
 
+def test_empty_candidate_storage_keys_return_no_vector_hits() -> None:
+    """An explicitly empty candidate set excludes every local vector."""
+    backend = LocalRecordBackend()
+    records = [
+        _record("first", [1.0, 0.0]),
+        _record("second", [0.0, 1.0]),
+    ]
+    backend.upsert(records, "model", 2)
+
+    hits = backend.search_vector(
+        [1.0, 0.0],
+        10,
+        model_name="model",
+        dim=2,
+        filters={"candidate_storage_keys": []},
+    )
+
+    assert hits == []
+
+
+@pytest.mark.parametrize(
+    "filters",
+    [
+        {"workspace_id": "workspace"},
+        {"statuses": ["active"]},
+        {"metadata_equals": {"project_id": "keep"}},
+        {"metadata_in": {"project_id": ["keep", "also-keep"]}},
+        {
+            "candidate_storage_keys": [
+                RecordIdentity("workspace", "note", "middle").storage_key,
+                RecordIdentity("workspace", "note", "first").storage_key,
+            ]
+        },
+        {"candidate_storage_keys": []},
+    ],
+)
+def test_local_vector_filters_match_generic_predicate_and_order(
+    filters: dict[str, object],
+) -> None:
+    """Local filtered search matches generic eligibility and score ordering.
+
+    Candidate keys, scalar constraints, metadata constraints, and an empty
+    candidate set must all produce the same eligible ranking as the predicate.
+    """
+    backend = LocalRecordBackend()
+    records = [
+        _record("first", [1.0, 0.0], metadata={"project_id": "keep"}),
+        _record("middle", [0.8, 0.6], metadata={"project_id": "also-keep"}),
+        _record("last", [0.6, 0.8], metadata={"project_id": "drop"}),
+        _record(
+            "archived",
+            [1.0, 0.0],
+            status=RecordStatus.ARCHIVED,
+            metadata={"project_id": "keep"},
+        ),
+    ]
+    backend.upsert(records, "model", 2)
+
+    actual = backend.search_vector(
+        [1.0, 0.0], 10, model_name="model", dim=2, filters=filters
+    )
+    predicate = compile_vector_filters(filters)
+    expected_records = [
+        record
+        for record in records
+        if predicate.matches(
+            storage_key=record.storage_key,
+            source_id=record.source_id,
+            workspace_id=record.workspace_id,
+            source_kind=record.source_kind,
+            status=record.status,
+            metadata=record.metadata,
+            uri=record.uri,
+        )
+    ]
+    expected_scores: dict[str, float] = {}
+    for record in expected_records:
+        assert record.embedding is not None
+        expected_scores[record.storage_key] = float(record.embedding[0])
+    expected_records.sort(
+        key=lambda record: (-expected_scores[record.storage_key], record.storage_key)
+    )
+
+    assert [hit.storage_key for hit in actual] == [
+        record.storage_key for record in expected_records
+    ]
+    assert [hit.score for hit in actual] == pytest.approx(
+        [expected_scores[record.storage_key] for record in expected_records]
+    )
+
+
 @pytest.mark.parametrize("candidate_fraction", [0.1, 0.8])
 def test_search_vector_scoring_agrees_across_selectivity_branches(
     candidate_fraction: float,
