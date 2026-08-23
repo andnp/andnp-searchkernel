@@ -409,6 +409,70 @@ def test_filter_mask_raises_when_metadata_not_materialized() -> None:
         )
 
 
+def test_metadata_materialization_reuses_vector_and_scalar_arrays() -> None:
+    """Materializing metadata preserves the immutable vector search state."""
+    record = _record("only", [1.0, 0.0], metadata={"project_id": "keep"})
+    row = {
+        "storage_key": record.storage_key,
+        "source_id": record.source_id,
+        "workspace_id": record.workspace_id,
+        "source_kind": record.source_kind,
+        "status": record.status.value,
+        "metadata": record.metadata,
+        "uri": "/docs/only.md",
+        "embedding": PackedVectorCodec.encode([1.0, 0.0], 2),
+        "format_version": 2,
+        "normalization_policy": "l2",
+    }
+
+    cold = VectorSnapshot.from_rows(
+        [row], encoder_namespace="model", dim=2, epoch=1
+    )
+    warm = cold.with_materialized_metadata([row])
+
+    assert warm.matrix is cold.matrix
+    assert warm.storage_keys is cold.storage_keys
+    assert warm.source_ids is cold.source_ids
+    assert warm.workspace_ids is cold.workspace_ids
+    assert warm.source_kinds is cold.source_kinds
+    assert warm.statuses is cold.statuses
+    assert warm.metadata == ({"project_id": "keep"},)
+    assert warm.uris == ("/docs/only.md",)
+
+
+def test_metadata_materialization_rejects_mismatched_rows() -> None:
+    """Metadata materialization rejects reordered and incomplete row sets."""
+    record = _record("only", [1.0, 0.0], metadata={"project_id": "keep"})
+    row = {
+        "storage_key": record.storage_key,
+        "metadata": record.metadata,
+        "uri": "/docs/only.md",
+        "embedding": PackedVectorCodec.encode([1.0, 0.0], 2),
+        "format_version": 2,
+        "normalization_policy": "l2",
+    }
+    snapshot = VectorSnapshot.from_rows(
+        [
+            {
+                **row,
+                "source_id": record.source_id,
+                "workspace_id": record.workspace_id,
+                "source_kind": record.source_kind,
+                "status": record.status.value,
+            }
+        ],
+        encoder_namespace="model",
+        dim=2,
+        epoch=1,
+    )
+
+    reordered = {**row, "storage_key": "other"}
+    with pytest.raises(ValueError, match="ordering"):
+        snapshot.with_materialized_metadata([reordered])
+    with pytest.raises(ValueError, match="length"):
+        snapshot.with_materialized_metadata([])
+
+
 def _normalized_vectors(count: int, dim: int, *, seed: int) -> list[np.ndarray]:
     rng = np.random.default_rng(seed)
     raw = rng.standard_normal((count, dim))
@@ -801,6 +865,61 @@ def test_vector_search_materializes_metadata_only_for_metadata_filters() -> None
     )
 
     assert [hit.storage_key for hit in hits] == [record.storage_key]
+
+
+def test_cached_vector_snapshot_reuses_cold_state_for_metadata_filters(monkeypatch) -> None:
+    """A warm metadata filter reuses the cold snapshot build and its ordering."""
+    records = [
+        _record("drop", [1.0, 0.0], metadata={"category": "drop"}),
+        _record("keep-first", [0.8, 0.6], metadata={"category": "keep"}),
+        _record("keep-second", [0.6, 0.8], metadata={"category": "keep"}),
+    ]
+    backend = LocalRecordBackend()
+    vector = LocalVectorStore(backend)
+    backend.upsert(records, "model", 2)
+
+    original_from_rows = VectorSnapshot.from_rows
+    materialization_modes: list[bool] = []
+
+    def tracking_from_rows(
+        rows: Sequence[object],
+        *,
+        encoder_namespace: str,
+        dim: int,
+        epoch: int,
+        materialize_metadata: bool = False,
+    ) -> VectorSnapshot:
+        materialization_modes.append(materialize_metadata)
+        return original_from_rows(
+            rows,
+            encoder_namespace=encoder_namespace,
+            dim=dim,
+            epoch=epoch,
+            materialize_metadata=materialize_metadata,
+        )
+
+    monkeypatch.setattr(VectorSnapshot, "from_rows", tracking_from_rows)
+    assert [
+        hit.source_id
+        for hit in vector.search([1.0, 0.0], 3, model_name="model", dim=2)
+    ] == ["drop", "keep-first", "keep-second"]
+
+    filters = {"metadata_equals": {"category": "keep"}}
+    warm_hits = vector.search(
+        [1.0, 0.0], 3, model_name="model", dim=2, filters=filters
+    )
+    repeated_hits = vector.search(
+        [1.0, 0.0], 3, model_name="model", dim=2, filters=filters
+    )
+
+    assert [hit.source_id for hit in warm_hits] == ["keep-first", "keep-second"]
+    assert [hit.storage_key for hit in repeated_hits] == [
+        hit.storage_key for hit in warm_hits
+    ]
+    assert [hit.score for hit in repeated_hits] == pytest.approx(
+        [hit.score for hit in warm_hits]
+    )
+    assert materialization_modes == [False]
 
 
 def test_large_mixed_vector_upsert_writes_only_changed_rows(tmp_path: Path) -> None:
