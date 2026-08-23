@@ -2469,10 +2469,12 @@ class _LocalMutationCoordinator:
                         f"Dimension mismatch for model {model_name!r}: "
                         f"expected {existing_dim}, got {dim}"
                     )
+                embedded_rows: list[Record] = []
                 embeddings: list[Sequence[float] | np.ndarray] = []
                 contexts: list[str] = []
                 for record in rows:
                     if record.embedding is not None:
+                        embedded_rows.append(record)
                         embeddings.append(record.embedding)
                         contexts.append(f"embedding for {record.storage_key}")
                 packed_embeddings = PackedVectorCodec.encode_batch(
@@ -2487,7 +2489,7 @@ class _LocalMutationCoordinator:
                         record_embedding_revision(record, model_name, dim),
                     )
                     for record, packed_embedding in zip(
-                        rows, packed_embeddings, strict=True
+                        embedded_rows, packed_embeddings, strict=True
                     )
                 }
                 packed_vectors = list(packed_vectors_by_key.values())
