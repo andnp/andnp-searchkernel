@@ -3178,6 +3178,12 @@ class LocalVectorStore:
             )
         return self._faiss_store
 
+    def migrate_legacy_persistence(self, model_name: str, dim: int) -> bool:
+        """Explicitly delegate legacy FAISS migration for FAISS-capable engines."""
+        if self._engine == "exact":
+            return False
+        return self._get_faiss_store().migrate_legacy_persistence(model_name, dim)
+
     @staticmethod
     def _timed_search(
         search: Callable[[], list[RecordHit]],

@@ -262,3 +262,62 @@ def test_adaptive_routing_reuses_stable_warmed_selection(monkeypatch) -> None:
     assert measurement is vector.last_routing_measurement
     assert vector.engine_name == "faiss"
     assert _FakeFAISS.calls == 3
+
+
+@pytest.mark.parametrize("engine", ["faiss", "auto"])
+def test_local_vector_store_delegates_explicit_faiss_migration(
+    engine: str, monkeypatch
+) -> None:
+    """Forward explicit migration only through FAISS-capable engine modes.
+
+    The delegate preserves the public scalar store surface while forwarding
+    the caller's model namespace and dimension to the FAISS implementation.
+    """
+    calls: list[tuple[str, int]] = []
+
+    class _FakeFAISS:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def migrate_legacy_persistence(self, model_name: str, dim: int) -> bool:
+            calls.append((model_name, dim))
+            return True
+
+    monkeypatch.setattr(local_indices, "FAISSLocalVectorStore", _FakeFAISS)
+    vector = LocalVectorStore(LocalRecordBackend(), engine=engine)
+
+    assert vector.migrate_legacy_persistence("model-name", 384) is True
+    assert calls == [("model-name", 384)]
+
+
+def test_exact_local_vector_store_does_not_delegate_migration(monkeypatch) -> None:
+    """Return false for exact storage without constructing a FAISS adapter.
+
+    Explicit migration is an optional FAISS capability and must not alter the
+    SQLite exact engine's construction or behavior.
+    """
+    def fail_faiss_construction(*args: object, **kwargs: object) -> None:
+        raise AssertionError("exact engine must not construct FAISS")
+
+    monkeypatch.setattr(
+        local_indices, "FAISSLocalVectorStore", fail_faiss_construction
+    )
+    vector = LocalVectorStore(LocalRecordBackend(), engine="exact")
+
+    assert vector.migrate_legacy_persistence("model-name", 384) is False
+
+
+def test_migration_delegate_leaves_scalar_search_unchanged() -> None:
+    """Keep exact scalar search behavior unchanged after migration probing.
+
+    Calling the optional migration capability must not affect the canonical
+    SQLite result path used by exact local vector stores.
+    """
+    backend = LocalRecordBackend()
+    _load_vectors(backend, [_record("one", [1.0, 0.0])])
+    vector = LocalVectorStore(backend, engine="exact")
+
+    assert vector.migrate_legacy_persistence("model", 2) is False
+    hits = vector.search([1.0, 0.0], 1, model_name="model", dim=2)
+
+    assert [hit.source_id for hit in hits] == ["one"]
