@@ -321,44 +321,91 @@ class VectorSnapshot:
         filter_values: Any,
         compiled_filter: CompiledVectorFilter | None = None,
     ) -> np.ndarray:
+        positions = self.filter_positions(
+            filters,
+            status_values=status_values,
+            filter_values=filter_values,
+            compiled_filter=compiled_filter,
+        )
+        result = np.zeros(len(self.storage_keys), dtype=bool)
+        result[positions] = True
+        return result
+
+    def filter_positions(
+        self,
+        filters: Mapping[str, Any] | None,
+        *,
+        status_values: set[str],
+        filter_values: Any,
+        compiled_filter: CompiledVectorFilter | None = None,
+    ) -> np.ndarray:
         predicate = compiled_filter or compile_vector_filters(filters)
+        if predicate.candidate_keys is None:
+            positions = np.arange(len(self.storage_keys), dtype=np.intp)
+        else:
+            position_index = self._position_index()
+            positions = np.asarray(
+                sorted(
+                    position
+                    for candidate_key in predicate.candidate_keys
+                    if (position := position_index.get(candidate_key)) is not None
+                ),
+                dtype=np.intp,
+            )
+        if not len(positions):
+            if not self._can_prefilter_scalars(filters, predicate) and len(
+                self.metadata
+            ) != len(self.storage_keys):
+                raise ValueError("metadata must be materialized for this filter")
+            return positions
+
         # Vectorized prefilter on scalar fields always runs first, even when
         # a Python metadata predicate is also needed below: it is cheap and
         # narrows the rows the slow per-row predicate must visit.
-        eligible = np.isin(self.statuses, tuple(predicate.statuses))
+        eligible = np.isin(self.statuses[positions], tuple(predicate.statuses))
         if predicate.workspace_id is not None and isinstance(
             predicate.workspace_id, str
         ):
-            eligible &= self.workspace_ids == predicate.workspace_id
+            eligible &= self.workspace_ids[positions] == predicate.workspace_id
         if predicate.source_kinds is not None:
-            eligible &= np.isin(self.source_kinds, tuple(predicate.source_kinds))
-        if predicate.candidate_keys is not None:
-            position_index = self._position_index()
-            candidate_mask = np.zeros(len(self.storage_keys), dtype=bool)
-            for candidate_key in predicate.candidate_keys:
-                position = position_index.get(candidate_key)
-                if position is not None:
-                    candidate_mask[position] = True
-            eligible &= candidate_mask
+            eligible &= np.isin(
+                self.source_kinds[positions], tuple(predicate.source_kinds)
+            )
+        positions = positions[eligible]
+        if not len(positions):
+            return positions
         if self._can_prefilter_scalars(filters, predicate):
-            return np.asarray(eligible, dtype=bool)
+            return positions
         if len(self.metadata) != len(self.storage_keys):
             raise ValueError("metadata must be materialized for this filter")
         if predicate.metadata_equals is not None:
             for field_name, value in predicate.metadata_equals:
-                eligible &= self._metadata_string_column(field_name) == value
+                column = np.asarray(
+                    [
+                        str(self.metadata[position].get(field_name))
+                        for position in positions
+                    ],
+                    dtype=str,
+                )
+                positions = positions[column == value]
         if predicate.metadata_in is not None:
             for field_name, allowed_values in predicate.metadata_in:
-                eligible &= np.isin(
-                    self._metadata_string_column(field_name),
-                    tuple(allowed_values),
+                column = np.asarray(
+                    [
+                        str(self.metadata[position].get(field_name))
+                        for position in positions
+                    ],
+                    dtype=str,
                 )
+                positions = positions[np.isin(column, tuple(allowed_values))]
+        if not len(positions):
+            return positions
         if self._can_prefilter_metadata(predicate):
-            return np.asarray(eligible, dtype=bool)
-        result = np.zeros(len(self.storage_keys), dtype=bool)
-        for position in np.flatnonzero(eligible):
+            return positions
+        matched_positions = []
+        for position in positions:
             workspace_id = self.workspace_ids[position]
-            result[position] = predicate.matches(
+            if predicate.matches(
                 storage_key=self.storage_keys[position],
                 source_id=str(self.source_ids[position]),
                 workspace_id=(str(workspace_id) if workspace_id is not None else None),
@@ -366,8 +413,9 @@ class VectorSnapshot:
                 status=str(self.statuses[position]),
                 metadata=self.metadata[position],
                 uri=self.uris[position],
-            )
-        return result
+            ):
+                matched_positions.append(position)
+        return np.asarray(matched_positions, dtype=np.intp)
 
     @staticmethod
     def _can_prefilter_metadata(predicate: CompiledVectorFilter) -> bool:
