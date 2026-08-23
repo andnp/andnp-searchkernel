@@ -1,8 +1,9 @@
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 
 def atomic_write_json(path: Path, data: Any, *, fsync: bool = True) -> None:
@@ -60,6 +61,35 @@ def atomic_write_binary(path: Path, data: bytes, *, fsync: bool = True) -> None:
                 os.fsync(f.fileno())
 
         os.replace(tmp_path, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def atomic_write_stream(
+    path: Path,
+    writer: Callable[[BinaryIO], None],
+    *,
+    fsync: bool = True,
+) -> int:
+    """Atomically publish bytes written by a bounded-memory callback."""
+    dir_path = path.parent
+    dir_path.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(dir=str(dir_path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            writer(f)
+            f.flush()
+            if fsync:
+                os.fsync(f.fileno())
+            size = f.tell()
+
+        os.replace(tmp_path, str(path))
+        return size
     except Exception:
         try:
             os.unlink(tmp_path)

@@ -211,6 +211,54 @@ def test_split_active_ids_must_be_persisted_subset(tmp_path: Path) -> None:
     assert restored.last_search_diagnostics["persistence"] == "rebuilt"
 
 
+def test_streamed_sidecar_offsets_round_trip_exact_records(tmp_path: Path) -> None:
+    """Publish one JSONL record per offset with exact manifest sizes.
+
+    The streamed writer must preserve deterministic key-to-record locations so
+    a fresh store can resolve filtered metadata without rebuilding the index.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert(
+        [
+            _record("one", [1.0, 0.0], metadata={"project": "a"}),
+            _record("two", [0.0, 1.0], metadata={"project": "b"}),
+        ],
+        "model",
+        2,
+    )
+    index_path = tmp_path / "index.faiss"
+    store = FAISSLocalVectorStore(backend, index_path=index_path)
+    expected = store.search(
+        [1.0, 0.0], 2, model_name="model", dim=2,
+        filters={"metadata_equals": {"project": "a"}},
+    )
+    manifest = json.loads(
+        index_path.with_suffix(".manifest.json").read_text(encoding="utf-8")
+    )
+    sidecar = index_path.with_name(manifest["metadata_file"]).read_bytes()
+    locations = manifest["metadata_offsets"]
+
+    assert manifest["metadata_size"] == len(sidecar)
+    previous_end = 0
+    for storage_key in manifest["storage_keys"]:
+        offset = locations[storage_key]["offset"]
+        length = locations[storage_key]["length"]
+        assert offset == previous_end
+        record = json.loads(sidecar[offset : offset + length])
+        assert record["storage_key"] == storage_key
+        previous_end = offset + length
+
+    restored = FAISSLocalVectorStore(backend, index_path=index_path)
+    actual = restored.search(
+        [1.0, 0.0], 2, model_name="model", dim=2,
+        filters={"metadata_equals": {"project": "a"}},
+    )
+    assert [(hit.storage_key, hit.score) for hit in actual] == [
+        (hit.storage_key, hit.score) for hit in expected
+    ]
+    assert restored.last_search_diagnostics["persistence"] == "loaded"
+
+
 def test_truncated_split_sidecar_rebuilds_deterministically(tmp_path: Path) -> None:
     """Rebuild when a published generation sidecar is incomplete.
 

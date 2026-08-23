@@ -34,7 +34,11 @@ from searchkernel.indices.local_vectors import (
     VECTOR_FORMAT_VERSION,
     PackedVectorCodec,
 )
-from searchkernel.utils.atomic_io import atomic_write_binary, atomic_write_json
+from searchkernel.utils.atomic_io import (
+    atomic_write_binary,
+    atomic_write_json,
+    atomic_write_stream,
+)
 
 if TYPE_CHECKING:
     from searchkernel.indices.local import LocalRecordBackend
@@ -750,24 +754,29 @@ class FAISSLocalVectorStore:
             generation_metadata = index_path.with_name(
                 f"{index_path.stem}.{generation}.jsonl"
             )
-            lines: list[bytes] = []
             offsets: dict[str, dict[str, int]] = {}
-            offset = 0
-            for storage_key in state.storage_keys:
-                line = json.dumps(
-                    {
-                        "storage_key": storage_key,
-                        **self._metadata_value(state.candidate_metadata[storage_key]),
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8") + b"\n"
-                lines.append(line)
-                offsets[storage_key] = {"offset": offset, "length": len(line)}
-                offset += len(line)
-            metadata_bytes = b"".join(lines)
+
+            def write_metadata(handle: BinaryIO) -> None:
+                for storage_key in state.storage_keys:
+                    line = json.dumps(
+                        {
+                            "storage_key": storage_key,
+                            **self._metadata_value(
+                                state.candidate_metadata[storage_key]
+                            ),
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8") + b"\n"
+                    offset = handle.tell()
+                    handle.write(line)
+                    offsets[storage_key] = {
+                        "offset": offset,
+                        "length": len(line),
+                    }
+
             atomic_write_binary(generation_index, index_bytes)
-            atomic_write_binary(generation_metadata, metadata_bytes)
+            metadata_size = atomic_write_stream(generation_metadata, write_metadata)
             manifest = {
                 **self._persistence_metadata(state),
                 "persistence_format": "split",
@@ -775,7 +784,7 @@ class FAISSLocalVectorStore:
                 "index_file": generation_index.name,
                 "metadata_file": generation_metadata.name,
                 "index_size": len(index_bytes),
-                "metadata_size": len(metadata_bytes),
+                "metadata_size": metadata_size,
                 "metadata_offsets": offsets,
             }
             atomic_write_json(self._manifest_path(state.encoder_namespace, state.dim), manifest)
