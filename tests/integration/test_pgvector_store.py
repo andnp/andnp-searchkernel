@@ -475,6 +475,77 @@ class TestVectorStore:
         vector_store.delete_for_model([source.storage_key], "model-two", 4)
         assert graph_store.neighbors(RecordIdentity(None, "note", source.source_id)) == []
 
+    def test_model_delete_scopes_cleanup_to_target_model_vectors(self, pg_conn):
+        """A mixed model delete preserves records absent from that model.
+
+        Canonical rows and graph edges for an ID without a target-model vector
+        must survive when another ID in the same batch has one.
+        """
+        vector_store = PGVectorStore(pg_conn)
+        graph_store = PGGraphStore(pg_conn)
+        now = datetime.now(UTC)
+        target = Record(
+            source_kind="note",
+            source_id="target-model",
+            title="Target",
+            body="Target",
+            created_at=now,
+            updated_at=now,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        absent = Record(
+            source_kind="note",
+            source_id="absent-model",
+            title="Absent",
+            body="Absent",
+            created_at=now,
+            updated_at=now,
+            embedding=[0.0, 1.0, 0.0, 0.0],
+        )
+        neighbor = Record(
+            source_kind="note",
+            source_id="neighbor",
+            title="Neighbor",
+            body="Neighbor",
+            created_at=now,
+            updated_at=now,
+            embedding=[0.0, 0.0, 1.0, 0.0],
+        )
+        vector_store.upsert([target, absent, neighbor], "model-one", 4)
+        pg_conn.execute(
+            f'DELETE FROM "{_vector_table_name("model-one", 4)}" '
+            "WHERE record_id = %s RETURNING record_id;",
+            (absent.storage_key,),
+        )
+        graph_store.upsert_edges(
+            [
+                GraphEdge(
+                    RecordIdentity(None, "note", absent.source_id),
+                    RecordIdentity(None, "note", neighbor.source_id),
+                    "links",
+                    1.0,
+                )
+            ]
+        )
+
+        vector_store.delete_for_model(
+            [target.storage_key, absent.storage_key], "model-one", 4
+        )
+
+        assert pg_conn.execute_one(
+            "SELECT record_id FROM records WHERE record_id = %s;",
+            (absent.storage_key,),
+        ) == (absent.storage_key,)
+        assert graph_store.neighbors(
+            RecordIdentity(None, "note", absent.source_id)
+        ) == [
+            GraphNeighbor(
+                RecordIdentity(None, "note", neighbor.source_id),
+                "links",
+                1.0,
+            )
+        ]
+
     def test_delete_rejects_bare_source_id(self, pg_conn, fixture_records):
         store = PGVectorStore(pg_conn)
         store.upsert(fixture_records[:1], model_name="test-model", dim=4)

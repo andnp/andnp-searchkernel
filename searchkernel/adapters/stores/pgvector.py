@@ -1530,11 +1530,18 @@ class PGVectorStore:
 
             _execute(
                 cursor,
-                self._sql.SQL("DELETE FROM {table} WHERE record_id = ANY(%s);").format(
+                self._sql.SQL(
+                    "DELETE FROM {table} WHERE record_id = ANY(%s) "
+                    "RETURNING record_id;"
+                ).format(
                     table=self._sql.Identifier(table_name)
                 ),
                 (storage_ids,),
             )
+            deleted_vector_ids = [row[0] for row in cursor.fetchall()]
+            if not deleted_vector_ids:
+                conn.commit()
+                return
 
             cursor.execute("SELECT table_name FROM vector_tables;")
             table_names = [table_row[0] for table_row in cursor.fetchall()]
@@ -1554,7 +1561,7 @@ class PGVectorStore:
                         "FROM records r "
                         "WHERE r.record_id = ANY(%s) AND {}"
                     ).format(remaining_clause),
-                    (storage_ids,),
+                    (deleted_vector_ids,),
                 )
                 deleted_identities = [
                     RecordIdentity(workspace_id or None, source_kind, source_id)
@@ -1568,13 +1575,13 @@ class PGVectorStore:
                     self._sql.SQL(
                         "DELETE FROM records r WHERE r.record_id = ANY(%s) AND {}"
                     ).format(remaining_clause),
-                    (storage_ids,),
+                    (deleted_vector_ids,),
                 )
             else:
                 graph_changed = False
                 cursor.execute(
                     "DELETE FROM records WHERE record_id = ANY(%s);",
-                    (storage_ids,),
+                    (deleted_vector_ids,),
                 )
 
             _POSTGRES_EPOCH_LANE.bump(
