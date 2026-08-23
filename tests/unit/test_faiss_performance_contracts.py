@@ -79,6 +79,49 @@ def test_exact_filtered_search_preserves_filtering_and_order(tmp_path: Path) -> 
     assert [hit.source_id for hit in hits] == ["first", "second"]
 
 
+def test_faiss_fallback_matches_local_for_compound_filters(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """FAISS fallback preserves local exact filtering and ordering.
+
+    A forced index failure exercises the fallback contract without depending
+    on FAISS availability or internal compilation details.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record("first", [1.0, 0.0], metadata={"keep": True}),
+        _record("second", [0.8, 0.6], metadata={"keep": True}),
+        _record("blocked", [0.99, 0.1], metadata={"keep": False}),
+    ]
+    backend.upsert(records, "model", 2)
+    filters = {
+        "candidate_storage_keys": [
+            records[0].storage_key,
+            records[1].storage_key,
+            records[2].storage_key,
+        ],
+        "metadata_equals": {"keep": True},
+    }
+    store = FAISSLocalVectorStore(backend, index_path=tmp_path / "faiss")
+    monkeypatch.setattr(
+        store,
+        "_get_state",
+        lambda model_name, dim: (_ for _ in ()).throw(RuntimeError("index failed")),
+    )
+
+    expected = backend.search_vector(
+        [1.0, 0.0], 2, model_name="model", dim=2, filters=filters
+    )
+    actual = store.search(
+        [1.0, 0.0], 2, model_name="model", dim=2, filters=filters
+    )
+
+    assert [(hit.storage_key, hit.score) for hit in actual] == [
+        (hit.storage_key, hit.score) for hit in expected
+    ]
+    assert store.last_search_diagnostics["fallback"] is True
+
+
 def test_exact_search_returns_empty_for_empty_corpus(tmp_path: Path) -> None:
     """Return no hits when the exact FAISS corpus is empty.
 
