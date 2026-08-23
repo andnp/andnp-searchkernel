@@ -9,10 +9,14 @@ import pytest
 
 from searchkernel.api import SearchKernel
 from searchkernel.api import SemanticRecordIngestor as ApiRecordIngestor
-from searchkernel.domain import Record, RecordStatus
+from searchkernel.domain import Chunk, Record, RecordStatus
 from searchkernel.indexing.embedding_cache import SQLiteEmbeddingCache
+from searchkernel.indexing.semantic import semantic_input_for_record
 from searchkernel.ingestion import SemanticRecordIngestor
-from searchkernel.ingestion.records import _merge_stage_outcomes
+from searchkernel.ingestion.records import (
+    _merge_stage_outcomes,
+    _RecordBatchMaterializer,
+)
 from searchkernel.ports.content_source import RecordIngestionResult
 
 
@@ -42,6 +46,27 @@ class _BlockingProvider(_Provider):
         return super().embed(texts)
 
 
+class _BatchFailingProvider(_Provider):
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        if len(texts) > 1:
+            raise RuntimeError("batch embedding failed")
+        return super().embed(texts)
+
+
+@dataclass
+class _Chunker:
+    def chunk_record(self, record: Record) -> list[Chunk]:
+        return [
+            Chunk(
+                "child",
+                record.source_id,
+                "child body",
+                {"header_path": "Child"},
+                0,
+            )
+        ]
+
+
 class _KeywordStore:
     def __init__(self, failures: set[str] | None = None) -> None:
         self.records: list[Record] = []
@@ -54,6 +79,18 @@ class _KeywordStore:
 
     def search(self, query, k, filters=None):
         return []
+
+
+class _BlockingKeywordStore(_KeywordStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def index(self, records: list[Record]) -> None:
+        self.started.set()
+        self.release.wait(timeout=5)
+        super().index(records)
 
 
 class _VectorStore:
@@ -253,6 +290,10 @@ async def test_active_and_archived_records_are_upserted_without_deletion() -> No
 
 @pytest.mark.asyncio
 async def test_receipts_are_deterministic_and_do_not_advance_checkpoint() -> None:
+    """Receipts preserve the caller checkpoint without advancing it.
+
+    Checkpoint persistence remains the source caller's responsibility.
+    """
     provider = _Provider()
     ingestor, _, _ = _ingestor(
         provider,
@@ -275,6 +316,160 @@ async def test_receipts_are_deterministic_and_do_not_advance_checkpoint() -> Non
         "committed",
         "committed",
     )
+
+
+@pytest.mark.asyncio
+async def test_empty_ingestion_preserves_checkpoint_and_has_no_outcomes() -> None:
+    """Empty input returns a receipt without starting either indexing stage.
+
+    An existing checkpoint is carried through unchanged for the caller.
+    """
+    provider = _Provider()
+    ingestor, keyword, vector = _ingestor(
+        provider,
+        cache=SQLiteEmbeddingCache(":memory:", "empty", 1),
+    )
+
+    receipt = await ingestor.index_records([], checkpoint="cursor-1")
+
+    assert receipt.source_kind == ""
+    assert receipt.workspace_id is None
+    assert receipt.checkpoint == "cursor-1"
+    assert receipt.records == ()
+    assert provider.calls == []
+    assert keyword.records == []
+    assert vector.records == []
+
+
+def test_ingestor_rejects_invalid_batch_size() -> None:
+    """The ingestor rejects a non-positive semantic batch size at construction.
+
+    Invalid configuration must fail before any source records are processed.
+    """
+    with pytest.raises(ValueError, match="embedding_batch_size"):
+        SemanticRecordIngestor(
+            embedding_provider=_Provider(),
+            keyword_store=_KeywordStore(),
+            vector_store=_VectorStore(),
+            embedding_cache=SQLiteEmbeddingCache(":memory:", "invalid", 1),
+            embedding_batch_size=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_semantic_batch_failure_falls_back_to_individual_records() -> None:
+    """A failed semantic batch retries records individually.
+
+    Successful per-record retries should produce a committed receipt.
+    """
+    provider = _BatchFailingProvider()
+    ingestor, _, vector = _ingestor(
+        provider,
+        cache=SQLiteEmbeddingCache(":memory:", "semantic-fallback", 1),
+    )
+
+    receipt = await ingestor.index_records([_record("first"), _record("second")])
+
+    assert receipt.committed == 2
+    assert len(provider.calls) == 2
+    assert [record.source_id for record in vector.records] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_receipt_attributes_failures_to_the_stage_and_record() -> None:
+    """Lenient receipts retain the failing stage for each source record.
+
+    Independent keyword and semantic failures must not collapse into one error.
+    """
+    first = _record("keyword-failure")
+    second = _record("vector-failure")
+    ingestor, _, _ = _ingestor(
+        _Provider(),
+        cache=SQLiteEmbeddingCache(":memory:", "attribution", 1),
+        keyword=_KeywordStore({first.source_id}),
+        vector=_VectorStore({second.source_id}),
+    )
+
+    receipt = await ingestor.index_records([first, second], failure_mode="lenient")
+
+    assert [result.source_id for result in receipt.records] == [
+        "keyword-failure",
+        "vector-failure",
+    ]
+    assert "keyword stage:" in receipt.records[0].error
+    assert "semantic stage:" in receipt.records[1].error
+
+
+@pytest.mark.asyncio
+async def test_chunk_expansion_indexes_children_but_reports_parent_receipt() -> None:
+    """Chunk expansion writes parent and child records under one parent outcome.
+
+    The receipt remains source-oriented while both searchable records advance.
+    """
+    provider = _Provider()
+    ingestor, keyword, vector = _ingestor(
+        provider,
+        cache=SQLiteEmbeddingCache(":memory:", "chunks", 1),
+    )
+    ingestor.chunker = _Chunker()
+    parent = _record("parent")
+
+    receipt = await ingestor.index_records([parent])
+
+    assert receipt.committed == 1
+    assert [record.source_id for record in keyword.records] == [
+        "parent",
+        "parent#chunk:child",
+    ]
+    assert [record.source_id for record in vector.records] == [
+        "parent",
+        "parent#chunk:child",
+    ]
+    assert provider.calls[0] == [
+        "Title: parent\n\nraw body for parent",
+        "Title: parent\n\nchild body",
+    ]
+
+
+def test_materializer_rejects_unknown_record_storage_keys() -> None:
+    """Batch materialization rejects vectors for records outside its batch.
+
+    Unknown identities must not silently attach embeddings to another record.
+    """
+    record = _record("known")
+    semantic_input = semantic_input_for_record(record, "materializer")
+
+    with pytest.raises(ValueError, match="does not belong to the record batch"):
+        _RecordBatchMaterializer([record], "test-model").materialize(
+            "missing-storage-key",
+            [1.0],
+            semantic_input,
+        )
+
+
+@pytest.mark.asyncio
+async def test_cancelling_ingestion_cancels_both_sibling_stages() -> None:
+    """Cancelling an in-flight ingestion propagates to both stage tasks.
+
+    Blocking focused fakes make sibling cancellation deterministic and visible.
+    """
+    provider = _BlockingProvider()
+    keyword = _BlockingKeywordStore()
+    ingestor, _, _ = _ingestor(
+        provider,
+        cache=SQLiteEmbeddingCache(":memory:", "cancel", 1),
+        keyword=keyword,
+    )
+    task = asyncio.create_task(ingestor.index_records([_record("one")]))
+
+    await asyncio.to_thread(provider.started.wait, 5)
+    await asyncio.to_thread(keyword.started.wait, 5)
+    task.cancel()
+    provider.release.set()
+    keyword.release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio
