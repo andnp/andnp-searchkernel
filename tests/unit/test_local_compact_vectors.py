@@ -268,14 +268,13 @@ def test_exact_batch_search_handles_empty_and_misaligned_inputs() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_async_batch_vector_search_matches_sync_results() -> None:
-    """The async optional capability returns the sync exact batch contract."""
+def test_local_batch_vector_search_matches_sync_results() -> None:
+    """The local optional capability returns the sync exact batch contract."""
     backend = LocalRecordBackend()
     backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
     store = LocalVectorStore(backend)
 
-    result = await store.search_batch(
+    result = store.search_batch(
         [[1.0, 0.0], [0.0, 1.0]],
         1,
         model_name="model",
