@@ -93,5 +93,59 @@ builtins.__import__ = reject_markdown_import
 from searchkernel.api import SearchOrchestrator
 
 assert SearchOrchestrator is not None
+    """
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def test_api_lazy_exports_resolve_all_supported_names() -> None:
+    """Supported lazy names resolve to their canonical public objects.
+
+    The facade should defer imports without changing object identity.
+    """
+    from searchkernel import chunking, embeddings
+
+    assert api.TEST_FAKE_EMBEDDINGS_ENV_VAR == embeddings.TEST_FAKE_EMBEDDINGS_ENV_VAR
+    assert api.TEST_FAKE_EMBEDDING_MODEL_NAME == (
+        embeddings.TEST_FAKE_EMBEDDING_MODEL_NAME
+    )
+    assert api.should_use_test_fake_embeddings is embeddings.should_use_test_fake_embeddings
+    assert api.ChunkingStrategy is chunking.ChunkingStrategy
+    assert api.HeaderBasedChunker is chunking.HeaderBasedChunker
+    assert api.get_chunker is chunking.get_chunker
+
+
+def test_api_unknown_attribute_raises_descriptive_attribute_error() -> None:
+    """Unknown facade names raise AttributeError with the requested name.
+
+    Lazy lookup must not turn typos into unrelated import errors.
+    """
+    missing_name = "missing_export"
+    with pytest.raises(AttributeError, match="missing_export"):
+        getattr(api, missing_name)
+
+
+def test_api_import_isolated_from_optional_chunk_dependencies() -> None:
+    """The API can import and resolve core lazy names without Markdown extras.
+
+    Optional chunking dependencies should remain isolated until chunking access.
+    """
+    script = """
+import builtins
+
+real_import = builtins.__import__
+
+def reject_optional_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "tree_sitter" or name.startswith("tree_sitter."):
+        raise ModuleNotFoundError("tree-sitter intentionally blocked")
+    if name == "tree_sitter_markdown" or name.startswith("tree_sitter_markdown."):
+        raise ModuleNotFoundError("tree-sitter-markdown intentionally blocked")
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = reject_optional_import
+
+from searchkernel import api
+from searchkernel.embeddings import TEST_FAKE_EMBEDDINGS_ENV_VAR
+
+assert api.TEST_FAKE_EMBEDDINGS_ENV_VAR == TEST_FAKE_EMBEDDINGS_ENV_VAR
 """
     subprocess.run([sys.executable, "-c", script], check=True)
