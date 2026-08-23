@@ -1048,6 +1048,114 @@ class _VectorEngine:
             for index, position in selected
         ]
 
+    def search_vectors(
+        self,
+        query_vectors: Sequence[Vector],
+        k: int,
+        *,
+        model_name: str,
+        dim: int,
+        filters: Sequence[SearchFilters | None] | None = None,
+    ) -> list[list[RecordHit]]:
+        if not query_vectors:
+            return []
+        if filters is not None and len(filters) != len(query_vectors):
+            raise ValueError("filters must match query_vectors length")
+        query_filters = list(filters) if filters is not None else [None] * len(query_vectors)
+        queries = np.stack(
+            [
+                PackedVectorCodec.normalize(
+                    query_vector,
+                    dim,
+                    context=f"query vector {index}",
+                )
+                for index, query_vector in enumerate(query_vectors)
+            ]
+        )
+        predicates = [compile_vector_filters(value) for value in query_filters]
+        if k < 1:
+            return [[] for _ in query_vectors]
+        if any(self._has_typed_filter(predicate) for predicate in predicates):
+            return [
+                self.search_vector(
+                    query_vector,
+                    k,
+                    model_name=model_name,
+                    dim=dim,
+                    filters=query_filter,
+                    compiled_filter=predicate,
+                )
+                for query_vector, query_filter, predicate in zip(
+                    query_vectors, query_filters, predicates, strict=True
+                )
+            ]
+        row_count, byte_count = self.vector_storage_stats(model_name, dim)
+        if (
+            row_count > self._vector_snapshot_max_rows
+            or byte_count > self._vector_snapshot_max_bytes
+        ):
+            return [
+                self.search_vector(
+                    query_vector,
+                    k,
+                    model_name=model_name,
+                    dim=dim,
+                    filters=query_filter,
+                    compiled_filter=predicate,
+                )
+                for query_vector, query_filter, predicate in zip(
+                    query_vectors, query_filters, predicates, strict=True
+                )
+            ]
+        materialize_metadata = any(
+            not VectorSnapshot._can_prefilter_scalars(query_filter, predicate)
+            for query_filter, predicate in zip(
+                query_filters, predicates, strict=True
+            )
+        )
+        snapshot = self._get_vector_snapshot(
+            model_name,
+            dim,
+            materialize_metadata=materialize_metadata,
+        )
+        groups: dict[tuple[int, ...], list[int]] = {}
+        for index, (query_filter, predicate) in enumerate(
+            zip(query_filters, predicates, strict=True)
+        ):
+            eligible = snapshot.filter_mask(
+                query_filter,
+                status_values=self._status_values(query_filter),
+                filter_values=self._filter_values,
+                compiled_filter=predicate,
+            )
+            groups.setdefault(
+                tuple(int(position) for position in np.flatnonzero(eligible)),
+                [],
+            ).append(index)
+        results: list[list[RecordHit]] = [[] for _ in query_vectors]
+        for positions_tuple, indexes in groups.items():
+            if not positions_tuple:
+                continue
+            positions = np.asarray(positions_tuple, dtype=np.intp)
+            scores = snapshot.matrix[positions] @ queries[indexes].T
+            for column, index in enumerate(indexes):
+                selected = self._select_top_positions(
+                    positions,
+                    scores[:, column],
+                    snapshot.storage_keys,
+                    k,
+                )
+                results[index] = [
+                    RecordHit(
+                        RecordIdentity.from_storage_key(
+                            snapshot.storage_keys[position]
+                        ),
+                        float(scores[row, column]),
+                    )
+                    for row, position in selected
+                ]
+        return results
+
     def _search_vector_blocks(
         self,
         query: np.ndarray,
@@ -2819,6 +2927,23 @@ class LocalRecordBackend:
             compiled_filter=compiled_filter,
         )
 
+    def search_vectors(
+        self,
+        query_vectors: Sequence[Vector],
+        k: int,
+        *,
+        model_name: str,
+        dim: int,
+        filters: Sequence[SearchFilters | None] | None = None,
+    ) -> list[list[RecordHit]]:
+        return self._vector_snapshot_engine.search_vectors(
+            query_vectors,
+            k,
+            model_name=model_name,
+            dim=dim,
+            filters=filters,
+        )
+
     @property
     def vector_engine(self) -> str:
         return self._vector_engine
@@ -3267,6 +3392,24 @@ class LocalVectorStore:
         return await asyncio.to_thread(
             self.search,
             query_vector,
+            k,
+            model_name=model_name,
+            dim=dim,
+            filters=filters,
+        )
+
+    async def search_batch(
+        self,
+        query_vectors: Sequence[Vector],
+        k: int,
+        *,
+        model_name: str,
+        dim: int,
+        filters: Sequence[SearchFilters | None] | None = None,
+    ) -> list[list[RecordHit]]:
+        return await asyncio.to_thread(
+            self._backend.search_vectors,
+            query_vectors,
             k,
             model_name=model_name,
             dim=dim,
