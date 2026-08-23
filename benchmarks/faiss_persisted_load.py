@@ -1,8 +1,10 @@
-"""Measure cold and warm loading of a persisted FAISS vector artifact.
+"""Measure staged, post-copy, and warm loading of a persisted FAISS artifact.
 
 The supplied database and artifact are copied to a temporary directory before
-the benchmark opens them. A stale or corrupt artifact can therefore exercise
-SearchKernel's rebuild fallback without modifying the caller's files.
+the benchmark opens them. The result reports that staging time separately from
+the first process/page-cache load after staging; it does not claim cold-storage
+latency. A stale or corrupt artifact can therefore exercise SearchKernel's
+rebuild fallback without modifying the caller's files.
 """
 
 from __future__ import annotations
@@ -122,8 +124,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         root = Path(directory)
         database = root / args.database.name
         artifact = root / args.artifact.name
+        copy_started = time.perf_counter()
         _copy_database(args.database, database)
         _copy_artifact(args.artifact, artifact)
+        copy_ms = (time.perf_counter() - copy_started) * 1_000
         backend = LocalRecordBackend(database)
         store = FAISSLocalVectorStore(
             backend,
@@ -141,10 +145,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             model_name=args.model_name,
             dim=args.dim,
         )
-        cold_load_ms = (time.perf_counter() - started) * 1_000
+        post_copy_process_load_ms = (time.perf_counter() - started) * 1_000
         rss_after = _rss_bytes()
         result: dict[str, Any] = {
-            "cold_load_ms": cold_load_ms,
+            "copy_ms": copy_ms,
+            "post_copy_process_load_ms": post_copy_process_load_ms,
             "rss_before_bytes": rss_before,
             "rss_after_bytes": rss_after,
             "diagnostics": store.last_search_diagnostics,
