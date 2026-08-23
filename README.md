@@ -89,6 +89,8 @@ Start with the [documentation map](docs/index.md) to choose the right guide:
   first local index.
 - [Core concepts](docs/concepts.md) — records, identity, ingestion, querying,
   stores, providers, and readiness.
+- [Custom content sources](docs/guides/custom-content-source.md) — adapt native
+  records to checkpointed ingestion.
 - [Federated search](docs/guides/federated-search.md) — combine local or HTTP
   search sources with bounded concurrency and explicit partial-result
   diagnostics.

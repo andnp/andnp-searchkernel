@@ -11,6 +11,8 @@ short.
   understand optional environment gates.
 - [Core concepts](concepts.md) — understand record identity, source adapters,
   ingestion, search outcomes, and optional integrations.
+- [Custom content sources](guides/custom-content-source.md) — adapt a native
+  source to checkpointed record ingestion.
 - [Lifecycle and ownership](lifecycle.md) — close local compositions and
   distinguish owned from injected resources.
 - [Upgrading](upgrading.md) — breaking changes by release and what each one

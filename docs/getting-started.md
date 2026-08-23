@@ -146,6 +146,9 @@ Strict mode raises `IngestionError` on a failed batch; lenient mode returns
 successful and failed record outcomes and keeps later checkpoint advancement
 bounded by the failed work.
 
+For a complete adapter skeleton, see the
+[custom content source guide](guides/custom-content-source.md).
+
 ## 5. Inspect results and failures
 
 Search results are not anonymous dictionaries:

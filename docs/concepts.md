@@ -58,6 +58,9 @@ after the corresponding batch has succeeded. Strict mode raises
 returns per-record failures. These guarantees do not form a cross-store
 transaction, so a partial index is an expected state during recovery.
 
+For a complete source adapter example, see
+[Custom content sources](guides/custom-content-source.md).
+
 ## Search outcomes are explicit
 
 `SearchKernel.search(...)` and `SearchOrchestrator.search(...)` return a
