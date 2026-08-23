@@ -107,6 +107,94 @@ def test_legacy_inline_artifact_remains_readable(tmp_path: Path) -> None:
     assert restored.last_search_diagnostics["persistence"] == "loaded"
 
 
+def test_explicit_legacy_migration_publishes_verified_split(tmp_path: Path) -> None:
+    """Migrate a validated legacy artifact without changing its rollback copy.
+
+    The explicit operation publishes and verifies split state, then a fresh
+    store reloads that generation while the original inline files remain.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
+    index_path = tmp_path / "index.faiss"
+    FAISSLocalVectorStore(backend, index_path=index_path).search(
+        [1.0, 0.0], 1, model_name="model", dim=2
+    )
+    _promote_split_artifact_to_legacy(index_path)
+    legacy_index = index_path.read_bytes()
+    legacy_metadata = index_path.with_suffix(".json").read_bytes()
+
+    store = FAISSLocalVectorStore(backend, index_path=index_path)
+    assert store.migrate_legacy_persistence("model", 2) is True
+    assert store.last_search_diagnostics["migration"] == "migrated"
+    assert index_path.read_bytes() == legacy_index
+    assert index_path.with_suffix(".json").read_bytes() == legacy_metadata
+    assert index_path.with_suffix(".manifest.json").is_file()
+
+    reloaded = FAISSLocalVectorStore(backend, index_path=index_path)
+    hits = reloaded.search([1.0, 0.0], 1, model_name="model", dim=2)
+    assert [hit.source_id for hit in hits] == ["one"]
+    assert reloaded.last_search_diagnostics["persistence"] == "loaded"
+
+
+def test_explicit_migration_reports_already_split_without_republishing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Treat an already valid split generation as an explicit no-op.
+
+    The migration call verifies and caches the current generation without
+    invoking publication a second time.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
+    index_path = tmp_path / "index.faiss"
+    store = FAISSLocalVectorStore(backend, index_path=index_path)
+    store.search([1.0, 0.0], 1, model_name="model", dim=2)
+
+    def fail_publication(state) -> bool:
+        raise AssertionError("already split state must not republish")
+
+    monkeypatch.setattr(store, "_persist_state", fail_publication)
+    assert store.migrate_legacy_persistence("model", 2) is True
+    assert store.last_search_diagnostics["migration"] == "already_split"
+
+
+def test_failed_migration_preserves_legacy_fallback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Keep legacy loading available when split publication fails.
+
+    A failed manifest publication may leave generation files behind, but the
+    fixed legacy files remain unchanged and a fresh store still loads them.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
+    index_path = tmp_path / "index.faiss"
+    FAISSLocalVectorStore(backend, index_path=index_path).search(
+        [1.0, 0.0], 1, model_name="model", dim=2
+    )
+    _promote_split_artifact_to_legacy(index_path)
+    legacy_index = index_path.read_bytes()
+    legacy_metadata = index_path.with_suffix(".json").read_bytes()
+
+    def fail_manifest(*args, **kwargs) -> None:
+        raise OSError("manifest publication blocked")
+
+    monkeypatch.setattr(
+        "searchkernel.indices.faiss_local.atomic_write_json", fail_manifest
+    )
+    store = FAISSLocalVectorStore(backend, index_path=index_path)
+    assert store.migrate_legacy_persistence("model", 2) is False
+    assert store.last_search_diagnostics["migration"] == "failed"
+    assert index_path.read_bytes() == legacy_index
+    assert index_path.with_suffix(".json").read_bytes() == legacy_metadata
+    assert not index_path.with_suffix(".manifest.json").exists()
+
+    fallback = FAISSLocalVectorStore(backend, index_path=index_path)
+    hits = fallback.search([1.0, 0.0], 1, model_name="model", dim=2)
+    assert [hit.source_id for hit in hits] == ["one"]
+    assert fallback.last_search_diagnostics["persistence"] == "loaded"
+
+
 def test_split_sidecar_uses_one_handle_for_filtered_search(
     tmp_path: Path, monkeypatch
 ) -> None:

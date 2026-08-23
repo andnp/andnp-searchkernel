@@ -327,6 +327,77 @@ class FAISSLocalVectorStore:
     def epoch(self) -> int:
         return self._backend.epoch()
 
+    def migrate_legacy_persistence(self, model_name: str, dim: int) -> bool:
+        """Explicitly migrate a valid legacy artifact to split persistence.
+
+        Return ``True`` when a split generation is already valid or is
+        published and verified. Return ``False`` when legacy validation,
+        publication, or post-publication verification fails. The migration
+        status and failure reason are recorded in ``last_search_diagnostics``;
+        legacy files are never deleted or overwritten.
+        """
+        key = (model_name, dim)
+        with self._state_lock:
+            epoch = self._backend.vector_epoch()
+            try:
+                manifest_path = self._manifest_path(model_name, dim)
+                if manifest_path.is_file():
+                    split_state = self._load_split_state(
+                        model_name, dim, epoch, manifest_path
+                    )
+                    if split_state is not None:
+                        self._states[key] = split_state
+                        self._last_search_diagnostics.update(
+                            {
+                                "migration": "already_split",
+                                "persistence": "loaded",
+                            }
+                        )
+                        return True
+                legacy_state = self._load_legacy_state(model_name, dim, epoch)
+                if legacy_state is None:
+                    self._last_search_diagnostics.update(
+                        {
+                            "migration": "failed",
+                            "migration_reason": "valid legacy artifact not found",
+                        }
+                    )
+                    return False
+                if self._backend.vector_epoch() != epoch:
+                    raise RuntimeError("vector index changed during migration")
+                if not self._persist_state(legacy_state):
+                    self._last_search_diagnostics.update(
+                        {
+                            "migration": "failed",
+                            "migration_reason": "split publication failed",
+                        }
+                    )
+                    return False
+                verified = self._load_split_state(
+                    model_name, dim, epoch, manifest_path
+                )
+                if verified is None:
+                    self._last_search_diagnostics.update(
+                        {
+                            "migration": "failed",
+                            "migration_reason": "published split verification failed",
+                        }
+                    )
+                    return False
+                self._states[key] = verified
+                self._last_search_diagnostics.update(
+                    {"migration": "migrated", "persistence": "loaded"}
+                )
+                return True
+            except Exception as exc:  # noqa: BLE001 - explicit migration reports failure
+                self._last_search_diagnostics.update(
+                    {
+                        "migration": "failed",
+                        "migration_reason": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                return False
+
     async def async_search(
         self,
         query_vector: Vector,
@@ -735,7 +806,7 @@ class FAISSLocalVectorStore:
             "tombstones": [],
         }
 
-    def _persist_state(self, state: _FAISSState) -> None:
+    def _persist_state(self, state: _FAISSState) -> bool:
         try:
             import faiss
 
@@ -788,11 +859,12 @@ class FAISSLocalVectorStore:
                 "metadata_offsets": offsets,
             }
             atomic_write_json(self._manifest_path(state.encoder_namespace, state.dim), manifest)
+            return True
         except Exception as exc:  # noqa: BLE001 - optional persistence is best effort
             self._last_search_diagnostics["persistence_error"] = (
                 f"{type(exc).__name__}: {exc}"
             )
-            return
+            return False
 
     def _load_state(
         self,
