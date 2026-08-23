@@ -20,6 +20,7 @@ from searchkernel.domain import (
     Record,
     RecordHit,
     RecordIdentity,
+    RecordStatus,
     SearchFilters,
     Vector,
 )
@@ -177,6 +178,7 @@ class _FAISSState:
     id_to_storage_key: dict[int, str]
     candidate_metadata: dict[str, _CandidateMetadata]
     metadata_sidecar: _CandidateMetadataSidecar | None = None
+    active_ids: frozenset[int] | None = None
     eligibility_masks: dict[tuple[str, str], frozenset[int]] = field(
         default_factory=dict,
         init=False,
@@ -460,6 +462,13 @@ class FAISSLocalVectorStore:
             storage_keys=tuple(storage_keys),
             id_to_storage_key=id_to_storage_key,
             candidate_metadata=candidate_metadata,
+            active_ids=frozenset(
+                faiss_id
+                for faiss_id, storage_key in zip(
+                    ids, storage_keys, strict=True
+                )
+                if candidate_metadata[storage_key].status == RecordStatus.ACTIVE.value
+            ),
         )
 
     def _search_state(
@@ -497,13 +506,14 @@ class FAISSLocalVectorStore:
             }
         )
         predicate = compiled_filter or compile_vector_filters(filters)
+        id_only, eligible_ids = self._id_only_filter(state, predicate)
         eligibility_ids = (
             self._eligibility_mask(state, predicate)
-            if exact and state.metadata_sidecar is None
-            else None
+            if exact and state.metadata_sidecar is None and not id_only
+            else eligible_ids
         )
         hits: dict[str, RecordHit] = {}
-        with self._metadata_reader(state) as reader:
+        with self._metadata_reader(state, required=not id_only) as reader:
             for scan_round in range(self.configuration.max_scan_rounds):
                 self._last_search_diagnostics["scan_rounds"] = scan_round + 1
                 with self._state_lock:
@@ -544,6 +554,27 @@ class FAISSLocalVectorStore:
             hits.values(),
             key=lambda hit: (-hit.score, hit.storage_key),
         )[:k]
+
+    @staticmethod
+    def _id_only_filter(
+        state: _FAISSState,
+        predicate: CompiledVectorFilter,
+    ) -> tuple[bool, frozenset[int] | None]:
+        if (
+            predicate.workspace_id is not None
+            or predicate.source_kinds is not None
+            or predicate.candidate_keys is not None
+            or predicate.excluded_storage_keys is not None
+            or predicate.requires_metadata
+        ):
+            return False, None
+        if predicate.statuses == frozenset({RecordStatus.ACTIVE.value}):
+            if state.active_ids is None:
+                return False, None
+            return True, state.active_ids
+        if predicate.statuses == frozenset(status.value for status in RecordStatus):
+            return True, None
+        return False, None
 
     @staticmethod
     def _canonical_scalar_filter_key(
@@ -593,9 +624,14 @@ class FAISSLocalVectorStore:
     def _metadata_reader(
         self,
         state: _FAISSState,
+        *,
+        required: bool,
     ) -> Iterator[
         Mapping[str, _CandidateMetadata] | _SidecarMetadataReader | None
     ]:
+        if not required:
+            yield None
+            return
         if state.metadata_sidecar is None:
             yield state.candidate_metadata
             return
@@ -619,6 +655,10 @@ class FAISSLocalVectorStore:
                     valid[faiss_id] = storage_key
                 continue
             if storage_key is None:
+                continue
+            if reader is None:
+                if eligible_ids is None or faiss_id in eligible_ids:
+                    valid[faiss_id] = storage_key
                 continue
             metadata = reader.get(storage_key) if reader is not None else None
             if (
@@ -687,6 +727,7 @@ class FAISSLocalVectorStore:
             ),
             "ids": list(state.ids),
             "storage_keys": list(state.storage_keys),
+            "active_ids": sorted(state.active_ids or ()),
             "tombstones": [],
         }
 
@@ -805,6 +846,7 @@ class FAISSLocalVectorStore:
         ):
             return None
         ids, storage_keys = self._load_persisted_keys(manifest)
+        active_ids = self._load_active_ids(manifest, ids)
         offsets = self._load_metadata_offsets(manifest, storage_keys)
         generation_index = index_path.with_name(index_name)
         generation_metadata = index_path.with_name(metadata_name)
@@ -833,6 +875,7 @@ class FAISSLocalVectorStore:
             metadata_sidecar=_CandidateMetadataSidecar(
                 generation_metadata, offsets
             ),
+            active_ids=active_ids,
         )
 
     @staticmethod
@@ -848,6 +891,21 @@ class FAISSLocalVectorStore:
         ):
             raise ValueError("FAISS persisted keys are not unique")
         return ids, storage_keys
+
+    @staticmethod
+    def _load_active_ids(
+        metadata: Mapping[str, Any],
+        ids: tuple[int, ...],
+    ) -> frozenset[int]:
+        raw_active_ids = metadata["active_ids"]
+        if not isinstance(raw_active_ids, list):
+            raise TypeError("FAISS active IDs must be an explicit list")
+        active_ids = tuple(int(value) for value in raw_active_ids)
+        if len(set(active_ids)) != len(active_ids) or not set(active_ids).issubset(
+            ids
+        ):
+            raise ValueError("FAISS active IDs are not a unique persisted subset")
+        return frozenset(active_ids)
 
     @staticmethod
     def _load_metadata_offsets(
@@ -930,6 +988,11 @@ class FAISSLocalVectorStore:
             storage_keys=storage_keys,
             id_to_storage_key=dict(zip(ids, storage_keys, strict=True)),
             candidate_metadata=candidate_metadata,
+            active_ids=frozenset(
+                faiss_id
+                for faiss_id, storage_key in zip(ids, storage_keys, strict=True)
+                if candidate_metadata[storage_key].status == RecordStatus.ACTIVE.value
+            ),
         )
 
     def _restore_hnsw_settings(self, index: Any) -> None:
