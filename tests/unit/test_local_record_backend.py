@@ -1893,6 +1893,37 @@ def test_block_vector_search_intersects_candidate_and_metadata_filters(
     assert [hit.source_id for hit in hits] == ["a", "c"]
 
 
+def test_block_vector_search_matches_snapshot_for_compound_filters(tmp_path) -> None:
+    """Snapshot and block paths preserve compound filter result parity."""
+    records = _cosine_ranked_records()
+    for record in records:
+        record.metadata = {"keep": record.source_id in {"a", "c", "e"}}
+    filters = {
+        "candidate_storage_keys": [record.storage_key for record in records[:4]],
+        "metadata_equals": {"keep": True},
+        "source_kinds": ["note"],
+    }
+    snapshot_backend = LocalRecordBackend(tmp_path / "snapshot.db")
+    snapshot_backend.upsert(records, "test", 2)
+    block_backend = LocalRecordBackend(
+        tmp_path / "block.db",
+        vector_snapshot_max_rows=2,
+        vector_snapshot_max_bytes=1_000_000,
+    )
+    block_backend.upsert(records, "test", 2)
+
+    snapshot_hits = snapshot_backend.search_vector(
+        [1.0, 0.0], 5, model_name="test", dim=2, filters=filters
+    )
+    block_hits = block_backend.search_vector(
+        [1.0, 0.0], 5, model_name="test", dim=2, filters=filters
+    )
+
+    assert [(hit.storage_key, hit.score) for hit in block_hits] == [
+        (hit.storage_key, hit.score) for hit in snapshot_hits
+    ]
+
+
 def test_block_vector_search_returns_all_available_when_k_exceeds_corpus(
     tmp_path,
 ) -> None:
