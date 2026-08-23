@@ -22,7 +22,6 @@ from searchkernel.domain import (
 )
 from searchkernel.domain.vector_filters import (
     CompiledVectorFilter,
-    compile_source_scoped_filters,
     compile_vector_filters,
     metadata_mapping,
 )
@@ -208,13 +207,15 @@ class FAISSLocalVectorStore:
         model_name: str,
         dim: int,
         filters: SearchFilters | None = None,
+        compiled_filter: CompiledVectorFilter | None = None,
     ) -> list[RecordHit]:
         if k < 1:
             return []
         query = PackedVectorCodec.normalize(
             query_vector, dim, context="query vector"
         )
-        if compile_source_scoped_filters(filters):
+        predicate = compiled_filter or compile_vector_filters(filters)
+        if predicate.source_scoped_filters:
             self._last_search_diagnostics = {
                 "strategy": "exact_filtered",
                 "requested_k": k,
@@ -226,6 +227,7 @@ class FAISSLocalVectorStore:
                 model_name=model_name,
                 dim=dim,
                 filters=filters,
+                compiled_filter=predicate,
             )
             self._last_search_diagnostics.update(
                 {"returned": len(hits), "under_returned": len(hits) < k}
@@ -246,6 +248,7 @@ class FAISSLocalVectorStore:
                 query,
                 k,
                 filters=filters,
+                compiled_filter=predicate,
             )
             self._last_search_diagnostics["returned"] = len(hits)
             self._last_search_diagnostics["under_returned"] = len(hits) < k
@@ -263,6 +266,7 @@ class FAISSLocalVectorStore:
                 model_name=model_name,
                 dim=dim,
                 filters=filters,
+                compiled_filter=predicate,
             )
             self._last_search_diagnostics["returned"] = len(hits)
             self._last_search_diagnostics["under_returned"] = len(hits) < k
@@ -422,6 +426,7 @@ class FAISSLocalVectorStore:
         k: int,
         *,
         filters: SearchFilters | None,
+        compiled_filter: CompiledVectorFilter | None = None,
     ) -> list[RecordHit]:
         total = len(state.storage_keys)
         if total == 0:
@@ -448,7 +453,7 @@ class FAISSLocalVectorStore:
                 "scan_rounds": 0,
             }
         )
-        predicate = compile_vector_filters(filters)
+        predicate = compiled_filter or compile_vector_filters(filters)
         hits: dict[str, RecordHit] = {}
         for scan_round in range(self.configuration.max_scan_rounds):
             self._last_search_diagnostics["scan_rounds"] = scan_round + 1

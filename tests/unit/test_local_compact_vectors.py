@@ -718,6 +718,7 @@ def test_auto_vector_engine_calibrates_exact_engines_once(monkeypatch) -> None:
             model_name: str,
             dim: int,
             filters: dict[str, object] | None = None,
+            compiled_filter: object | None = None,
         ) -> list[RecordHit]:
             self.calls += 1
             return [RecordHit(record.identity, 1.0)]
@@ -758,6 +759,7 @@ def test_auto_vector_engine_pins_sqlite_when_exact_results_differ(monkeypatch) -
             model_name: str,
             dim: int,
             filters: dict[str, object] | None = None,
+            compiled_filter: object | None = None,
         ) -> list[RecordHit]:
             return [RecordHit(records[1].identity, 1.0)]
 

@@ -231,6 +231,7 @@ def test_adaptive_routing_reuses_stable_warmed_selection(monkeypatch) -> None:
             model_name: str,
             dim: int,
             filters: dict[str, object] | None = None,
+            compiled_filter: object | None = None,
         ) -> list[RecordHit]:
             type(self).calls += 1
             return [RecordHit(record.identity, 1.0)]

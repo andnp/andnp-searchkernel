@@ -890,6 +890,7 @@ class _VectorEngine:
         model_name: str,
         dim: int,
         filters: SearchFilters | None = None,
+        compiled_filter: CompiledVectorFilter | None = None,
     ) -> list[RecordHit]:
         if k < 1:
             return []
@@ -900,6 +901,7 @@ class _VectorEngine:
         query = PackedVectorCodec.normalize(
             query_vector, dim, context="query vector"
         )
+        predicate = compiled_filter or compile_vector_filters(filters)
         row_count, byte_count = self.vector_storage_stats(model_name, dim)
         if (
             row_count > self._vector_snapshot_max_rows
@@ -911,8 +913,8 @@ class _VectorEngine:
                 model_name=model_name,
                 dim=dim,
                 filters=filters,
+                compiled_filter=predicate,
             )
-        predicate = compile_vector_filters(filters)
         materialize_metadata = not VectorSnapshot._can_prefilter_scalars(
             filters, predicate
         )
@@ -925,6 +927,7 @@ class _VectorEngine:
             dict(filters) if filters is not None else None,
             status_values=self._status_values(filters),
             filter_values=self._filter_values,
+            compiled_filter=predicate,
         )
         positions = np.flatnonzero(eligible)
         if not len(positions):
@@ -959,12 +962,13 @@ class _VectorEngine:
         model_name: str,
         dim: int,
         filters: SearchFilters | None,
+        compiled_filter: CompiledVectorFilter | None = None,
     ) -> list[RecordHit]:
         best_keys: list[str] = []
         best_scores: list[float] = []
         last_storage_key: str | None = None
         batch_limit = self._vector_batch_limit(dim)
-        predicate = compile_vector_filters(filters)
+        predicate = compiled_filter or compile_vector_filters(filters)
         if predicate.candidate_keys == frozenset():
             return []
         candidate_clause = (
@@ -2584,6 +2588,7 @@ class LocalRecordBackend:
         model_name: str,
         dim: int,
         filters: SearchFilters | None = None,
+        compiled_filter: CompiledVectorFilter | None = None,
     ) -> list[RecordHit]:
         return self._vector_snapshot_engine.search_vector(
             query_vector,
@@ -2591,6 +2596,7 @@ class LocalRecordBackend:
             model_name=model_name,
             dim=dim,
             filters=filters,
+            compiled_filter=compiled_filter,
         )
 
     @property
@@ -2925,6 +2931,7 @@ class LocalVectorStore:
         model_name: str,
         dim: int,
         filters: SearchFilters | None,
+        compiled_filter: CompiledVectorFilter,
     ) -> list[RecordHit] | None:
         if (
             self._engine != "auto"
@@ -2978,6 +2985,7 @@ class LocalVectorStore:
                     model_name=model_name,
                     dim=dim,
                     filters=filters,
+                    compiled_filter=compiled_filter,
                 )
                 faiss_epoch_key = (model_name, dim, selection_epoch)
                 if faiss_epoch_key not in self._warmed_faiss_epochs:
@@ -2987,6 +2995,7 @@ class LocalVectorStore:
                         model_name=model_name,
                         dim=dim,
                         filters=filters,
+                        compiled_filter=compiled_filter,
                     )
                     if not faiss_store.last_search_diagnostics.get("fallback"):
                         self._warmed_faiss_epochs.add(faiss_epoch_key)
@@ -2997,6 +3006,7 @@ class LocalVectorStore:
                         model_name=model_name,
                         dim=dim,
                         filters=filters,
+                        compiled_filter=compiled_filter,
                     )
                 )
                 faiss_hits, faiss_ms = self._timed_search(
@@ -3006,6 +3016,7 @@ class LocalVectorStore:
                         model_name=model_name,
                         dim=dim,
                         filters=filters,
+                        compiled_filter=compiled_filter,
                     )
                 )
                 if not faiss_store.last_search_diagnostics.get("fallback"):
@@ -3040,6 +3051,7 @@ class LocalVectorStore:
             model_name=model_name,
             dim=dim,
             filters=filters,
+            compiled_filter=compiled_filter,
         )
 
     def _selected_store(
@@ -3083,12 +3095,14 @@ class LocalVectorStore:
         dim: int,
         filters: SearchFilters | None = None,
     ) -> list[RecordHit]:
+        compiled_filter = compile_vector_filters(filters)
         adaptive_hits = self._adaptive_search(
             query_vector,
             k,
             model_name=model_name,
             dim=dim,
             filters=filters,
+            compiled_filter=compiled_filter,
         )
         if adaptive_hits is not None:
             return adaptive_hits
@@ -3100,9 +3114,15 @@ class LocalVectorStore:
                 model_name=model_name,
                 dim=dim,
                 filters=filters,
+                compiled_filter=compiled_filter,
             )
         return self._backend.search_vector(
-            query_vector, k, model_name=model_name, dim=dim, filters=filters
+            query_vector,
+            k,
+            model_name=model_name,
+            dim=dim,
+            filters=filters,
+            compiled_filter=compiled_filter,
         )
 
     async def async_search(

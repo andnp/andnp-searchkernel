@@ -319,8 +319,9 @@ class VectorSnapshot:
         *,
         status_values: set[str],
         filter_values: Any,
+        compiled_filter: CompiledVectorFilter | None = None,
     ) -> np.ndarray:
-        predicate = compile_vector_filters(filters)
+        predicate = compiled_filter or compile_vector_filters(filters)
         # Vectorized prefilter on scalar fields always runs first, even when
         # a Python metadata predicate is also needed below: it is cheap and
         # narrows the rows the slow per-row predicate must visit.
