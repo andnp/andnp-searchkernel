@@ -36,6 +36,108 @@ def chunker(**overrides: int) -> HeaderBasedChunker:
     return HeaderBasedChunker(Config(**values))
 
 
+def test_headerless_content_uses_the_plain_text_fallback():
+    """Preserve one plain chunk when the body has no Markdown headers.
+
+    This locks the fallback result before the layout extraction.
+    """
+    chunks = chunker().chunk_record(make_record("plain body"))
+
+    assert [(chunk.content, chunk.metadata["header_path"]) for chunk in chunks] == [
+        ("plain body", "")
+    ]
+
+
+def test_single_header_includes_the_header_in_chunk_content():
+    """Keep a single header's display content and source span unchanged.
+
+    The public chunk contract includes both rendered content and offsets.
+    """
+    body = "# Guide\nbody"
+
+    chunks = chunker().chunk_record(make_record(body))
+
+    assert len(chunks) == 1
+    assert chunks[0].content == "Guide\n\nbody"
+    assert chunks[0].metadata["header_path"] == "Guide"
+    assert chunks[0].metadata["start_pos"] == 0
+    assert chunks[0].metadata["end_pos"] == len(body)
+
+
+def test_nested_headers_keep_parent_context_in_each_path():
+    """Preserve hierarchical paths and rendered parent context for children.
+
+    Child chunks retain the same visible context as the current implementation.
+    """
+    chunks = chunker().chunk_record(make_record("# Guide\n## Install\nsteps"))
+
+    assert [chunk.metadata["header_path"] for chunk in chunks] == [
+        "Guide",
+        "Guide > Install",
+    ]
+    assert chunks[1].content == "Install\nContext: Guide\n\nsteps"
+
+
+def test_overlap_keeps_the_previous_subchunk_tail():
+    """Apply configured overlap only between sibling split chunks.
+
+    The overlap marker and retained tail are externally visible content.
+    """
+    body = "# Guide\n\nfirst paragraph\n\nsecond paragraph\n\nthird paragraph"
+
+    chunks = chunker(max_chunk_chars=28, overlap_chars=5).chunk_record(
+        make_record(body)
+    )
+
+    assert [chunk.content for chunk in chunks] == [
+        "Guide\n\nfirst paragraph",
+        "[...graph]\n\nGuide\n\nsecond paragraph",
+        "[...graph]\n\nGuide\n\nthird paragraph",
+    ]
+
+
+def test_chunk_metadata_keeps_record_values_and_serializes_timestamp():
+    """Preserve input metadata while normalizing the record timestamp.
+
+    Metadata must remain suitable for JSON persistence.
+    """
+    chunks = chunker().chunk_record(make_record("# Guide\nbody"))
+
+    assert chunks[0].metadata == {
+        "file_path": "notes/test.md",
+        "tag": "fixture",
+        "header_path": "Guide",
+        "start_pos": 0,
+        "end_pos": 12,
+        "modified_time": "2026-01-01T00:00:00+00:00",
+    }
+
+
+def test_malformed_empty_header_falls_back_to_plain_text():
+    """Treat a malformed empty header as ordinary content without raising.
+
+    Tree-sitter's tolerant parse still follows the plain-text fallback contract.
+    """
+    chunks = chunker().chunk_record(make_record("#\nbody"))
+
+    assert len(chunks) == 1
+    assert chunks[0].content == "body"
+    assert chunks[0].metadata["header_path"] == ""
+
+
+def test_empty_content_returns_an_empty_chunk_with_empty_span():
+    """Preserve the empty-body chunk and its zero-length source span.
+
+    Empty input remains representable as one chunk for downstream indexing.
+    """
+    chunks = chunker().chunk_record(make_record(""))
+
+    assert len(chunks) == 1
+    assert chunks[0].content == ""
+    assert chunks[0].metadata["start_pos"] == 0
+    assert chunks[0].metadata["end_pos"] == 0
+
+
 def test_chunking_strategy_is_abstract_and_factory_uses_header_chunker():
     with pytest.raises(TypeError):
         ChunkingStrategy()  # pyright: ignore[reportAbstractUsage]
