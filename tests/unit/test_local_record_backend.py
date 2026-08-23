@@ -1937,6 +1937,105 @@ def test_vector_typed_metadata_filters_preserve_eligible_records(
     assert [hit.source_id for hit in hits] == expected
 
 
+@pytest.mark.parametrize(
+    "residual_filter",
+    [
+        {"metadata_equals": {"keep": True, "label": "x"}},
+        {"metadata_in": {"keep": [True], "label": ["x"]}},
+    ],
+)
+def test_typed_vector_filters_preserve_residual_and_block_parity(
+    tmp_path, residual_filter
+) -> None:
+    """Typed pushdown preserves residual metadata and block result parity."""
+    records = [
+        _record(
+            "note",
+            "a",
+            "a",
+            metadata={
+                "acl": ["allowed"],
+                "project_id": "keep",
+                "keep": True,
+                "label": "x",
+            },
+        ),
+        _record(
+            "note",
+            "b",
+            "b",
+            metadata={
+                "acl": ["allowed"],
+                "project_id": "keep",
+                "keep": False,
+                "label": "x",
+            },
+        ),
+        _record(
+            "note",
+            "c",
+            "c",
+            metadata={
+                "acl": ["blocked"],
+                "project_id": "keep",
+                "keep": True,
+                "label": "x",
+            },
+        ),
+        _record(
+            "note",
+            "d",
+            "d",
+            metadata={
+                "acl": ["allowed"],
+                "project_id": "drop",
+                "keep": True,
+                "label": "x",
+            },
+        ),
+        _record(
+            "note",
+            "e",
+            "e",
+            metadata={
+                "acl": ["allowed"],
+                "project_id": "keep",
+                "keep": True,
+                "label": "y",
+            },
+        ),
+    ]
+    for record in records:
+        record.embedding = [1.0, 0.0]
+    filters = {
+        "project_ids": ["keep"],
+        "source_scoped_filters": {
+            "note": {"metadata_contains_any": {"acl": ["allowed"]}}
+        },
+        **residual_filter,
+    }
+    snapshot_backend = LocalRecordBackend(tmp_path / "snapshot.db")
+    block_backend = LocalRecordBackend(
+        tmp_path / "block.db",
+        vector_snapshot_max_rows=2,
+        vector_snapshot_max_bytes=1_000_000,
+    )
+    snapshot_backend.upsert(records, "test", 2)
+    block_backend.upsert(records, "test", 2)
+
+    snapshot_hits = snapshot_backend.search_vector(
+        [1.0, 0.0], 10, model_name="test", dim=2, filters=filters
+    )
+    block_hits = block_backend.search_vector(
+        [1.0, 0.0], 10, model_name="test", dim=2, filters=filters
+    )
+
+    assert [hit.source_id for hit in snapshot_hits] == ["a"]
+    assert [(hit.storage_key, hit.score) for hit in block_hits] == [
+        (hit.storage_key, hit.score) for hit in snapshot_hits
+    ]
+
+
 def test_block_vector_search_matches_snapshot_for_compound_filters(tmp_path) -> None:
     """Snapshot and block paths preserve compound filter result parity."""
     records = _cosine_ranked_records()
