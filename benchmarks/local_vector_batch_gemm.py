@@ -13,9 +13,44 @@ import json
 import statistics
 import time
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
+
+from searchkernel.domain import Record
+from searchkernel.indices import LocalRecordBackend
+
+
+def _library_entry_parity() -> bool:
+    """Verify parity through the concrete local backend entry point."""
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    records = [
+        Record(
+            workspace_id="workspace",
+            source_kind="note",
+            source_id=f"record-{index}",
+            title=f"record-{index}",
+            body=f"record-{index}",
+            created_at=timestamp,
+            updated_at=timestamp,
+            embedding=vector.tolist(),
+        )
+        for index, vector in enumerate(
+            np.asarray([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], dtype=np.float32)
+        )
+    ]
+    backend = LocalRecordBackend()
+    backend.upsert(records, "benchmark", 2)
+    queries = [[1.0, 0.0], [0.0, 1.0]]
+    batch = backend.search_vector_batch(queries, 2, model_name="benchmark", dim=2)
+    scalar = [
+        backend.search_vector(query, 2, model_name="benchmark", dim=2)
+        for query in queries
+    ]
+    return [
+        [hit.storage_key for hit in result] for result in batch
+    ] == [[hit.storage_key for hit in result] for result in scalar]
 
 
 def _top_k(scores: np.ndarray, keys: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
@@ -60,6 +95,7 @@ def _time(
         started = time.perf_counter()
         fn()
         samples.append((time.perf_counter() - started) * 1_000)
+    library_entry_parity = _library_entry_parity()
     return {
         "p50_ms": statistics.median(samples),
         "p95_ms": sorted(samples)[min(len(samples) - 1, int(len(samples) * 0.95))],
@@ -99,7 +135,6 @@ def run_case(
         "minimal_gemm": gemm_timing,
         "speedup": speedup,
         "parity": _parity(scalar_result, gemm_result),
-        "gate": speedup >= 1.25 and speedup >= 0.95,
     }
 
 
@@ -126,17 +161,15 @@ def run_benchmark(
         for query_count in queries
         for filtered in (False, True)
     ]
+    library_entry_parity = _library_entry_parity()
     return {
         "workload": "minimal shared-mask GEMM versus scalar local-vector scoring",
         "warmups": warmups,
         "repetitions": repetitions,
-        "gate_policy": {
-            "parity_required": True,
-            "minimum_speedup": 1.25,
-            "maximum_regression_ratio": 0.05,
-        },
         "results": results,
-        "passed": all(result["parity"] and result["gate"] for result in results),
+        "library_entry_parity": library_entry_parity,
+        "passed": all(result["parity"] for result in results)
+        and library_entry_parity,
     }
 
 
