@@ -35,6 +35,7 @@ from typing import Any
 import numpy as np
 
 from searchkernel.domain import Record
+from searchkernel.domain.vector_filters import compile_vector_filters
 from searchkernel.indices import LocalRecordBackend
 from searchkernel.indices.local_vectors import PackedVectorCodec
 
@@ -67,6 +68,16 @@ def _timeit(
         "latency_p95_ms": _percentile(samples, 0.95),
         "latency_p99_ms": _percentile(samples, 0.99),
     }
+
+
+def _stage_timeit(
+    fn: Callable[[], object],
+    *,
+    warmups: int,
+    repetitions: int,
+) -> dict[str, float]:
+    """Measure one benchmark stage using the hotspot timing contract."""
+    return _timeit(fn, warmups=warmups, repetitions=repetitions)
 
 
 def _build_corpus(
@@ -194,10 +205,86 @@ def run_benchmark(
         ),
     }
 
-    results = {
+    results: dict[str, Any] = {
         name: _timeit(fn, warmups=warmups, repetitions=repetitions)
         for name, fn in cases.items()
     }
+    typed_filters = {
+        "project": {"project_ids": ["p3"]},
+        "path": {"paths": ["file-3.py"]},
+        "document": {"document_ids": ["doc-3"]},
+        "source_scoped": {
+            "source_scoped_filters": {
+                "note": {"metadata_contains_any": {"acl": ["allowed"]}}
+            }
+        },
+    }
+
+    def stage_timings(filters: dict[str, Any]) -> dict[str, Any]:
+        predicate = compile_vector_filters(filters)
+
+        def select_eligible_keys() -> None:
+            engine._eligible_storage_keys(
+                filters, model_name=_MODEL_NAME, dim=dim
+            )
+
+        def materialize_metadata() -> None:
+            engine._vector_snapshots.pop((_MODEL_NAME, dim), None)
+            engine._get_vector_snapshot(
+                _MODEL_NAME, dim, materialize_metadata=True
+            )
+
+        def evaluate_predicate() -> None:
+            snapshot = engine._get_vector_snapshot(
+                _MODEL_NAME, dim, materialize_metadata=True
+            )
+            snapshot.filter_positions(
+                filters,
+                status_values=engine._status_values(filters),
+                filter_values=engine._filter_values,
+                compiled_filter=predicate,
+            )
+
+        prepared_snapshot = engine._get_vector_snapshot(
+            _MODEL_NAME, dim, materialize_metadata=True
+        )
+        prepared_positions = prepared_snapshot.filter_positions(
+            filters,
+            status_values=engine._status_values(filters),
+            filter_values=engine._filter_values,
+            compiled_filter=predicate,
+        )
+
+        def score_and_select() -> None:
+            scores = prepared_snapshot.matrix[prepared_positions] @ query
+            engine._select_top_positions(
+                prepared_positions, scores, prepared_snapshot.storage_keys, 10
+            )
+
+        stage_results: dict[str, dict[str, float]] = {
+            "eligible_key_selection": _stage_timeit(
+                select_eligible_keys, warmups=warmups, repetitions=repetitions
+            ),
+            "snapshot_metadata_materialization": _stage_timeit(
+                materialize_metadata, warmups=warmups, repetitions=repetitions
+            ),
+            "python_predicate_evaluation": _stage_timeit(
+                evaluate_predicate, warmups=warmups, repetitions=repetitions
+            ),
+            "vector_scoring_top_k": _stage_timeit(
+                score_and_select, warmups=warmups, repetitions=repetitions
+            ),
+        }
+        report: dict[str, Any] = dict(stage_results)
+        report["total_p50_ms"] = sum(
+            timing["latency_p50_ms"] for timing in stage_results.values()
+        )
+        return report
+
+    for name, filters in typed_filters.items():
+        results[f"search_{name}_filtered"]["stage_timings_ms"] = stage_timings(
+            filters
+        )
     return {
         "record_count": record_count,
         "dim": dim,
