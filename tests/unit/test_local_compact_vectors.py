@@ -1702,3 +1702,74 @@ def test_snapshot_names_the_offending_row_for_a_later_corrupt_vector(
     with pytest.raises(ValueError, match="must contain only finite values") as error:
         reopened.search_vector([1.0, 0.0], 1, model_name="model", dim=2)
     assert later.storage_key in str(error.value)
+
+
+def test_bounded_vector_batch_matches_scalar_order_scores_and_ties() -> None:
+    """Batch search preserves scalar ordering, scores, and deterministic ties."""
+    backend = LocalRecordBackend()
+    records = [
+        _record("b", [1.0, 0.0]),
+        _record("a", [1.0, 0.0]),
+        _record("c", [0.0, 1.0]),
+    ]
+    backend.upsert(records, "model", 2)
+    queries = [[1.0, 0.0], [0.0, 1.0]]
+
+    actual = backend.search_vector_batch(queries, 3, model_name="model", dim=2)
+    expected = [
+        backend.search_vector(query, 3, model_name="model", dim=2)
+        for query in queries
+    ]
+
+    assert [[hit.storage_key for hit in hits] for hits in actual] == [
+        [hit.storage_key for hit in hits] for hits in expected
+    ]
+    assert [[hit.score for hit in hits] for hits in actual] == [
+        pytest.approx([hit.score for hit in hits]) for hits in expected
+    ]
+
+
+def test_bounded_vector_batch_handles_empty_and_non_positive_k() -> None:
+    """Empty input and non-positive k return one result per requested query."""
+    backend = LocalRecordBackend()
+    backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
+
+    assert backend.search_vector_batch([], 1, model_name="model", dim=2) == []
+    assert backend.search_vector_batch(
+        [[1.0, 0.0], [0.0, 1.0]], 0, model_name="model", dim=2
+    ) == [[], []]
+
+
+def test_bounded_vector_batch_falls_back_for_typed_filter_and_oversized_batch() -> None:
+    """Unsupported filters and query counts retain scalar filtering behavior."""
+    backend = LocalRecordBackend()
+    records = [
+        _record("kept", [1.0, 0.0], workspace_id="workspace"),
+        _record("hidden", [1.0, 0.0], workspace_id="other"),
+    ]
+    backend.upsert(records, "model", 2)
+    filters = {"workspace_id": "workspace"}
+
+    typed = backend.search_vector_batch(
+        [[1.0, 0.0]], 2, model_name="model", dim=2, filters=filters
+    )
+    oversized = backend.search_vector_batch(
+        [[1.0, 0.0]] * 65, 2, model_name="model", dim=2, filters=filters
+    )
+
+    assert [hit.source_id for hit in typed[0]] == ["kept"]
+    assert all([hit.source_id for hit in hits] == ["kept"] for hits in oversized)
+
+
+def test_bounded_vector_batch_rejects_malformed_query() -> None:
+    """Malformed query vectors retain scalar validation errors with context."""
+    backend = LocalRecordBackend()
+    backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
+
+    with pytest.raises(ValueError, match="query vector 1"):
+        backend.search_vector_batch(
+            [[1.0, 0.0], [float("nan"), 0.0]],
+            1,
+            model_name="model",
+            dim=2,
+        )
