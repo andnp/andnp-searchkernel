@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from searchkernel.domain import Record, RecordStatus
 from searchkernel.indices import FAISSLocalVectorStore, LocalRecordBackend
 
@@ -11,10 +13,13 @@ def _record(
     *,
     metadata: dict[str, object] | None = None,
     status: RecordStatus = RecordStatus.ACTIVE,
+    workspace_id: str | None = "workspace",
+    source_kind: str = "note",
 ) -> Record:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
     return Record(
-        source_kind="note",
+        workspace_id=workspace_id,
+        source_kind=source_kind,
         source_id=source_id,
         title=source_id,
         body=source_id,
@@ -77,6 +82,134 @@ def test_exact_filtered_search_preserves_filtering_and_order(tmp_path: Path) -> 
     )
 
     assert [hit.source_id for hit in hits] == ["first", "second"]
+
+
+def test_exact_canonical_scalar_filter_matches_local_order(tmp_path: Path) -> None:
+    """Canonical scalar filtering preserves local identity and score order."""
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    records = [
+        _record("best", [1.0, 0.0]),
+        _record("commit", [0.99, 0.1], source_kind="commit"),
+        _record("other-workspace", [0.98, 0.2], workspace_id="other"),
+        _record("next", [0.8, 0.6]),
+    ]
+    backend.upsert(records, "model", 2)
+    filters = {"workspace_id": "workspace", "source_kind": "note"}
+
+    expected = backend.search_vector(
+        [1.0, 0.0], 10, model_name="model", dim=2, filters=filters
+    )
+    actual = FAISSLocalVectorStore(backend).search(
+        [1.0, 0.0], 10, model_name="model", dim=2, filters=filters
+    )
+
+    assert [hit.storage_key for hit in actual] == [
+        hit.storage_key for hit in expected
+    ]
+    assert [hit.score for hit in actual] == pytest.approx(
+        [hit.score for hit in expected]
+    )
+
+
+def test_canonical_scalar_filter_refreshes_after_vector_epoch_change(
+    tmp_path: Path,
+) -> None:
+    """A changed vector epoch removes records from the prior eligibility state."""
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    target = _record("target", [1.0, 0.0])
+    remaining = _record("remaining", [0.8, 0.6])
+    backend.upsert([target, remaining], "model", 2)
+    store = FAISSLocalVectorStore(backend, index_path=tmp_path / "faiss")
+    filters = {"workspace_id": "workspace", "source_kind": "note"}
+
+    assert [
+        hit.source_id
+        for hit in store.search(
+            [1.0, 0.0], 10, model_name="model", dim=2, filters=filters
+        )
+    ] == ["target", "remaining"]
+
+    backend.upsert(
+        [_record("target", [0.9, 0.4358899], status=RecordStatus.ARCHIVED)],
+        "model",
+        2,
+    )
+
+    assert [
+        hit.source_id
+        for hit in store.search(
+            [1.0, 0.0], 10, model_name="model", dim=2, filters=filters
+        )
+    ] == ["remaining"]
+
+
+def test_persisted_reload_rebuilds_canonical_scalar_eligibility(
+    tmp_path: Path,
+) -> None:
+    """A loaded FAISS state preserves canonical filtering without persisted masks."""
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert(
+        [
+            _record("allowed", [1.0, 0.0]),
+            _record("wrong-kind", [0.9, 0.1], source_kind="commit"),
+        ],
+        "model",
+        2,
+    )
+    index_path = tmp_path / "faiss"
+    filters = {"workspace_id": "workspace", "source_kind": "note"}
+    original = FAISSLocalVectorStore(backend, index_path=index_path)
+    expected = original.search(
+        [1.0, 0.0], 10, model_name="model", dim=2, filters=filters
+    )
+
+    restored = FAISSLocalVectorStore(backend, index_path=index_path)
+    actual = restored.search(
+        [1.0, 0.0], 10, model_name="model", dim=2, filters=filters
+    )
+
+    assert [hit.storage_key for hit in actual] == [
+        hit.storage_key for hit in expected
+    ]
+    assert restored.last_search_diagnostics["persistence"] == "loaded"
+
+
+def test_approximate_canonical_filter_keeps_scan_budget_semantics(
+    tmp_path: Path,
+) -> None:
+    """Canonical filtering does not expand approximate scan limits."""
+    pytest.importorskip("faiss")
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert(
+        [
+            _record("blocked-1", [1.0, 0.0], workspace_id="other"),
+            _record("blocked-2", [0.99, 0.1], workspace_id="other"),
+            _record("eligible-1", [0.8, 0.6]),
+            _record("eligible-2", [0.6, 0.8]),
+        ],
+        "model",
+        2,
+    )
+    store = FAISSLocalVectorStore(
+        backend,
+        index_path=tmp_path / "faiss",
+        search_strategy="approximate",
+        max_scan_candidates=2,
+    )
+
+    hits = store.search(
+        [1.0, 0.0],
+        2,
+        model_name="model",
+        dim=2,
+        filters={"workspace_id": "workspace", "source_kind": "note"},
+    )
+
+    diagnostics = store.last_search_diagnostics
+    assert len(hits) < 2
+    assert diagnostics["candidate_budget"] == 2
+    assert diagnostics["candidate_budget_hit"] is True
+    assert diagnostics["under_returned"] is True
 
 
 def test_faiss_fallback_matches_local_for_compound_filters(
