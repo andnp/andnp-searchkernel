@@ -3398,7 +3398,7 @@ class LocalVectorStore:
             filters=filters,
         )
 
-    def search_batch(
+    async def search_batch(
         self,
         query_vectors: Sequence[Vector],
         k: int,
@@ -3407,7 +3407,8 @@ class LocalVectorStore:
         dim: int,
         filters: Sequence[SearchFilters | None] | None = None,
     ) -> list[list[RecordHit]]:
-        return self._backend.search_vectors(
+        return await asyncio.to_thread(
+            self._backend.search_vectors,
             query_vectors,
             k,
             model_name=model_name,
