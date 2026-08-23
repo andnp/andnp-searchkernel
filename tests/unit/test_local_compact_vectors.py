@@ -2,6 +2,8 @@ import asyncio
 import json
 import sqlite3
 import threading
+from collections.abc import Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -554,6 +556,139 @@ def test_vector_storage_stats_cache_follows_vector_epoch() -> None:
     assert stats_query_count() == 3
     assert vector.search([0.0, 1.0], 1, model_name="model", dim=2) == []
     connection.set_trace_callback(None)
+
+
+def test_vector_snapshot_is_invalidated_after_vector_epoch_changes() -> None:
+    """A changed vector epoch replaces the snapshot's pre-mutation vectors.
+
+    Public searches must rank against the updated embedding after an upsert.
+    """
+    backend = LocalRecordBackend()
+    store = LocalVectorStore(backend)
+    first = _record("first", [1.0, 0.0])
+    second = _record("second", [0.0, 1.0])
+    store.upsert([first, second], "model", 2)
+
+    assert store.search([1.0, 0.0], 1, model_name="model", dim=2)[0].source_id == (
+        "first"
+    )
+    before = store.vector_epoch()
+
+    first.embedding = [-1.0, 0.0]
+    store.upsert([first], "model", 2)
+
+    assert store.vector_epoch() == before + 1
+    assert store.search([1.0, 0.0], 1, model_name="model", dim=2)[0].source_id == (
+        "second"
+    )
+
+
+def test_concurrent_snapshot_publication_stays_coherent_with_epoch(monkeypatch) -> None:
+    """Concurrent publication cannot make a later search use an old epoch.
+
+    Barriers place the mutation after row capture and before snapshot
+    materialization, then verify a search started after that mutation sees it.
+    """
+    backend = LocalRecordBackend()
+    store = LocalVectorStore(backend)
+    first = _record("first", [1.0, 0.0])
+    second = _record("second", [0.0, 1.0])
+    store.upsert([first, second], "model", 2)
+    assert store.search([1.0, 0.0], 1, model_name="model", dim=2)
+
+    first.embedding = [0.0, 1.0]
+    second.embedding = [1.0, 0.0]
+    store.upsert([first, second], "model", 2)
+
+    rows_ready = threading.Event()
+    publish = threading.Event()
+    from_rows_calls = 0
+    from_rows_lock = threading.Lock()
+    original_from_rows = VectorSnapshot.from_rows
+
+    def gated_from_rows(
+        rows: Sequence[object],
+        *,
+        encoder_namespace: str,
+        dim: int,
+        epoch: int,
+        materialize_metadata: bool = False,
+    ) -> VectorSnapshot:
+        nonlocal from_rows_calls
+        with from_rows_lock:
+            from_rows_calls += 1
+            should_pause = from_rows_calls == 1
+        if should_pause:
+            rows_ready.set()
+            if not publish.wait(timeout=5):
+                raise AssertionError("snapshot publication was not released")
+        return original_from_rows(
+            rows,
+            encoder_namespace=encoder_namespace,
+            dim=dim,
+            epoch=epoch,
+            materialize_metadata=materialize_metadata,
+        )
+
+    monkeypatch.setattr(VectorSnapshot, "from_rows", gated_from_rows)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        publisher = executor.submit(
+            store.search, [1.0, 0.0], 1, model_name="model", dim=2
+        )
+        observer: Future[list[RecordHit]] | None = None
+        try:
+            assert rows_ready.wait(timeout=5)
+            first.embedding = [1.0, 0.0]
+            second.embedding = [0.0, 1.0]
+            store.upsert([first, second], "model", 2)
+            observer = executor.submit(
+                store.search, [1.0, 0.0], 1, model_name="model", dim=2
+            )
+            publish.set()
+        finally:
+            publish.set()
+
+        assert observer is not None
+        publisher_hits = publisher.result(timeout=5)
+        observer_hits = observer.result(timeout=5)
+
+    assert [hit.source_id for hit in publisher_hits] == ["second"]
+    assert [hit.source_id for hit in observer_hits] == ["first"]
+
+
+def test_vector_snapshot_keys_isolate_models_and_dimensions() -> None:
+    """Snapshot entries remain isolated by encoder model and vector dimension.
+
+    Alternating public searches must not reuse another model's or dimension's
+    immutable vector rows.
+    """
+    backend = LocalRecordBackend()
+    store = LocalVectorStore(backend)
+    model_two = _record("model-two", [1.0, 0.0])
+    other_two = _record("other-two", [0.0, 1.0])
+    model_three = _record("model-three", [1.0, 0.0, 0.0])
+    store.upsert([model_two], "model-two", 2)
+    store.upsert([other_two], "other-two", 2)
+    store.upsert([model_three], "model-three", 3)
+
+    assert [
+        hit.source_id
+        for hit in store.search([1.0, 0.0], 1, model_name="model-two", dim=2)
+    ] == ["model-two"]
+    assert [
+        hit.source_id
+        for hit in store.search([0.0, 1.0], 1, model_name="other-two", dim=2)
+    ] == ["other-two"]
+    assert [
+        hit.source_id
+        for hit in store.search(
+            [1.0, 0.0, 0.0], 1, model_name="model-three", dim=3
+        )
+    ] == ["model-three"]
+    assert [
+        hit.source_id
+        for hit in store.search([1.0, 0.0], 1, model_name="model-two", dim=2)
+    ] == ["model-two"]
 
 
 def test_vector_search_materializes_metadata_only_for_metadata_filters() -> None:
