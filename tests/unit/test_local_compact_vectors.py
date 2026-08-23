@@ -210,6 +210,83 @@ def test_exact_search_has_cosine_parity_deterministic_ties_and_filters() -> None
     )[0].source_id == "archived"
 
 
+def test_exact_batch_search_matches_scalar_queries_and_filters() -> None:
+    """Batch results preserve scalar ranking, filters, and tie ordering."""
+    backend = LocalRecordBackend()
+    records = [
+        _record("b", [3.0, 4.0]),
+        _record("a", [0.6, 0.8]),
+        _record("other", [0.0, 1.0], workspace_id="other"),
+        _record("archived", [0.0, 1.0], status=RecordStatus.ARCHIVED),
+    ]
+    backend.upsert(records, "model", 2)
+    query_vectors = [[3.0, 4.0], [0.0, 1.0]]
+    filters = [{"workspace_id": "workspace"}, {"statuses": ["archived"]}]
+
+    batched = backend.search_vectors(
+        query_vectors,
+        2,
+        model_name="model",
+        dim=2,
+        filters=filters,
+    )
+    scalar = [
+        backend.search_vector(
+            vector, 2, model_name="model", dim=2, filters=query_filter
+        )
+        for vector, query_filter in zip(query_vectors, filters, strict=True)
+    ]
+
+    assert [[hit.storage_key for hit in result] for result in batched] == [
+        [hit.storage_key for hit in result] for result in scalar
+    ]
+    for batched_result, scalar_result in zip(batched, scalar, strict=True):
+        assert [hit.score for hit in batched_result] == pytest.approx(
+            [hit.score for hit in scalar_result]
+        )
+
+
+def test_exact_batch_search_handles_empty_and_misaligned_inputs() -> None:
+    """Empty batches are empty while mismatched filters fail explicitly."""
+    backend = LocalRecordBackend()
+
+    assert backend.search_vectors([], 2, model_name="model", dim=2) == []
+    with pytest.raises(ValueError, match="filters must match"):
+        backend.search_vectors(
+            [[1.0, 0.0]],
+            2,
+            model_name="model",
+            dim=2,
+            filters=[],
+        )
+    with pytest.raises(ValueError, match="dimension mismatch"):
+        backend.search_vectors(
+            [[1.0]],
+            2,
+            model_name="model",
+            dim=2,
+        )
+
+
+@pytest.mark.asyncio
+async def test_async_batch_vector_search_matches_sync_results() -> None:
+    """The async optional capability returns the sync exact batch contract."""
+    backend = LocalRecordBackend()
+    backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
+    store = LocalVectorStore(backend)
+
+    result = await store.search_batch(
+        [[1.0, 0.0], [0.0, 1.0]],
+        1,
+        model_name="model",
+        dim=2,
+    )
+
+    assert [hit.source_id for hit in result[0]] == ["one"]
+    assert [hit.source_id for hit in result[1]] == ["one"]
+    assert result[1][0].score == pytest.approx(0.0)
+
+
 def _generic_snapshot_mask(
     snapshot: VectorSnapshot,
     filters: dict[str, object] | None,
