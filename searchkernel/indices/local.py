@@ -2324,8 +2324,9 @@ class _SchemaManager:
                 FOREIGN KEY (storage_key) REFERENCES local_records(storage_key)
                     ON DELETE CASCADE
             );
-            CREATE INDEX IF NOT EXISTS idx_local_vectors_v2_namespace
-                ON local_vectors_v2 (encoder_namespace, dim);
+            DROP INDEX IF EXISTS idx_local_vectors_v2_namespace;
+            CREATE INDEX IF NOT EXISTS idx_local_vectors_v2_namespace_key
+                ON local_vectors_v2 (encoder_namespace, dim, storage_key);
             CREATE TABLE IF NOT EXISTS local_graph_edges (
                 source_id TEXT NOT NULL,
                 target_id TEXT NOT NULL,
