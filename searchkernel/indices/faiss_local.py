@@ -8,7 +8,7 @@ import json
 import math
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +56,20 @@ _FAISS_STATE_VERSION = 2
 # yields enough live neighbours, index memory overhead stays under a third,
 # and each O(N) compaction is amortised over at least 0.25*N changes.
 _TOMBSTONE_COMPACTION_RATIO = 0.25
+
+# Debounce window for persistence. Incremental refreshes are cheap and
+# frequent, but every write serialises the whole index and its metadata, so
+# persisting per refresh dominates disk cost and stalls concurrent queries.
+# Five minutes bounds the write amplification of a continuously indexing
+# consumer to one full artifact per window regardless of refresh rate.
+_PERSIST_INTERVAL_SECONDS = 300.0
+
+# Persist early once this many vectors have been added or replaced since the
+# last write, so a bulk ingest is not left unpersisted for the whole window.
+# The whole artifact is rewritten either way, so a small delta would waste the
+# amortisation; at roughly a tenth of a production corpus the rebuild a crash
+# would cost is finally worth more than the write.
+_PERSIST_PENDING_VECTORS = 25_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +196,14 @@ class _SidecarMetadataReader:
         )
 
 
+@dataclass(slots=True)
+class _PersistenceDebounce:
+    """When one persisted artifact was last written, and what it is missing."""
+
+    last_write: float
+    pending_vectors: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class _FAISSState:
     index: Any
@@ -224,6 +246,7 @@ class FAISSLocalVectorStore:
         hnsw_ef_search: int = 16,
         max_scan_candidates: int = 100_000,
         configuration: FAISSConfiguration | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._backend = backend
         self._index_path = index_path
@@ -236,8 +259,10 @@ class FAISSLocalVectorStore:
             max_scan_rounds=max_scan_rounds,
             max_scan_candidates=max_scan_candidates,
         )
+        self._clock = clock
         self._state_lock = threading.RLock()
         self._states: dict[tuple[str, int], _FAISSState] = {}
+        self._persistence: dict[tuple[str, int], _PersistenceDebounce] = {}
         self._last_search_diagnostics: dict[str, Any] = {
             "strategy": self._configuration.search_strategy,
             "configuration_fingerprint": self._configuration.fingerprint,
@@ -460,6 +485,70 @@ class FAISSLocalVectorStore:
             hit.storage_key for hit in approximate
         }) / len(exact)
 
+    def flush_persistence(self) -> bool:
+        """Write every cached state to disk now, ignoring the debounce window.
+
+        Debounced writes lag the in-memory state, so a caller that knows it is
+        shutting down calls this to avoid paying a rebuild on the next start.
+        The write is unconditional: it is deliberate, not opportunistic.
+        """
+        with self._state_lock:
+            written = True
+            for key, state in self._states.items():
+                written &= self._write_state(key, state)
+            self._last_search_diagnostics["persistence_written"] = written
+            return written
+
+    def _write_state(self, key: tuple[str, int], state: _FAISSState) -> bool:
+        """Persist ``state`` and restart its debounce window."""
+        written = self._persist_state(state)
+        if written:
+            self._persistence[key] = _PersistenceDebounce(last_write=self._clock())
+        return written
+
+    def _persist_debounced(
+        self,
+        key: tuple[str, int],
+        state: _FAISSState,
+        changed_vectors: int,
+    ) -> bool:
+        """Persist ``state`` only once the window or the change budget is spent.
+
+        The persisted artifact is a rebuildable cache of the vectors the
+        backend already stores, so a crash inside the window costs one rebuild
+        on the next start and never loses data. That is what makes deferring
+        the write safe; the in-memory state is always current.
+        """
+        debounce = self._persistence.setdefault(
+            key, _PersistenceDebounce(last_write=self._clock())
+        )
+        debounce.pending_vectors += changed_vectors
+        elapsed = self._clock() - debounce.last_write
+        if (
+            elapsed < _PERSIST_INTERVAL_SECONDS
+            and debounce.pending_vectors < _PERSIST_PENDING_VECTORS
+        ):
+            return False
+        return self._write_state(key, state)
+
+    @staticmethod
+    def _changed_vector_count(
+        base: _FAISSState,
+        updated: _FAISSState,
+    ) -> int:
+        """Count vectors added or replaced between two states.
+
+        Deletions only tombstone an existing entry, so they add no index bytes
+        and are left to the elapsed-time trigger.
+        """
+        before = base.index_revisions or {}
+        after = updated.index_revisions or {}
+        return sum(
+            1
+            for faiss_id, revision in after.items()
+            if before.get(faiss_id) != revision
+        )
+
     def _get_state(self, model_name: str, dim: int) -> _FAISSState:
         key = (model_name, dim)
         vector_epoch = self._backend.vector_epoch()
@@ -470,7 +559,12 @@ class FAISSLocalVectorStore:
             loaded = self._load_state(model_name, dim, vector_epoch)
             if loaded is not None:
                 self._last_search_diagnostics["persistence"] = "loaded"
+                self._last_search_diagnostics["persistence_written"] = False
                 self._states[key] = loaded
+                # Disk already holds this state, so the window restarts here.
+                self._persistence[key] = _PersistenceDebounce(
+                    last_write=self._clock()
+                )
                 return loaded
             base = cached if cached is not None else self._load_diffable_state(
                 model_name, dim
@@ -484,15 +578,21 @@ class FAISSLocalVectorStore:
                     raise
                 if updated is not None:
                     self._states[key] = updated
-                    self._persist_state(updated)
+                    written = self._persist_debounced(
+                        key, updated, self._changed_vector_count(base, updated)
+                    )
                     self._last_search_diagnostics["persistence"] = "updated"
+                    self._last_search_diagnostics["persistence_written"] = written
                     return updated
             state = self._build_state(model_name, dim, vector_epoch)
             if self._backend.vector_epoch() != vector_epoch:
                 raise RuntimeError("vector index changed while FAISS state was built")
             self._states[key] = state
-            self._persist_state(state)
+            # A rebuild is the cost the cache exists to avoid and is rare, so
+            # it is written immediately rather than risked to the window.
+            written = self._write_state(key, state)
             self._last_search_diagnostics["persistence"] = "rebuilt"
+            self._last_search_diagnostics["persistence_written"] = written
             return state
 
     @staticmethod

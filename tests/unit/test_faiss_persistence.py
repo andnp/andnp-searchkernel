@@ -2,8 +2,14 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from searchkernel.domain import Record, RecordStatus
-from searchkernel.indices import FAISSLocalVectorStore, LocalRecordBackend
+import pytest
+
+from searchkernel.domain import Record, RecordHit, RecordStatus
+from searchkernel.indices import (
+    FAISSLocalVectorStore,
+    LocalRecordBackend,
+    faiss_local,
+)
 
 
 def _record(
@@ -452,3 +458,196 @@ def test_split_manifest_fingerprint_and_offset_mismatch_rebuilds(
     offset_fallback = FAISSLocalVectorStore(backend, index_path=index_path)
     offset_fallback.search([1.0, 0.0], 1, model_name="model", dim=2)
     assert offset_fallback.last_search_diagnostics["persistence"] == "rebuilt"
+
+
+class _ManualClock:
+    """A monotonic clock the test advances explicitly."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _persisted_generations(index_path: Path) -> int:
+    """Count published generations; every persisted write publishes one."""
+    return len(list(index_path.parent.glob(f"{index_path.stem}.*.faiss")))
+
+
+def _seeded_debounce_store(
+    tmp_path: Path, clock: _ManualClock
+) -> tuple[LocalRecordBackend, FAISSLocalVectorStore]:
+    """Return a backend and a store whose first generation is on disk."""
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert(
+        [
+            _record(f"seed-{index}", [1.0 - index / 100.0, index / 100.0])
+            for index in range(8)
+        ],
+        "model",
+        2,
+    )
+    store = FAISSLocalVectorStore(
+        backend, index_path=tmp_path / "index.faiss", clock=clock
+    )
+    store.search([1.0, 0.0], 3, model_name="model", dim=2)
+    return backend, store
+
+
+def _add_vector(backend: LocalRecordBackend, index: int) -> None:
+    backend.upsert(
+        [_record(f"added-{index}", [index / 100.0, 1.0 - index / 100.0])],
+        "model",
+        2,
+    )
+
+
+def _assert_matches_rebuild(
+    hits: list[RecordHit], backend: LocalRecordBackend, query: list[float], k: int
+) -> None:
+    """Assert results agree with a store that has no persisted state at all.
+
+    Scores are compared to float32 precision rather than bit for bit because
+    a refreshed index accumulates inner products in a different order than a
+    from-scratch build.
+    """
+    expected = FAISSLocalVectorStore(backend).search(
+        query, k, model_name="model", dim=2
+    )
+    assert [hit.storage_key for hit in hits] == [
+        hit.storage_key for hit in expected
+    ]
+    assert [hit.score for hit in hits] == pytest.approx(
+        [hit.score for hit in expected], rel=1e-6
+    )
+
+
+def test_repeated_refreshes_inside_the_window_persist_once(tmp_path: Path) -> None:
+    """Frequent incremental refreshes must not each rewrite the artifact.
+
+    Persisting per refresh dominates disk cost on a continuously indexed
+    corpus and stalls queries for the length of the write.
+    """
+    clock = _ManualClock()
+    index_path = tmp_path / "index.faiss"
+    backend, store = _seeded_debounce_store(tmp_path, clock)
+    assert _persisted_generations(index_path) == 1
+
+    for index in range(3):
+        _add_vector(backend, index)
+        clock.advance(1.0)
+        store.search([0.0, 1.0], 3, model_name="model", dim=2)
+        assert store.last_search_diagnostics["persistence"] == "updated"
+        assert store.last_search_diagnostics["persistence_written"] is False
+
+    assert _persisted_generations(index_path) == 1
+
+
+def test_an_elapsed_window_persists_the_next_refresh(tmp_path: Path) -> None:
+    """A trickle of changes still reaches disk once the window expires."""
+    clock = _ManualClock()
+    index_path = tmp_path / "index.faiss"
+    backend, store = _seeded_debounce_store(tmp_path, clock)
+
+    _add_vector(backend, 0)
+    clock.advance(faiss_local._PERSIST_INTERVAL_SECONDS)
+    store.search([0.0, 1.0], 3, model_name="model", dim=2)
+
+    assert store.last_search_diagnostics["persistence"] == "updated"
+    assert store.last_search_diagnostics["persistence_written"] is True
+    assert _persisted_generations(index_path) == 2
+
+
+def test_accumulated_changes_persist_before_the_window_elapses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A burst of new vectors is written without waiting out the timer."""
+    monkeypatch.setattr(faiss_local, "_PERSIST_PENDING_VECTORS", 2)
+    clock = _ManualClock()
+    index_path = tmp_path / "index.faiss"
+    backend, store = _seeded_debounce_store(tmp_path, clock)
+
+    _add_vector(backend, 0)
+    clock.advance(1.0)
+    store.search([0.0, 1.0], 3, model_name="model", dim=2)
+    assert _persisted_generations(index_path) == 1
+
+    _add_vector(backend, 1)
+    clock.advance(1.0)
+    store.search([0.0, 1.0], 3, model_name="model", dim=2)
+
+    assert store.last_search_diagnostics["persistence_written"] is True
+    assert _persisted_generations(index_path) == 2
+
+
+def test_flush_persistence_writes_a_debounced_state(tmp_path: Path) -> None:
+    """An explicit flush publishes a generation a later store can load."""
+    clock = _ManualClock()
+    index_path = tmp_path / "index.faiss"
+    backend, store = _seeded_debounce_store(tmp_path, clock)
+    _add_vector(backend, 0)
+    clock.advance(1.0)
+    store.search([0.0, 1.0], 3, model_name="model", dim=2)
+    assert _persisted_generations(index_path) == 1
+
+    assert store.flush_persistence() is True
+
+    assert _persisted_generations(index_path) == 2
+    restarted = FAISSLocalVectorStore(backend, index_path=index_path)
+    restarted.search([0.0, 1.0], 3, model_name="model", dim=2)
+    assert restarted.last_search_diagnostics["persistence"] == "loaded"
+
+
+def test_a_debounced_state_serves_rebuild_equal_results(tmp_path: Path) -> None:
+    """Deferring the write must not change what a search returns."""
+    clock = _ManualClock()
+    backend, store = _seeded_debounce_store(tmp_path, clock)
+    for index in range(3):
+        _add_vector(backend, index)
+    clock.advance(1.0)
+
+    hits = store.search([0.0, 1.0], 5, model_name="model", dim=2)
+
+    assert store.last_search_diagnostics["persistence_written"] is False
+    _assert_matches_rebuild(hits, backend, [0.0, 1.0], 5)
+
+
+def test_a_fresh_store_recovers_an_unwritten_window(tmp_path: Path) -> None:
+    """Losing the deferred write costs a refresh, never a correct result.
+
+    The persisted artifact is a rebuildable cache of vectors the backend
+    already holds, so a store that starts against a stale generation must
+    never serve it as current.
+    """
+    clock = _ManualClock()
+    index_path = tmp_path / "index.faiss"
+    backend, store = _seeded_debounce_store(tmp_path, clock)
+    for index in range(3):
+        _add_vector(backend, index)
+        clock.advance(1.0)
+        store.search([0.0, 1.0], 3, model_name="model", dim=2)
+
+    restarted = FAISSLocalVectorStore(backend, index_path=index_path, clock=clock)
+    hits = restarted.search([0.0, 1.0], 5, model_name="model", dim=2)
+
+    assert restarted.last_search_diagnostics["persistence"] != "loaded"
+    _assert_matches_rebuild(hits, backend, [0.0, 1.0], 5)
+
+
+def test_a_store_with_no_persisted_artifact_rebuilds(tmp_path: Path) -> None:
+    """A corpus that was never persisted still searches correctly."""
+    clock = _ManualClock()
+    index_path = tmp_path / "index.faiss"
+    backend, _ = _seeded_debounce_store(tmp_path, clock)
+    for path in tmp_path.glob("index.*"):
+        path.unlink()
+
+    restarted = FAISSLocalVectorStore(backend, index_path=index_path, clock=clock)
+    hits = restarted.search([1.0, 0.0], 5, model_name="model", dim=2)
+
+    assert restarted.last_search_diagnostics["persistence"] == "rebuilt"
+    _assert_matches_rebuild(hits, backend, [1.0, 0.0], 5)
