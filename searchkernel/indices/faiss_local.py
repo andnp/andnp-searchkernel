@@ -46,6 +46,17 @@ if TYPE_CHECKING:
 
 FAISSSearchStrategy = Literal["exact", "approximate"]
 
+# Persisted FAISS state layout. Bumped independently of the packed vector
+# codec because it describes the manifest, not the stored embeddings.
+_FAISS_STATE_VERSION = 2
+
+# Rebuild once tombstones exceed this share of the vectors resident in the
+# index. Deleted vectors cannot be removed from an HNSW graph, so they are
+# filtered out after the search; at 25% the first overfetch round still
+# yields enough live neighbours, index memory overhead stays under a third,
+# and each O(N) compaction is amortised over at least 0.25*N changes.
+_TOMBSTONE_COMPACTION_RATIO = 0.25
+
 
 @dataclass(frozen=True, slots=True)
 class FAISSConfiguration:
@@ -183,6 +194,10 @@ class _FAISSState:
     candidate_metadata: dict[str, _CandidateMetadata]
     metadata_sidecar: _CandidateMetadataSidecar | None = None
     active_ids: frozenset[int] | None = None
+    # Revision of the vector resident in the FAISS index for every resident
+    # identifier, including tombstoned ones. ``None`` marks a state that
+    # predates revision tracking and therefore cannot be diffed forward.
+    index_revisions: dict[int, str] | None = None
     eligibility_masks: dict[tuple[str, str], frozenset[int]] = field(
         default_factory=dict,
         init=False,
@@ -457,6 +472,21 @@ class FAISSLocalVectorStore:
                 self._last_search_diagnostics["persistence"] = "loaded"
                 self._states[key] = loaded
                 return loaded
+            base = cached if cached is not None else self._load_diffable_state(
+                model_name, dim
+            )
+            if base is not None and base.index_revisions is not None:
+                try:
+                    updated = self._update_state(base, model_name, dim, vector_epoch)
+                except Exception:
+                    # A partially mutated index must never be searched.
+                    self._states.pop(key, None)
+                    raise
+                if updated is not None:
+                    self._states[key] = updated
+                    self._persist_state(updated)
+                    self._last_search_diagnostics["persistence"] = "updated"
+                    return updated
             state = self._build_state(model_name, dim, vector_epoch)
             if self._backend.vector_epoch() != vector_epoch:
                 raise RuntimeError("vector index changed while FAISS state was built")
@@ -495,6 +525,7 @@ class FAISSLocalVectorStore:
         storage_keys: list[str] = []
         id_to_storage_key: dict[int, str] = {}
         candidate_metadata: dict[str, _CandidateMetadata] = {}
+        index_revisions: dict[int, str] | None = {}
         for rows in self._backend.iter_vector_batches(model_name, dim):
             vectors = [
                 PackedVectorCodec.decode(
@@ -515,6 +546,14 @@ class FAISSLocalVectorStore:
             ids.extend(batch_ids)
             storage_keys.extend(batch_keys)
             id_to_storage_key.update(zip(batch_ids, batch_keys, strict=True))
+            if index_revisions is not None:
+                for faiss_id, row in zip(batch_ids, rows, strict=True):
+                    revision = row["revision"]
+                    if not revision:
+                        # A pre-revision vector row cannot be diffed forward.
+                        index_revisions = None
+                        break
+                    index_revisions[faiss_id] = str(revision)
             candidate_metadata.update(
                 {
                     row["storage_key"]: _CandidateMetadata(
@@ -544,6 +583,125 @@ class FAISSLocalVectorStore:
                 )
                 if candidate_metadata[storage_key].status == RecordStatus.ACTIVE.value
             ),
+            index_revisions=index_revisions,
+        )
+
+    def _update_state(
+        self,
+        base: _FAISSState,
+        model_name: str,
+        dim: int,
+        epoch: int,
+    ) -> _FAISSState | None:
+        """Advance ``base`` to ``epoch`` by re-adding only changed vectors.
+
+        Return ``None`` when the change shape requires a full rebuild. All
+        classification happens before any index mutation so an abort never
+        leaves a partially updated index behind.
+        """
+        resident = base.index_revisions
+        if resident is None:
+            return None
+        ids: list[int] = []
+        storage_keys: list[str] = []
+        candidate_metadata: dict[str, _CandidateMetadata] = {}
+        live_revisions: dict[int, str] = {}
+        pending: list[str] = []
+        replaced: list[int] = []
+        for rows in self._backend.iter_vector_identity_batches(model_name, dim):
+            for row in rows:
+                revision = row["revision"]
+                if not revision:
+                    return None
+                storage_key = row["storage_key"]
+                faiss_id = self._stable_id(storage_key)
+                if faiss_id in live_revisions:
+                    raise ValueError("FAISS stable ID collision")
+                ids.append(faiss_id)
+                storage_keys.append(storage_key)
+                live_revisions[faiss_id] = str(revision)
+                candidate_metadata[storage_key] = _CandidateMetadata(
+                    source_id=row["source_id"],
+                    workspace_id=row["workspace_id"],
+                    source_kind=row["source_kind"],
+                    status=row["status"],
+                    metadata=dict(metadata_mapping(row["metadata"])),
+                    uri=row["uri"],
+                )
+                resident_revision = resident.get(faiss_id)
+                if resident_revision is None:
+                    pending.append(storage_key)
+                elif resident_revision != revision:
+                    replaced.append(faiss_id)
+                    pending.append(storage_key)
+        tombstones = {
+            faiss_id: revision
+            for faiss_id, revision in resident.items()
+            if faiss_id not in live_revisions
+        }
+        residency = len(live_revisions) + len(tombstones)
+        if residency and len(tombstones) / residency > _TOMBSTONE_COMPACTION_RATIO:
+            return None
+        if replaced and self.search_strategy != "exact":
+            # IndexHNSWFlat does not implement remove_ids, and re-adding an
+            # existing identifier to IndexIDMap2 appends a duplicate instead
+            # of replacing it, so a changed vector needs a rebuild.
+            return None
+        if base.index.ntotal != len(resident):
+            raise ValueError("FAISS index size does not match tracked revisions")
+        if replaced:
+            removed = int(
+                base.index.remove_ids(np.asarray(replaced, dtype=np.int64))
+            )
+            if removed != len(replaced):
+                raise ValueError("FAISS replacement removal was incomplete")
+        added = 0
+        for rows in self._backend.iter_vector_embedding_batches(
+            model_name, dim, pending
+        ):
+            vectors = [
+                PackedVectorCodec.decode(
+                    row["embedding"],
+                    dim,
+                    context=f"stored embedding for {row['storage_key']}",
+                )
+                for row in rows
+            ]
+            batch_ids = [self._stable_id(row["storage_key"]) for row in rows]
+            base.index.add_with_ids(
+                np.asarray(vectors, dtype=np.float32),
+                np.asarray(batch_ids, dtype=np.int64),
+            )
+            added += len(rows)
+        if added != len(pending):
+            raise ValueError("FAISS incremental update missed a changed vector")
+        if self._backend.vector_epoch() != epoch:
+            raise RuntimeError("vector index changed while FAISS state was updated")
+        index_revisions = {**live_revisions, **tombstones}
+        if base.index.ntotal != len(index_revisions):
+            raise ValueError("FAISS index size does not match updated revisions")
+        self._last_search_diagnostics.update(
+            {
+                "incremental_added": len(pending) - len(replaced),
+                "incremental_replaced": len(replaced),
+                "incremental_tombstoned": len(tombstones),
+            }
+        )
+        return _FAISSState(
+            index=base.index,
+            encoder_namespace=model_name,
+            dim=dim,
+            epoch=epoch,
+            ids=tuple(ids),
+            storage_keys=tuple(storage_keys),
+            id_to_storage_key=dict(zip(ids, storage_keys, strict=True)),
+            candidate_metadata=candidate_metadata,
+            active_ids=frozenset(
+                faiss_id
+                for faiss_id, storage_key in zip(ids, storage_keys, strict=True)
+                if candidate_metadata[storage_key].status == RecordStatus.ACTIVE.value
+            ),
+            index_revisions=index_revisions,
         )
 
     def _search_state(
@@ -810,7 +968,21 @@ class FAISSLocalVectorStore:
             "ids": list(state.ids),
             "storage_keys": list(state.storage_keys),
             "active_ids": sorted(state.active_ids or ()),
-            "tombstones": [],
+            "faiss_state_version": _FAISS_STATE_VERSION,
+            "revisions": (
+                [state.index_revisions[faiss_id] for faiss_id in state.ids]
+                if state.index_revisions is not None
+                else None
+            ),
+            "tombstones": (
+                sorted(
+                    [faiss_id, revision]
+                    for faiss_id, revision in state.index_revisions.items()
+                    if faiss_id not in state.id_to_storage_key
+                )
+                if state.index_revisions is not None
+                else []
+            ),
         }
 
     def _persist_state(self, state: _FAISSState) -> bool:
@@ -894,11 +1066,32 @@ class FAISSLocalVectorStore:
             )
             return None
 
+    def _load_diffable_state(
+        self,
+        model_name: str,
+        dim: int,
+    ) -> _FAISSState | None:
+        """Load a persisted state at whatever epoch it was written for.
+
+        Only the split format carries revisions, so only it can serve as the
+        base of an incremental diff after a restart.
+        """
+        try:
+            manifest_path = self._manifest_path(model_name, dim)
+            if not manifest_path.is_file():
+                return None
+            return self._load_split_state(model_name, dim, None, manifest_path)
+        except Exception as exc:  # noqa: BLE001 - stale or corrupt indexes rebuild
+            self._last_search_diagnostics["persistence_reason"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            return None
+
     def _load_split_state(
         self,
         model_name: str,
         dim: int,
-        epoch: int,
+        epoch: int | None,
         manifest_path: Path,
     ) -> _FAISSState | None:
         import faiss
@@ -906,12 +1099,18 @@ class FAISSLocalVectorStore:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         index_path, _ = self._paths(model_name, dim)
         generation = manifest["generation"]
-        expected_prefix = f"{epoch}-{self.configuration.build_fingerprint[:16]}-"
+        if not isinstance(generation, str):
+            return None
+        parts = generation.split("-")
         if (
-            not isinstance(generation, str)
-            or not generation.startswith(expected_prefix)
-            or not generation[len(expected_prefix) :].isdigit()
+            len(parts) != 3
+            or not parts[0].isdigit()
+            or parts[1] != self.configuration.build_fingerprint[:16]
+            or not parts[2].isdigit()
         ):
+            return None
+        state_epoch = int(parts[0])
+        if epoch is not None and state_epoch != epoch:
             return None
         index_name = f"{index_path.stem}.{generation}.faiss"
         metadata_name = f"{index_path.stem}.{generation}.jsonl"
@@ -930,11 +1129,13 @@ class FAISSLocalVectorStore:
             or manifest.get("encoder_namespace") != model_name
             or manifest.get("dim") != dim
             or build_fingerprint != self.configuration.build_fingerprint
-            or manifest.get("epoch") != epoch
+            or manifest.get("epoch") != state_epoch
+            or manifest.get("faiss_state_version") != _FAISS_STATE_VERSION
         ):
             return None
         ids, storage_keys = self._load_persisted_keys(manifest)
         active_ids = self._load_active_ids(manifest, ids)
+        index_revisions = self._load_index_revisions(manifest, ids)
         offsets = self._load_metadata_offsets(manifest, storage_keys)
         generation_index = index_path.with_name(index_name)
         generation_metadata = index_path.with_name(metadata_name)
@@ -948,14 +1149,17 @@ class FAISSLocalVectorStore:
         index = faiss.deserialize_index(
             np.frombuffer(generation_index.read_bytes(), dtype=np.uint8)
         )
-        if index.d != dim or index.ntotal != len(ids):
+        expected_total = (
+            len(index_revisions) if index_revisions is not None else len(ids)
+        )
+        if index.d != dim or index.ntotal != expected_total:
             return None
         self._restore_hnsw_settings(index)
         return _FAISSState(
             index=index,
             encoder_namespace=model_name,
             dim=dim,
-            epoch=epoch,
+            epoch=state_epoch,
             ids=ids,
             storage_keys=storage_keys,
             id_to_storage_key=dict(zip(ids, storage_keys, strict=True)),
@@ -964,6 +1168,7 @@ class FAISSLocalVectorStore:
                 generation_metadata, offsets
             ),
             active_ids=active_ids,
+            index_revisions=index_revisions,
         )
 
     @staticmethod
@@ -994,6 +1199,30 @@ class FAISSLocalVectorStore:
         ):
             raise ValueError("FAISS active IDs are not a unique persisted subset")
         return frozenset(active_ids)
+
+    @staticmethod
+    def _load_index_revisions(
+        metadata: Mapping[str, Any],
+        ids: tuple[int, ...],
+    ) -> dict[int, str] | None:
+        raw_revisions = metadata["revisions"]
+        if raw_revisions is None:
+            return None
+        if not isinstance(raw_revisions, list) or len(raw_revisions) != len(ids):
+            raise ValueError("FAISS persisted revisions do not match persisted IDs")
+        revisions = {
+            faiss_id: str(value)
+            for faiss_id, value in zip(ids, raw_revisions, strict=True)
+        }
+        raw_tombstones = metadata["tombstones"]
+        if not isinstance(raw_tombstones, list):
+            raise TypeError("FAISS tombstones must be an explicit list")
+        for entry in raw_tombstones:
+            faiss_id = int(entry[0])
+            if faiss_id in revisions:
+                raise ValueError("FAISS tombstone duplicates a live identifier")
+            revisions[faiss_id] = str(entry[1])
+        return revisions
 
     @staticmethod
     def _load_metadata_offsets(
