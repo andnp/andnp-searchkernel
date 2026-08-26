@@ -135,6 +135,7 @@ _TYPED_VECTOR_FILTER_NAMES = frozenset(
     }
 )
 _VECTOR_EMBEDDING_BYTES = np.dtype("<f4").itemsize
+_VECTOR_IDENTITY_BATCH_LIMIT = 4_096
 _DEFAULT_VECTOR_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 _VECTOR_GATHER_SELECTIVITY_THRESHOLD = 0.3
 _VECTOR_BATCH_MAX_QUERIES = 64
@@ -1257,8 +1258,8 @@ class _VectorEngine:
                     rows = conn.execute(
                         """
                         SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
-                               v.normalization_policy
+                               r.status, r.metadata, r.uri, v.embedding, v.revision,
+                               v.format_version, v.normalization_policy
                         FROM local_records r
                         JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
                         WHERE v.encoder_namespace = ? AND v.dim = ?
@@ -1271,8 +1272,8 @@ class _VectorEngine:
                     rows = conn.execute(
                         """
                         SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
-                               r.status, r.metadata, r.uri, v.embedding, v.format_version,
-                               v.normalization_policy
+                               r.status, r.metadata, r.uri, v.embedding, v.revision,
+                               v.format_version, v.normalization_policy
                         FROM local_records r
                         JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
                         WHERE v.encoder_namespace = ? AND v.dim = ?
@@ -1286,6 +1287,68 @@ class _VectorEngine:
                 return
             yield rows
             last_storage_key = rows[-1]["storage_key"]
+
+    def _iter_vector_identity_batches(
+        self,
+        model_name: str,
+        dim: int,
+    ) -> Iterable[list[sqlite3.Row]]:
+        """Yield candidate rows without embeddings for incremental diffs.
+
+        The projection deliberately omits ``v.embedding`` so a diff can
+        enumerate the whole namespace without reading vector payloads.
+        """
+        last_storage_key: str | None = None
+        while True:
+            with self._access.read_lock():
+                conn = self._access.connection()
+                clauses = ["v.encoder_namespace = ?", "v.dim = ?"]
+                parameters: list[object] = [model_name, dim]
+                if last_storage_key is not None:
+                    clauses.append("r.storage_key > ?")
+                    parameters.append(last_storage_key)
+                parameters.append(_VECTOR_IDENTITY_BATCH_LIMIT)
+                rows = conn.execute(
+                    f"""
+                    SELECT r.storage_key, r.workspace_id, r.source_kind, r.source_id,
+                           r.status, r.metadata, r.uri, v.revision
+                    FROM local_records r
+                    JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY r.storage_key
+                    LIMIT ?
+                    """,
+                    parameters,
+                ).fetchall()
+            if not rows:
+                return
+            yield rows
+            last_storage_key = rows[-1]["storage_key"]
+
+    def _iter_vector_embedding_batches(
+        self,
+        model_name: str,
+        dim: int,
+        storage_keys: Sequence[str],
+    ) -> Iterable[list[sqlite3.Row]]:
+        """Yield embeddings for the requested keys in bounded chunks."""
+        chunk_limit = min(DEFAULT_KEY_CHUNK_LIMIT, self._vector_batch_limit(dim))
+        for key_chunk in iter_ordered_key_chunks(storage_keys, limit=chunk_limit):
+            placeholders = ",".join("?" for _ in key_chunk)
+            with self._access.read_lock():
+                conn = self._access.connection()
+                rows = conn.execute(
+                    f"""
+                    SELECT storage_key, embedding
+                    FROM local_vectors_v2
+                    WHERE encoder_namespace = ? AND dim = ?
+                      AND storage_key IN ({placeholders})
+                    ORDER BY storage_key
+                    """,
+                    (model_name, dim, *key_chunk),
+                ).fetchall()
+            if rows:
+                yield rows
 
 
 class _KeywordEngine:
@@ -2973,6 +3036,27 @@ class LocalRecordBackend:
     ) -> Iterable[list[sqlite3.Row]]:
         """Yield bounded vector rows for streamed optional-index builds."""
         return self._vector_snapshot_engine._iter_vector_batches(model_name, dim)
+
+    def iter_vector_identity_batches(
+        self,
+        model_name: str,
+        dim: int,
+    ) -> Iterable[list[sqlite3.Row]]:
+        """Yield candidate rows without embeddings for incremental diffs."""
+        return self._vector_snapshot_engine._iter_vector_identity_batches(
+            model_name, dim
+        )
+
+    def iter_vector_embedding_batches(
+        self,
+        model_name: str,
+        dim: int,
+        storage_keys: Sequence[str],
+    ) -> Iterable[list[sqlite3.Row]]:
+        """Yield embeddings for the requested keys in bounded chunks."""
+        return self._vector_snapshot_engine._iter_vector_embedding_batches(
+            model_name, dim, storage_keys
+        )
 
     def hydrate_record(
         self,

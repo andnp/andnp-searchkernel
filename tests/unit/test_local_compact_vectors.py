@@ -1065,6 +1065,7 @@ def test_public_vector_batches_preserve_bounds_order_and_required_rows() -> None
         "metadata",
         "uri",
         "embedding",
+        "revision",
         "format_version",
         "normalization_policy",
     }
