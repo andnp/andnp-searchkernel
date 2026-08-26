@@ -559,17 +559,24 @@ class FAISSLocalVectorStore:
         if total == 0:
             return []
         exact = self.search_strategy == "exact"
+        # Tombstoned vectors stay resident in the index and are discarded
+        # after the search, so every budget counts residency, not live keys.
+        resident = int(state.index.ntotal)
+        tombstones = max(0, resident - total)
         candidate_budget = (
-            total if exact else min(total, self.configuration.max_scan_candidates)
+            resident
+            if exact
+            else min(resident, self.configuration.max_scan_candidates)
         )
         scan = (
-            min(k, total)
+            min(k + tombstones, candidate_budget)
             if exact and not filters
-            else total
+            else candidate_budget
             if exact
             else min(
                 candidate_budget,
-                max(k, int(np.ceil(k * self.configuration.overfetch_multiplier))),
+                max(k, int(np.ceil(k * self.configuration.overfetch_multiplier)))
+                + tombstones,
             )
         )
         self._last_search_diagnostics.update(
