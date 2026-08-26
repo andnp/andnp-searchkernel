@@ -1190,7 +1190,7 @@ class _VectorEngine:
                     clauses.append(candidate_clause)
                     parameters.append(candidate_parameter)
                 if last_storage_key is not None:
-                    clauses.append("r.storage_key > ?")
+                    clauses.append("v.storage_key > ?")
                     parameters.append(last_storage_key)
                 parameters.append(batch_limit)
                 rows = conn.execute(
@@ -1201,7 +1201,7 @@ class _VectorEngine:
                     FROM local_records r
                     JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
                     WHERE {' AND '.join(clauses)}
-                    ORDER BY r.storage_key
+                    ORDER BY v.storage_key
                     LIMIT ?
                     """,
                     parameters,
@@ -1263,7 +1263,7 @@ class _VectorEngine:
                         FROM local_records r
                         JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
                         WHERE v.encoder_namespace = ? AND v.dim = ?
-                        ORDER BY r.storage_key
+                        ORDER BY v.storage_key
                         LIMIT ?
                         """,
                         (model_name, dim, batch_limit),
@@ -1277,8 +1277,8 @@ class _VectorEngine:
                         FROM local_records r
                         JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
                         WHERE v.encoder_namespace = ? AND v.dim = ?
-                          AND r.storage_key > ?
-                        ORDER BY r.storage_key
+                          AND v.storage_key > ?
+                        ORDER BY v.storage_key
                         LIMIT ?
                         """,
                         (model_name, dim, last_storage_key, batch_limit),
@@ -1305,7 +1305,7 @@ class _VectorEngine:
                 clauses = ["v.encoder_namespace = ?", "v.dim = ?"]
                 parameters: list[object] = [model_name, dim]
                 if last_storage_key is not None:
-                    clauses.append("r.storage_key > ?")
+                    clauses.append("v.storage_key > ?")
                     parameters.append(last_storage_key)
                 parameters.append(_VECTOR_IDENTITY_BATCH_LIMIT)
                 rows = conn.execute(
@@ -1315,7 +1315,7 @@ class _VectorEngine:
                     FROM local_records r
                     JOIN local_vectors_v2 v ON v.storage_key = r.storage_key
                     WHERE {' AND '.join(clauses)}
-                    ORDER BY r.storage_key
+                    ORDER BY v.storage_key
                     LIMIT ?
                     """,
                     parameters,
