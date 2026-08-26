@@ -315,3 +315,56 @@ def test_faiss_persistence_round_trip_preserves_search_results(tmp_path: Path) -
     assert [hit.source_id for hit in restored_hits] == [hit.source_id for hit in first_hits]
     assert [hit.score for hit in restored_hits] == [hit.score for hit in first_hits]
     assert [hit.source_id for hit in filtered_hits] == ["first"]
+
+
+class _EmbeddingReadCountingBackend(LocalRecordBackend):
+    """Count the stored embeddings a FAISS state refresh actually reads."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.embeddings_read = 0
+
+    def iter_vector_batches(self, model_name: str, dim: int):  # type: ignore[no-untyped-def]
+        for rows in super().iter_vector_batches(model_name, dim):
+            self.embeddings_read += len(rows)
+            yield rows
+
+    def iter_vector_embedding_batches(  # type: ignore[no-untyped-def]
+        self, model_name: str, dim: int, storage_keys
+    ):
+        for rows in super().iter_vector_embedding_batches(
+            model_name, dim, storage_keys
+        ):
+            self.embeddings_read += len(rows)
+            yield rows
+
+
+def test_a_single_new_vector_does_not_reread_the_whole_corpus(
+    tmp_path: Path,
+) -> None:
+    """Refreshing a stale FAISS state costs the change, not the corpus.
+
+    Re-adding every vector on each advanced vector epoch is the dominant query
+    cost on a continuously indexed corpus, so a one-record change must read a
+    bounded number of stored embeddings while returning rebuild-equal results.
+    """
+    backend = _EmbeddingReadCountingBackend(tmp_path / "records.db")
+    corpus = [
+        _record(f"seed-{index}", [1.0 - index / 100.0, index / 100.0])
+        for index in range(40)
+    ]
+    backend.upsert(corpus, "model", 2)
+    store = FAISSLocalVectorStore(backend, index_path=tmp_path / "index.faiss")
+    store.search([1.0, 0.0], 5, model_name="model", dim=2)
+    backend.upsert([_record("added", [0.0, 1.0])], "model", 2)
+    backend.embeddings_read = 0
+
+    hits = store.search([0.0, 1.0], 5, model_name="model", dim=2)
+
+    assert backend.embeddings_read == 1
+    expected = FAISSLocalVectorStore(backend).search(
+        [0.0, 1.0], 5, model_name="model", dim=2
+    )
+    assert [hit.storage_key for hit in hits] == [
+        hit.storage_key for hit in expected
+    ]
