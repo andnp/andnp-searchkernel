@@ -780,3 +780,27 @@ def test_a_failed_prune_leaves_persistence_and_search_intact(
     assert "cannot remove" in prune_error
     assert _persisted_generations(index_path) == 5
     _assert_matches_rebuild(hits, backend, [0.0, 1.0], 5)
+
+
+def test_flushing_a_state_loaded_from_disk_reports_success(tmp_path: Path) -> None:
+    """A restarted store can flush without republishing what it just loaded.
+
+    A loaded state keeps its metadata in the published sidecar rather than in
+    memory, so serialising it again would fail on the first absent entry and
+    report the flush as unsuccessful even though the artifact on disk already
+    matches.
+    """
+    clock = _ManualClock()
+    backend, _ = _seeded_debounce_store(tmp_path, clock)
+    index_path = tmp_path / "index.faiss"
+    published = _persisted_generations(index_path)
+
+    restarted = FAISSLocalVectorStore(
+        backend, index_path=index_path, clock=_ManualClock()
+    )
+    hits = restarted.search([1.0, 0.0], 3, model_name="model", dim=2)
+    assert restarted.last_search_diagnostics["persistence"] == "loaded"
+
+    assert restarted.flush_persistence() is True
+    assert _persisted_generations(index_path) == published
+    _assert_matches_rebuild(hits, backend, [1.0, 0.0], 3)

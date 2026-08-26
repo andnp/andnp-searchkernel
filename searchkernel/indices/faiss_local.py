@@ -508,7 +508,17 @@ class FAISSLocalVectorStore:
             return written
 
     def _write_state(self, key: tuple[str, int], state: _FAISSState) -> bool:
-        """Persist ``state`` and restart its debounce window."""
+        """Persist ``state`` and restart its debounce window.
+
+        A state still backed by a metadata sidecar came off disk and has not
+        been refreshed since, so the published generation already matches it.
+        Rewriting would republish identical bytes, and could not succeed
+        anyway: such a state keeps its metadata in the sidecar rather than in
+        memory, so serialising it would fail on the first absent entry.
+        """
+        if state.metadata_sidecar is not None:
+            self._persistence[key] = _PersistenceDebounce(last_write=self._clock())
+            return True
         written = self._persist_state(state)
         if written:
             self._persistence[key] = _PersistenceDebounce(last_write=self._clock())
