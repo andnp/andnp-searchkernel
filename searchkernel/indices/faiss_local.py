@@ -71,6 +71,14 @@ _PERSIST_INTERVAL_SECONDS = 300.0
 # would cost is finally worth more than the write.
 _PERSIST_PENDING_VECTORS = 25_000
 
+# How many published generations survive a prune, newest first. A generation
+# this process sees as unreachable may still be read by a peer process sharing
+# the directory, whose live states are invisible from here, so retention is
+# the only grace that peer gets: at three, a generation is deleted only after
+# two later publications, which the debounce window keeps minutes apart, while
+# the directory stays bounded at a small multiple of one artifact.
+_RETAINED_GENERATIONS = 3
+
 
 @dataclass(frozen=True, slots=True)
 class FAISSConfiguration:
@@ -1138,12 +1146,64 @@ class FAISSLocalVectorStore:
                 "metadata_offsets": offsets,
             }
             atomic_write_json(self._manifest_path(state.encoder_namespace, state.dim), manifest)
+            self._prune_generations(index_path, generation)
             return True
         except Exception as exc:  # noqa: BLE001 - optional persistence is best effort
             self._last_search_diagnostics["persistence_error"] = (
                 f"{type(exc).__name__}: {exc}"
             )
             return False
+
+    def _prune_generations(self, index_path: Path, generation: str) -> None:
+        """Delete generations superseded by the manifest just published.
+
+        A generation stays reachable while the manifest names it or a cached
+        state still reads its metadata sidecar by path; the sidecar is opened
+        lazily per search, so deleting one a cached state holds would fail
+        those searches. Everything else is retained by count, because peer
+        processes hold states this one cannot enumerate. Pruning is best
+        effort: a directory this process may not fully own must never break a
+        write or a query.
+        """
+        try:
+            live_sidecars = {
+                state.metadata_sidecar.path
+                for state in self._states.values()
+                if state.metadata_sidecar is not None
+            }
+            prefix = f"{index_path.stem}."
+            fingerprint = self.configuration.build_fingerprint[:16]
+            published: list[tuple[int, Path, Path]] = []
+            for candidate in index_path.parent.glob(f"{prefix}*.faiss"):
+                parts = candidate.name[len(prefix) : -len(".faiss")].split("-")
+                if (
+                    len(parts) != 3
+                    or not parts[0].isdigit()
+                    or parts[1] != fingerprint
+                    or not parts[2].isdigit()
+                ):
+                    # Written by another build fingerprint, so another store
+                    # owns it and may still be publishing against it.
+                    continue
+                published.append(
+                    (int(parts[2]), candidate, candidate.with_suffix(".jsonl"))
+                )
+            published.sort(reverse=True)
+            current = f"{prefix}{generation}.faiss"
+            for _, superseded_index, superseded_metadata in published[
+                _RETAINED_GENERATIONS:
+            ]:
+                if (
+                    superseded_index.name == current
+                    or superseded_metadata in live_sidecars
+                ):
+                    continue
+                superseded_index.unlink(missing_ok=True)
+                superseded_metadata.unlink(missing_ok=True)
+        except Exception as exc:  # noqa: BLE001 - optional pruning is best effort
+            self._last_search_diagnostics["prune_error"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
 
     def _load_state(
         self,

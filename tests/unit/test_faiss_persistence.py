@@ -651,3 +651,132 @@ def test_a_store_with_no_persisted_artifact_rebuilds(tmp_path: Path) -> None:
 
     assert restarted.last_search_diagnostics["persistence"] == "rebuilt"
     _assert_matches_rebuild(hits, backend, [1.0, 0.0], 5)
+
+
+def _publish_generations(
+    backend: LocalRecordBackend,
+    store: FAISSLocalVectorStore,
+    clock: _ManualClock,
+    count: int,
+) -> None:
+    """Publish ``count`` further generations, one per elapsed window."""
+    for index in range(count):
+        _add_vector(backend, index)
+        clock.advance(faiss_local._PERSIST_INTERVAL_SECONDS)
+        store.search([0.0, 1.0], 3, model_name="model", dim=2)
+        assert store.last_search_diagnostics["persistence_written"] is True
+
+
+def test_repeated_publications_bound_the_generations_on_disk(
+    tmp_path: Path,
+) -> None:
+    """Publishing must not accumulate a superseded artifact per write.
+
+    Every write serialises the whole index and its sidecar, so a store that
+    never removes superseded generations fills the state directory in
+    proportion to how often it indexes rather than how much it holds.
+    """
+    clock = _ManualClock()
+    index_path = tmp_path / "index.faiss"
+    backend, store = _seeded_debounce_store(tmp_path, clock)
+
+    _publish_generations(backend, store, clock, 6)
+
+    assert _persisted_generations(index_path) == faiss_local._RETAINED_GENERATIONS
+    assert len(list(tmp_path.glob("index.*.jsonl"))) == (
+        faiss_local._RETAINED_GENERATIONS
+    )
+
+
+def test_a_pruned_directory_still_loads_its_published_generation(
+    tmp_path: Path,
+) -> None:
+    """The generation the manifest names must survive every prune.
+
+    Deleting it would silently cost a full rebuild on the next start, which
+    is the expense the persisted artifact exists to avoid.
+    """
+    clock = _ManualClock()
+    index_path = tmp_path / "index.faiss"
+    backend, store = _seeded_debounce_store(tmp_path, clock)
+    _publish_generations(backend, store, clock, 6)
+
+    manifest = json.loads(
+        index_path.with_suffix(".manifest.json").read_text(encoding="utf-8")
+    )
+    restarted = FAISSLocalVectorStore(backend, index_path=index_path, clock=clock)
+    hits = restarted.search([0.0, 1.0], 5, model_name="model", dim=2)
+
+    assert index_path.with_name(manifest["index_file"]).is_file()
+    assert index_path.with_name(manifest["metadata_file"]).is_file()
+    assert restarted.last_search_diagnostics["persistence"] == "loaded"
+    _assert_matches_rebuild(hits, backend, [0.0, 1.0], 5)
+
+
+def test_a_generation_a_cached_state_reads_is_never_pruned(
+    tmp_path: Path,
+) -> None:
+    """Keep the sidecar a cached state resolves metadata through.
+
+    A loaded state reads its metadata sidecar by path, lazily, per filtered
+    search. Pruning the generation it names would strand that state on a
+    missing file and drop every filtered search to the exact fallback.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert(
+        [
+            _record("kept", [1.0, 0.0], metadata={"project": "keep"}),
+            _record("other", [0.0, 1.0], metadata={"project": "skip"}),
+        ],
+        "cached",
+        2,
+    )
+    backend.upsert([_record("elsewhere", [1.0, 0.0])], "publisher", 2)
+    index_path = tmp_path / "index.faiss"
+    FAISSLocalVectorStore(backend, index_path=index_path).search(
+        [1.0, 0.0], 2, model_name="cached", dim=2
+    )
+
+    store = FAISSLocalVectorStore(backend, index_path=index_path)
+    store.search([1.0, 0.0], 2, model_name="cached", dim=2)
+    assert store.last_search_diagnostics["persistence"] == "loaded"
+    store.search([1.0, 0.0], 1, model_name="publisher", dim=2)
+    for _ in range(faiss_local._RETAINED_GENERATIONS + 1):
+        store.flush_persistence()
+
+    hits = store.search(
+        [1.0, 0.0],
+        2,
+        model_name="cached",
+        dim=2,
+        filters={"metadata_equals": {"project": "keep"}},
+    )
+
+    assert [hit.source_id for hit in hits] == ["kept"]
+    assert store.last_search_diagnostics["fallback"] is False
+
+
+def test_a_failed_prune_leaves_persistence_and_search_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory this process cannot fully control must stay searchable.
+
+    Two processes share the state directory, so an unlink can fail on a
+    permission or a race. Reclaiming disk is never worth failing a write or
+    a query for.
+    """
+    def refuse_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError(f"cannot remove {self}")
+
+    monkeypatch.setattr(Path, "unlink", refuse_unlink)
+    clock = _ManualClock()
+    index_path = tmp_path / "index.faiss"
+    backend, store = _seeded_debounce_store(tmp_path, clock)
+
+    _publish_generations(backend, store, clock, 4)
+    prune_error = store.last_search_diagnostics["prune_error"]
+    hits = store.search([0.0, 1.0], 5, model_name="model", dim=2)
+
+    assert "cannot remove" in prune_error
+    assert _persisted_generations(index_path) == 5
+    _assert_matches_rebuild(hits, backend, [0.0, 1.0], 5)
