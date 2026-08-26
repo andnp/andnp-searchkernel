@@ -1,13 +1,14 @@
 """Incremental FAISS state updates must match a full rebuild exactly."""
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from searchkernel.domain import Record, RecordStatus
+from searchkernel.domain import Record, RecordHit, RecordStatus
 from searchkernel.indices import FAISSLocalVectorStore, LocalRecordBackend
 
 DIM = 16
@@ -77,6 +78,23 @@ def _rebuilt_hits(
     return [(hit.storage_key, hit.score) for hit in hits]
 
 
+def _assert_matches_rebuild(
+    hits: Sequence[RecordHit], expected: list[tuple[str, float]]
+) -> None:
+    """Assert a refreshed search agrees with a from-scratch build.
+
+    Keys and their order must match exactly. Scores are compared to float32
+    precision rather than bit for bit: a refreshed index adds vectors in a
+    different order than a rebuild, and floating point accumulation is order
+    dependent, so an inner product can differ in its final unit in the last
+    place.
+    """
+    assert [hit.storage_key for hit in hits] == [key for key, _ in expected]
+    assert [hit.score for hit in hits] == pytest.approx(
+        [score for _, score in expected], rel=1e-6
+    )
+
+
 @pytest.mark.parametrize("strategy", ["exact", "approximate"])
 def test_added_vectors_match_a_full_rebuild(tmp_path: Path, strategy: str) -> None:
     """New vectors reach search results without re-adding the whole corpus."""
@@ -96,9 +114,7 @@ def test_added_vectors_match_a_full_rebuild(tmp_path: Path, strategy: str) -> No
     assert store.last_search_diagnostics["persistence"] == "updated"
     assert store.last_search_diagnostics["incremental_added"] == 5
     assert store.last_search_diagnostics["incremental_replaced"] == 0
-    assert [(hit.storage_key, hit.score) for hit in hits] == _rebuilt_hits(
-        backend, strategy, query, 8
-    )
+    _assert_matches_rebuild(hits, _rebuilt_hits(backend, strategy, query, 8))
 
 
 @pytest.mark.parametrize("strategy", ["exact", "approximate"])
@@ -118,9 +134,7 @@ def test_changed_vectors_match_a_full_rebuild(tmp_path: Path, strategy: str) -> 
 
     hits = store.search(query, 8, model_name="model", dim=DIM)
 
-    assert [(hit.storage_key, hit.score) for hit in hits] == _rebuilt_hits(
-        backend, strategy, query, 8
-    )
+    _assert_matches_rebuild(hits, _rebuilt_hits(backend, strategy, query, 8))
     assert len({hit.storage_key for hit in hits}) == len(hits)
 
 
@@ -138,9 +152,7 @@ def test_removed_vectors_match_a_full_rebuild(tmp_path: Path, strategy: str) -> 
     assert store.last_search_diagnostics["persistence"] == "updated"
     assert store.last_search_diagnostics["incremental_tombstoned"] == 4
     assert not {hit.storage_key for hit in hits} & set(removed)
-    assert [(hit.storage_key, hit.score) for hit in hits] == _rebuilt_hits(
-        backend, strategy, list(query), 8
-    )
+    _assert_matches_rebuild(hits, _rebuilt_hits(backend, strategy, list(query), 8))
 
 
 @pytest.mark.parametrize("strategy", ["exact", "approximate"])
@@ -169,9 +181,7 @@ def test_combined_changes_match_a_full_rebuild(tmp_path: Path, strategy: str) ->
 
     hits = store.search(query, 10, model_name="model", dim=DIM)
 
-    assert [(hit.storage_key, hit.score) for hit in hits] == _rebuilt_hits(
-        backend, strategy, query, 10
-    )
+    _assert_matches_rebuild(hits, _rebuilt_hits(backend, strategy, query, 10))
 
 
 @pytest.mark.parametrize("strategy", ["exact", "approximate"])
@@ -197,9 +207,7 @@ def test_deleted_key_reindexed_with_new_text_is_not_duplicated(
 
     assert hits[0].storage_key == revived.storage_key
     assert len({hit.storage_key for hit in hits}) == len(hits)
-    assert [(hit.storage_key, hit.score) for hit in hits] == _rebuilt_hits(
-        backend, strategy, new_embedding, 8
-    )
+    _assert_matches_rebuild(hits, _rebuilt_hits(backend, strategy, new_embedding, 8))
 
 
 def test_changed_vector_forces_a_rebuild_for_the_approximate_index(
@@ -237,9 +245,7 @@ def test_accumulated_tombstones_trigger_a_compacting_rebuild(
     hits = store.search(query, 5, model_name="model", dim=DIM)
 
     assert store.last_search_diagnostics["persistence"] == "rebuilt"
-    assert [(hit.storage_key, hit.score) for hit in hits] == _rebuilt_hits(
-        backend, "approximate", query, 5
-    )
+    _assert_matches_rebuild(hits, _rebuilt_hits(backend, "approximate", query, 5))
 
 
 def test_persisted_state_supports_a_later_incremental_diff(tmp_path: Path) -> None:
@@ -261,9 +267,7 @@ def test_persisted_state_supports_a_later_incremental_diff(tmp_path: Path) -> No
 
     assert restarted.last_search_diagnostics["persistence"] == "updated"
     assert restarted.last_search_diagnostics["incremental_added"] == 1
-    assert [(hit.storage_key, hit.score) for hit in hits] == _rebuilt_hits(
-        backend, "exact", query, 8
-    )
+    _assert_matches_rebuild(hits, _rebuilt_hits(backend, "exact", query, 8))
 
 
 def test_manifest_without_a_state_version_is_rejected_into_a_rebuild(
@@ -288,9 +292,7 @@ def test_manifest_without_a_state_version_is_rejected_into_a_rebuild(
     hits = restarted.search(query, 5, model_name="model", dim=DIM)
 
     assert restarted.last_search_diagnostics["persistence"] == "rebuilt"
-    assert [(hit.storage_key, hit.score) for hit in hits] == _rebuilt_hits(
-        backend, "exact", query, 5
-    )
+    _assert_matches_rebuild(hits, _rebuilt_hits(backend, "exact", query, 5))
 
 
 def test_tombstones_ahead_of_the_top_hit_do_not_shrink_recall(
