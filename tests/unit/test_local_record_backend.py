@@ -145,6 +145,25 @@ def test_local_keyword_searches_indexed_text_hydrates_raw_body(tmp_path) -> None
     assert hydrated.indexed_text == "search-only vocabulary"
 
 
+def test_keyword_query_with_unquotable_identifier_token_still_searches(
+    tmp_path,
+) -> None:
+    """A path-shaped fragment that sanitizes away must not break the search.
+
+    "hello ./" reads as an identifier query whose only embedded token is a
+    bare "/", which sanitizes to nothing. Narrowing the match to those tokens
+    then leaves an empty FTS5 MATCH and the whole search raises rather than
+    falling back to the query the user actually typed.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.index([_record("note", "greeting", "hello world")])
+
+    assert [hit.source_id for hit in backend.search_keyword("hello ./", 10)] == [
+        "greeting"
+    ]
+    assert backend.search_keyword("the / thing", 10) == []
+
+
 def test_repeated_canonical_sync_preserves_results_without_keyword_epoch_changes(
     tmp_path,
 ) -> None:
