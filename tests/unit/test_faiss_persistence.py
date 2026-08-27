@@ -1,4 +1,6 @@
 import json
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -853,3 +855,156 @@ def test_a_stale_split_generation_does_not_read_the_legacy_artifact(
     assert index_path.with_suffix(".json") not in read_paths
     assert store.last_search_diagnostics["persistence"] == "updated"
     assert [hit.source_id for hit in hits] == ["two", "one"]
+
+
+class _ManualWriter:
+    """A persistence scheduler whose queued writes the test runs explicitly.
+
+    Publication is what the query path must no longer perform, so the tests
+    that prove it hold the writes rather than race a real thread.
+    """
+
+    def __init__(self) -> None:
+        self.queued: list[Callable[[], None]] = []
+
+    def __call__(self, work: Callable[[], None]) -> None:
+        self.queued.append(work)
+
+    def run(self) -> None:
+        while self.queued:
+            self.queued.pop(0)()
+
+
+def _handed_off_store(
+    tmp_path: Path, clock: _ManualClock, writer: _ManualWriter
+) -> tuple[LocalRecordBackend, FAISSLocalVectorStore]:
+    """Return a store, loaded from a published generation, that queues writes."""
+    backend, _ = _seeded_debounce_store(tmp_path, clock)
+    store = FAISSLocalVectorStore(
+        backend,
+        index_path=tmp_path / "index.faiss",
+        clock=clock,
+        persist_scheduler=writer,
+    )
+    store.search([1.0, 0.0], 3, model_name="model", dim=2)
+    assert store.last_search_diagnostics["persistence"] == "loaded"
+    return backend, store
+
+
+def test_a_query_that_trips_the_window_only_hands_off_the_write(
+    tmp_path: Path,
+) -> None:
+    """A query must never serialise or write the artifact itself.
+
+    Every publication rewrites the whole index and its metadata, which takes
+    seconds on a production corpus. A query that happens to spend the debounce
+    window must hand the snapshot over and return, not pay for the write.
+    """
+    clock = _ManualClock()
+    writer = _ManualWriter()
+    index_path = tmp_path / "index.faiss"
+    backend, store = _handed_off_store(tmp_path, clock, writer)
+    _add_vector(backend, 0)
+    clock.advance(faiss_local._PERSIST_INTERVAL_SECONDS)
+
+    hits = store.search([0.0, 1.0], 5, model_name="model", dim=2)
+
+    assert store.last_search_diagnostics["persistence_written"] is True
+    assert _persisted_generations(index_path) == 1
+    _assert_matches_rebuild(hits, backend, [0.0, 1.0], 5)
+    writer.run()
+    assert _persisted_generations(index_path) == 2
+
+
+def test_overlapping_publishes_publish_only_the_newest_generation(
+    tmp_path: Path,
+) -> None:
+    """A superseded snapshot must never reach disk, nor land after its successor.
+
+    A generation is a whole snapshot, so publishing an intermediate one buys
+    nothing, and a refresh rewrites the resident index in place: the snapshot
+    it replaced no longer describes those bytes and could not be published
+    truthfully even if it were wanted.
+    """
+    clock = _ManualClock()
+    writer = _ManualWriter()
+    index_path = tmp_path / "index.faiss"
+    backend, store = _handed_off_store(tmp_path, clock, writer)
+    for index in range(2):
+        _add_vector(backend, index)
+        clock.advance(faiss_local._PERSIST_INTERVAL_SECONDS)
+        store.search([0.0, 1.0], 5, model_name="model", dim=2)
+        assert store.last_search_diagnostics["persistence_written"] is True
+
+    writer.run()
+
+    assert _persisted_generations(index_path) == 2
+    restarted = FAISSLocalVectorStore(backend, index_path=index_path, clock=clock)
+    hits = restarted.search([0.0, 1.0], 10, model_name="model", dim=2)
+    assert restarted.last_search_diagnostics["persistence"] == "loaded"
+    assert {"added-0", "added-1"} <= {hit.source_id for hit in hits}
+    _assert_matches_rebuild(hits, backend, [0.0, 1.0], 10)
+
+
+def test_flush_persistence_waits_for_an_unfinished_write(tmp_path: Path) -> None:
+    """Flush is a barrier, not another request to write.
+
+    A caller flushes because it knows it is shutting down, so a flush that
+    only scheduled the write would let the process exit with nothing
+    published and cost the rebuild the artifact exists to avoid.
+    """
+    clock = _ManualClock()
+    writer = _ManualWriter()
+    index_path = tmp_path / "index.faiss"
+    backend, store = _handed_off_store(tmp_path, clock, writer)
+    _add_vector(backend, 0)
+    clock.advance(faiss_local._PERSIST_INTERVAL_SECONDS)
+    store.search([0.0, 1.0], 5, model_name="model", dim=2)
+    assert _persisted_generations(index_path) == 1
+
+    published_when_flush_returned: list[int] = []
+
+    def flush() -> None:
+        assert store.flush_persistence() is True
+        published_when_flush_returned.append(_persisted_generations(index_path))
+
+    barrier = threading.Thread(target=flush)
+    barrier.start()
+    writer.run()
+    barrier.join()
+
+    assert published_when_flush_returned == [2]
+
+
+def test_a_failed_background_write_is_recorded_and_never_fails_a_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that fails off the query path must still be visible, and harmless.
+
+    The artifact is a rebuildable cache, so a failed publication costs a
+    rebuild on the next start; it must be reported rather than raised into a
+    query that has already been answered.
+    """
+    clock = _ManualClock()
+    writer = _ManualWriter()
+    index_path = tmp_path / "index.faiss"
+    backend, store = _handed_off_store(tmp_path, clock, writer)
+    _add_vector(backend, 0)
+    clock.advance(faiss_local._PERSIST_INTERVAL_SECONDS)
+    store.search([0.0, 1.0], 5, model_name="model", dim=2)
+
+    def refuse_index_write(*args: object, **kwargs: object) -> None:
+        raise OSError("state directory is read-only")
+
+    monkeypatch.setattr(
+        "searchkernel.indices.faiss_local.atomic_write_binary", refuse_index_write
+    )
+    writer.run()
+
+    hits = store.search([0.0, 1.0], 5, model_name="model", dim=2)
+
+    diagnostics = store.last_search_diagnostics
+    assert "state directory is read-only" in diagnostics["persistence_error"]
+    assert diagnostics["fallback"] is False
+    assert _persisted_generations(index_path) == 1
+    _assert_matches_rebuild(hits, backend, [0.0, 1.0], 5)
