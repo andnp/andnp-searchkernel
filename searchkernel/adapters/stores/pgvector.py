@@ -1158,6 +1158,14 @@ class PGVectorStore:
         The records and vector rows commit together, while the existing
         keyword projection remains owned by :meth:`PGKeywordStore.index`.
 
+        Inserting a row seeds ``tsvector_body`` with an unweighted fallback so
+        a vector-only write is still lexically findable, but updating a row
+        never rewrites it: this store's fallback is strictly weaker than the
+        weighted projection the keyword store builds, so overwriting it would
+        downgrade the row. Editing ``title``/``body``/``indexed_text`` through
+        this method alone therefore leaves the projection matching the previous
+        text until :meth:`PGKeywordStore.index` runs for the same records.
+
         Args:
             records: Records with embedding set
             model_name: Embedding model name
@@ -1228,6 +1236,7 @@ class PGVectorStore:
                     title = EXCLUDED.title,
                     body = EXCLUDED.body,
                     indexed_text = EXCLUDED.indexed_text,
+                    -- Keep the keyword-owned projection; see upsert.__doc__.
                     tsvector_body = records.tsvector_body,
                     created_at = EXCLUDED.created_at,
                     updated_at = EXCLUDED.updated_at,
