@@ -2665,8 +2665,12 @@ class _LocalMutationCoordinator:
                         or existing["normalization_policy"] != NORMALIZATION_POLICY
                     )
                 ]
-                vector_affected = bool(changed_vectors)
-                _, keyword_changed = self._record_writer._write_records(conn, rows)
+                record_changed, keyword_changed = self._record_writer._write_records(
+                    conn, rows
+                )
+                # Every row written here owns a vector, so a changed stored row
+                # makes vector-lane snapshots stale even when the embedding is not.
+                vector_affected = bool(changed_vectors) or record_changed
                 conn.executemany(
                     """
                     INSERT INTO local_vectors_v2 (
