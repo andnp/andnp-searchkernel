@@ -161,6 +161,21 @@ class FAISSConfiguration:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+# Every record column a ``_CandidateMetadata`` is derived from. A refresh
+# recognises an unchanged record by digesting exactly these, so the tuple has
+# to stay in step with the dataclass below: a column present there and absent
+# here would let an edit to it pass unnoticed and leave search filtering on a
+# stale candidate.
+_CANDIDATE_METADATA_COLUMNS = (
+    "source_id",
+    "workspace_id",
+    "source_kind",
+    "status",
+    "metadata",
+    "uri",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class _CandidateMetadata:
     source_id: str
@@ -222,6 +237,11 @@ class _FAISSState:
     storage_keys: tuple[str, ...]
     id_to_storage_key: dict[int, str]
     candidate_metadata: dict[str, _CandidateMetadata]
+    # Digest of the record columns behind every in-memory candidate, so the
+    # next refresh can carry the candidate forward instead of rebuilding it.
+    # Empty for a state read back from disk, whose candidates come from the
+    # persisted sidecar rather than from record rows.
+    candidate_fingerprints: dict[str, bytes] = field(default_factory=dict)
     metadata_sidecar: _CandidateMetadataSidecar | None = None
     active_ids: frozenset[int] | None = None
     # Revision of the vector resident in the FAISS index for every resident
@@ -621,6 +641,28 @@ class FAISSLocalVectorStore:
         ) & ((1 << 63) - 1)
         return value or 1
 
+    @staticmethod
+    def _metadata_fingerprint(row: Any) -> bytes:
+        """Digest the record columns one ``_CandidateMetadata`` is built from.
+
+        Digesting the raw metadata text rather than its parsed value is what
+        keeps a refresh off the JSON parser; a re-serialisation that means the
+        same thing merely costs one rebuilt candidate. Each column is fed with
+        its length and a presence marker so no concatenation of two columns
+        can collide with a different split of the same bytes.
+        """
+        digest = hashlib.blake2b(digest_size=16)
+        for column in _CANDIDATE_METADATA_COLUMNS:
+            value = row[column]
+            if value is None:
+                digest.update(b"\x00")
+                continue
+            encoded = str(value).encode("utf-8")
+            digest.update(b"\x01")
+            digest.update(len(encoded).to_bytes(8, "little"))
+            digest.update(encoded)
+        return digest.digest()
+
     def _build_state(
         self,
         model_name: str,
@@ -643,6 +685,7 @@ class FAISSLocalVectorStore:
         storage_keys: list[str] = []
         id_to_storage_key: dict[int, str] = {}
         candidate_metadata: dict[str, _CandidateMetadata] = {}
+        candidate_fingerprints: dict[str, bytes] = {}
         index_revisions: dict[int, str] | None = {}
         for rows in self._backend.iter_vector_batches(model_name, dim):
             vectors = [
@@ -672,19 +715,17 @@ class FAISSLocalVectorStore:
                         index_revisions = None
                         break
                     index_revisions[faiss_id] = str(revision)
-            candidate_metadata.update(
-                {
-                    row["storage_key"]: _CandidateMetadata(
-                        source_id=row["source_id"],
-                        workspace_id=row["workspace_id"],
-                        source_kind=row["source_kind"],
-                        status=row["status"],
-                        metadata=dict(metadata_mapping(row["metadata"])),
-                        uri=row["uri"],
-                    )
-                    for row in rows
-                }
-            )
+            for row in rows:
+                storage_key = row["storage_key"]
+                candidate_fingerprints[storage_key] = self._metadata_fingerprint(row)
+                candidate_metadata[storage_key] = _CandidateMetadata(
+                    source_id=row["source_id"],
+                    workspace_id=row["workspace_id"],
+                    source_kind=row["source_kind"],
+                    status=row["status"],
+                    metadata=dict(metadata_mapping(row["metadata"])),
+                    uri=row["uri"],
+                )
         return _FAISSState(
             index=index,
             encoder_namespace=model_name,
@@ -694,6 +735,7 @@ class FAISSLocalVectorStore:
             storage_keys=tuple(storage_keys),
             id_to_storage_key=id_to_storage_key,
             candidate_metadata=candidate_metadata,
+            candidate_fingerprints=candidate_fingerprints,
             active_ids=frozenset(
                 faiss_id
                 for faiss_id, storage_key in zip(
@@ -723,6 +765,7 @@ class FAISSLocalVectorStore:
         ids: list[int] = []
         storage_keys: list[str] = []
         candidate_metadata: dict[str, _CandidateMetadata] = {}
+        candidate_fingerprints: dict[str, bytes] = {}
         live_revisions: dict[int, str] = {}
         pending: list[str] = []
         replaced: list[int] = []
@@ -738,14 +781,28 @@ class FAISSLocalVectorStore:
                 ids.append(faiss_id)
                 storage_keys.append(storage_key)
                 live_revisions[faiss_id] = str(revision)
-                candidate_metadata[storage_key] = _CandidateMetadata(
-                    source_id=row["source_id"],
-                    workspace_id=row["workspace_id"],
-                    source_kind=row["source_kind"],
-                    status=row["status"],
-                    metadata=dict(metadata_mapping(row["metadata"])),
-                    uri=row["uri"],
-                )
+                # The revision covers only the embedding inputs, so a record
+                # whose metadata changed alone would keep a stale candidate if
+                # the diff trusted it. The fingerprint covers the rest, which
+                # is what lets an unchanged candidate be carried forward
+                # instead of re-parsed.
+                fingerprint = self._metadata_fingerprint(row)
+                candidate_fingerprints[storage_key] = fingerprint
+                unchanged = base.candidate_metadata.get(storage_key)
+                if (
+                    unchanged is not None
+                    and base.candidate_fingerprints.get(storage_key) == fingerprint
+                ):
+                    candidate_metadata[storage_key] = unchanged
+                else:
+                    candidate_metadata[storage_key] = _CandidateMetadata(
+                        source_id=row["source_id"],
+                        workspace_id=row["workspace_id"],
+                        source_kind=row["source_kind"],
+                        status=row["status"],
+                        metadata=dict(metadata_mapping(row["metadata"])),
+                        uri=row["uri"],
+                    )
                 resident_revision = resident.get(faiss_id)
                 if resident_revision is None:
                     pending.append(storage_key)
@@ -814,6 +871,7 @@ class FAISSLocalVectorStore:
             storage_keys=tuple(storage_keys),
             id_to_storage_key=dict(zip(ids, storage_keys, strict=True)),
             candidate_metadata=candidate_metadata,
+            candidate_fingerprints=candidate_fingerprints,
             active_ids=frozenset(
                 faiss_id
                 for faiss_id, storage_key in zip(ids, storage_keys, strict=True)
