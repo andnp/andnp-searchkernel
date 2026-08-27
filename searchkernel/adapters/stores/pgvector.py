@@ -110,6 +110,22 @@ _ITERATIVE_SCAN_MODES = {"auto", "off", "strict_order", "relaxed_order"}
 _VECTOR_WRITE_BATCH_SIZE = 100
 _KEYWORD_WRITE_BATCH_SIZE = 100
 
+_WEIGHTED_TSVECTOR_SQL = """
+                setweight(to_tsvector('english', {title}), 'A') ||
+                setweight(to_tsvector('english', {body}), 'B') ||
+                setweight(to_tsvector('english', {rest}), 'D')
+            """
+
+
+def _keyword_projection_text(record: Record) -> tuple[str, str, str]:
+    """Return the title, body, and trailing text the projection weights."""
+    return (
+        record.title,
+        record.indexed_text or record.body,
+        " ".join((record.uri or "", json.dumps(record.metadata, sort_keys=True))),
+    )
+
+
 
 @dataclass(frozen=True, slots=True)
 class PGVectorFeatureSupport:
@@ -1773,23 +1789,11 @@ class PGKeywordStore:
 
             records = list({record.storage_key: record for record in records}.values())
             rows = [
-                (
-                    record.storage_key,
-                    record.title,
-                    record.indexed_text or record.body,
-                    " ".join(
-                        (record.uri or "", json.dumps(record.metadata, sort_keys=True))
-                    ),
-                )
+                (record.storage_key, *_keyword_projection_text(record))
                 for record in records
             ]
 
-            weighted_tsvector = """
-                setweight(to_tsvector('english', {title}), 'A') ||
-                setweight(to_tsvector('english', {body}), 'B') ||
-                setweight(to_tsvector('english', {rest}), 'D')
-            """
-            projection_sql = weighted_tsvector.format(
+            projection_sql = _WEIGHTED_TSVECTOR_SQL.format(
                 title="data.title", body="data.body", rest="data.rest"
             )
             update_sql = f"""
