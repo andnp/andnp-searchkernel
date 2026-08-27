@@ -1668,6 +1668,42 @@ class TestKeywordStore:
         assert keyword_store.keyword_epoch() == before
         assert keyword_store.search("missing", k=10) == []
 
+    def test_new_record_is_weighted_before_the_keyword_lane_lands(self, pg_conn):
+        """A record created after its keyword index still weights URI and metadata.
+
+        The ingestion lanes run concurrently, so the keyword index can be
+        issued before the semantic lane has created the row. That index
+        matches nothing, and no later index runs until the record changes
+        again, so the row born from the vector write is the only projection a
+        reader ever sees.
+        """
+        timestamp = datetime.now(UTC)
+        record = Record(
+            source_kind="test",
+            source_id="born-weighted",
+            title="borntitleterm",
+            body="bornbodyterm",
+            uri="docs/bornuripath",
+            metadata={"marker": "bornmetadataterm"},
+            created_at=timestamp,
+            updated_at=timestamp,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        keyword_store = PGKeywordStore(pg_conn)
+
+        keyword_store.index([record])
+        PGVectorStore(pg_conn).upsert([record], model_name="born-model", dim=4)
+
+        for term in (
+            "borntitleterm",
+            "bornbodyterm",
+            "docs/bornuripath",
+            "bornmetadataterm",
+        ):
+            assert [
+                hit.source_id for hit in keyword_store.search(term, 10)
+            ] == ["born-weighted"], term
+
 
 class TestGraphStore:
     """Tests for GraphStore port implementation."""
