@@ -1233,6 +1233,7 @@ def test_optional_faiss_recall_reload_and_corruption_fallback(tmp_path: Path) ->
         [1.0, 0.0], 2, model_name="model", dim=2
     )] == ["one", "two"]
     assert store.verify_recall([1.0, 0.0], 2, model_name="model", dim=2) == 1.0
+    assert store.flush_persistence() is True
 
     index_files = list((tmp_path / "faiss").glob("*.faiss"))
     assert len(index_files) == 1
@@ -1243,6 +1244,7 @@ def test_optional_faiss_recall_reload_and_corruption_fallback(tmp_path: Path) ->
     )[0].source_id == "one"
     assert fallback.last_search_diagnostics["fallback"] is False
     assert fallback.last_search_diagnostics["persistence"] == "rebuilt"
+    assert fallback.flush_persistence() is True
 
     reloaded = FAISSLocalVectorStore(backend, index_path=tmp_path / "faiss")
     assert [
@@ -1318,6 +1320,7 @@ def test_faiss_configuration_fingerprint_persists_hnsw_settings(
         hnsw_ef_search=73,
     )
     store.search([1.0, 0.0], 1, model_name="model", dim=2)
+    assert store.flush_persistence() is True
 
     metadata_path = next((tmp_path / "faiss").glob("*.manifest.json"))
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -1352,6 +1355,7 @@ def test_faiss_query_policy_reload_reuses_index_and_updates_diagnostics(
     index_path = tmp_path / "faiss"
     original = FAISSLocalVectorStore(backend, index_path=index_path)
     original.search([1.0, 0.0], 1, model_name="model", dim=2)
+    assert original.flush_persistence() is True
 
     reloaded = FAISSLocalVectorStore(
         backend,
@@ -1396,6 +1400,7 @@ def test_faiss_persistence_compacts_candidate_metadata_and_round_trips_filters(
     expected = original.search(
         [1.0, 0.0], 2, model_name="model", dim=2, filters=filters
     )
+    assert original.flush_persistence() is True
     metadata_path = next(index_path.glob("*.manifest.json"))
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 

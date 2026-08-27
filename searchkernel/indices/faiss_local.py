@@ -219,6 +219,16 @@ class _SidecarMetadataReader:
         )
 
 
+def _run_in_background(work: Callable[[], None]) -> None:
+    """Run ``work`` on a fresh worker thread.
+
+    The thread is not a daemon, so interpreter shutdown joins it instead of
+    tearing it down mid-artifact, and it exits as soon as the queue drains, so
+    a store that is not publishing holds no thread.
+    """
+    threading.Thread(target=work, name="faiss-persist", daemon=False).start()
+
+
 @dataclass(slots=True)
 class _PersistenceDebounce:
     """When one persisted artifact was last written, and what it is missing."""
@@ -275,6 +285,9 @@ class FAISSLocalVectorStore:
         max_scan_candidates: int = 100_000,
         configuration: FAISSConfiguration | None = None,
         clock: Callable[[], float] = time.monotonic,
+        persist_scheduler: Callable[[Callable[[], None]], None] = (
+            _run_in_background
+        ),
     ) -> None:
         self._backend = backend
         self._index_path = index_path
@@ -289,8 +302,25 @@ class FAISSLocalVectorStore:
         )
         self._clock = clock
         self._state_lock = threading.RLock()
+        # Held around every in-place index mutation and every serialisation of
+        # a resident index, and always acquired before ``_state_lock``.
+        self._index_lock = threading.RLock()
+        self._persist_scheduler = persist_scheduler
         self._states: dict[tuple[str, int], _FAISSState] = {}
         self._persistence: dict[tuple[str, int], _PersistenceDebounce] = {}
+        # Counts in-place mutations of the index resident under each key, so a
+        # queued snapshot can tell that the bytes it was going to serialise
+        # have moved on since it was queued.
+        self._index_mutations: dict[tuple[str, int], int] = {}
+        self._pending_writes: dict[tuple[str, int], _FAISSState] = {}
+        self._inflight_write: dict[tuple[str, int], _FAISSState] = {}
+        self._persisted_states: dict[tuple[str, int], _FAISSState] = {}
+        self._writer_active = False
+        self._writer_idle = threading.Event()
+        self._writer_idle.set()
+        # Every search replaces the search diagnostics wholesale, so a writer
+        # running beside one would report into a dict nobody reads.
+        self._writer_diagnostics: dict[str, Any] = {}
         self._last_search_diagnostics: dict[str, Any] = {
             "strategy": self._configuration.search_strategy,
             "configuration_fingerprint": self._configuration.fingerprint,
@@ -311,7 +341,8 @@ class FAISSLocalVectorStore:
 
     @property
     def last_search_diagnostics(self) -> dict[str, Any]:
-        return dict(self._last_search_diagnostics)
+        with self._state_lock:
+            return {**self._last_search_diagnostics, **self._writer_diagnostics}
 
     def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
         self._backend.upsert(records, model_name, dim)
@@ -405,7 +436,7 @@ class FAISSLocalVectorStore:
         legacy files are never deleted or overwritten.
         """
         key = (model_name, dim)
-        with self._state_lock:
+        with self._index_lock, self._state_lock:
             epoch = self._backend.vector_epoch()
             try:
                 manifest_path = self._manifest_path(model_name, dim)
@@ -433,7 +464,11 @@ class FAISSLocalVectorStore:
                     return False
                 if self._backend.vector_epoch() != epoch:
                     raise RuntimeError("vector index changed during migration")
-                if not self._persist_state(legacy_state):
+                if not self._persist_state(
+                    legacy_state,
+                    key=key,
+                    mutations=self._index_mutations.get(key, 0),
+                ):
                     self._last_search_diagnostics.update(
                         {
                             "migration": "failed",
@@ -514,21 +549,41 @@ class FAISSLocalVectorStore:
         }) / len(exact)
 
     def flush_persistence(self) -> bool:
-        """Write every cached state to disk now, ignoring the debounce window.
+        """Publish every cached state and block until it is on disk.
 
-        Debounced writes lag the in-memory state, so a caller that knows it is
-        shutting down calls this to avoid paying a rebuild on the next start.
-        The write is unconditional: it is deliberate, not opportunistic.
+        Debounced writes lag the in-memory state and now run on a background
+        writer, so a caller that knows it is shutting down needs the barrier as
+        much as the publication: this returns only once nothing is queued or in
+        flight, and reports whether every cached state reached disk.
         """
+        with self._index_lock, self._state_lock:
+            for key, state in list(self._states.items()):
+                self._request_write(key, state)
+        self._writer_idle.wait()
         with self._state_lock:
-            written = True
-            for key, state in self._states.items():
-                written &= self._write_state(key, state)
+            written = all(
+                self._persisted_states.get(key) is state
+                for key, state in self._states.items()
+            )
             self._last_search_diagnostics["persistence_written"] = written
             return written
 
     def _write_state(self, key: tuple[str, int], state: _FAISSState) -> bool:
-        """Persist ``state`` and restart its debounce window.
+        """Queue ``state`` for publication and restart its debounce window.
+
+        Serialising a production index and its metadata takes seconds, so the
+        query that trips the window only hands the snapshot over; the window
+        restarts on the hand-off rather than on the write, because it bounds
+        how often a write is asked for.
+        """
+        self._persistence[key] = _PersistenceDebounce(last_write=self._clock())
+        return self._request_write(key, state)
+
+    def _request_write(self, key: tuple[str, int], state: _FAISSState) -> bool:
+        """Queue ``state`` for the writer, replacing any superseded snapshot.
+
+        A published generation is a whole snapshot, so queueing both an older
+        and a newer one would only publish the older one first for nothing.
 
         A state still backed by a metadata sidecar came off disk and has not
         been refreshed since, so the published generation already matches it.
@@ -537,12 +592,66 @@ class FAISSLocalVectorStore:
         memory, so serialising it would fail on the first absent entry.
         """
         if state.metadata_sidecar is not None:
-            self._persistence[key] = _PersistenceDebounce(last_write=self._clock())
+            self._persisted_states[key] = state
             return True
-        written = self._persist_state(state)
-        if written:
-            self._persistence[key] = _PersistenceDebounce(last_write=self._clock())
-        return written
+        if (
+            self._persisted_states.get(key) is state
+            or self._inflight_write.get(key) is state
+            or self._pending_writes.get(key) is state
+        ):
+            return True
+        self._pending_writes[key] = state
+        self._writer_idle.clear()
+        if not self._writer_active:
+            self._writer_active = True
+            try:
+                self._persist_scheduler(self._drain_writes)
+            except Exception as exc:  # noqa: BLE001 - persistence is best effort
+                self._writer_active = False
+                self._pending_writes.pop(key, None)
+                self._writer_idle.set()
+                self._record_writer_diagnostic(
+                    "persistence_error", f"{type(exc).__name__}: {exc}"
+                )
+                return False
+        return True
+
+    def _record_writer_diagnostic(self, name: str, value: str) -> None:
+        """Report a background writer outcome outside the per-search record."""
+        with self._state_lock:
+            self._writer_diagnostics[name] = value
+
+    def _drain_writes(self) -> None:
+        """Publish queued snapshots until the queue is empty.
+
+        One drain runs at a time whatever the scheduler does with the work, so
+        a newer generation can never be overtaken by the older one it replaced.
+        """
+        try:
+            while True:
+                with self._state_lock:
+                    if not self._pending_writes:
+                        self._writer_active = False
+                        self._writer_idle.set()
+                        return
+                    key = next(iter(self._pending_writes))
+                    state = self._pending_writes.pop(key)
+                    mutations = self._index_mutations.get(key, 0)
+                    self._inflight_write[key] = state
+                written = self._persist_state(
+                    state, key=key, mutations=mutations
+                )
+                with self._state_lock:
+                    if self._inflight_write.get(key) is state:
+                        del self._inflight_write[key]
+                    if written:
+                        self._persisted_states[key] = state
+        finally:
+            with self._state_lock:
+                if self._writer_active:
+                    self._writer_active = False
+                    self._inflight_write.clear()
+                    self._writer_idle.set()
 
     def _persist_debounced(
         self,
@@ -594,6 +703,14 @@ class FAISSLocalVectorStore:
             cached = self._states.get(key)
             if cached is not None and cached.epoch == vector_epoch:
                 return cached
+        # Refreshing mutates the resident index in place, so it must not run
+        # while the writer is serialising that same index. Only this path takes
+        # the index lock: a query served from a current state never waits on a
+        # publication.
+        with self._index_lock, self._state_lock:
+            cached = self._states.get(key)
+            if cached is not None and cached.epoch == vector_epoch:
+                return cached
             loaded = self._load_state(model_name, dim, vector_epoch)
             if loaded is not None:
                 self._last_search_diagnostics["persistence"] = "loaded"
@@ -608,14 +725,22 @@ class FAISSLocalVectorStore:
                 model_name, dim
             )
             if base is not None and base.index_revisions is not None:
+                self._index_mutations[key] = self._index_mutations.get(key, 0) + 1
                 try:
                     updated = self._update_state(base, model_name, dim, vector_epoch)
                 except Exception:
-                    # A partially mutated index must never be searched.
+                    # A partially mutated index must never be searched, nor
+                    # published.
                     self._states.pop(key, None)
+                    self._pending_writes.pop(key, None)
                     raise
                 if updated is not None:
                     self._states[key] = updated
+                    if key in self._pending_writes or key in self._inflight_write:
+                        # A snapshot was awaiting publication when this refresh
+                        # rewrote the index underneath it, so it is replaced by
+                        # the state that now describes those bytes.
+                        self._request_write(key, updated)
                     written = self._persist_debounced(
                         key, updated, self._changed_vector_count(base, updated)
                     )
@@ -1161,7 +1286,13 @@ class FAISSLocalVectorStore:
             ),
         }
 
-    def _persist_state(self, state: _FAISSState) -> bool:
+    def _persist_state(
+        self,
+        state: _FAISSState,
+        *,
+        key: tuple[str, int],
+        mutations: int,
+    ) -> bool:
         try:
             import faiss
 
@@ -1169,7 +1300,14 @@ class FAISSLocalVectorStore:
                 state.encoder_namespace,
                 state.dim,
             )
-            index_bytes = bytes(faiss.serialize_index(state.index))
+            with self._index_lock:
+                with self._state_lock:
+                    if self._index_mutations.get(key, 0) != mutations:
+                        # A refresh rewrote this index after the snapshot was
+                        # queued, so its bytes no longer match the metadata
+                        # below; the refresh queued its own snapshot instead.
+                        return False
+                index_bytes = bytes(faiss.serialize_index(state.index))
             generation = (
                 f"{state.epoch}-{self.configuration.build_fingerprint[:16]}-"
                 f"{time.time_ns()}"
@@ -1217,8 +1355,8 @@ class FAISSLocalVectorStore:
             self._prune_generations(index_path, generation)
             return True
         except Exception as exc:  # noqa: BLE001 - optional persistence is best effort
-            self._last_search_diagnostics["persistence_error"] = (
-                f"{type(exc).__name__}: {exc}"
+            self._record_writer_diagnostic(
+                "persistence_error", f"{type(exc).__name__}: {exc}"
             )
             return False
 
@@ -1234,11 +1372,12 @@ class FAISSLocalVectorStore:
         write or a query.
         """
         try:
-            live_sidecars = {
-                state.metadata_sidecar.path
-                for state in self._states.values()
-                if state.metadata_sidecar is not None
-            }
+            with self._state_lock:
+                live_sidecars = {
+                    state.metadata_sidecar.path
+                    for state in self._states.values()
+                    if state.metadata_sidecar is not None
+                }
             prefix = f"{index_path.stem}."
             fingerprint = self.configuration.build_fingerprint[:16]
             published: list[tuple[int, Path, Path]] = []
@@ -1269,8 +1408,8 @@ class FAISSLocalVectorStore:
                 superseded_index.unlink(missing_ok=True)
                 superseded_metadata.unlink(missing_ok=True)
         except Exception as exc:  # noqa: BLE001 - optional pruning is best effort
-            self._last_search_diagnostics["prune_error"] = (
-                f"{type(exc).__name__}: {exc}"
+            self._record_writer_diagnostic(
+                "prune_error", f"{type(exc).__name__}: {exc}"
             )
 
     def _load_state(

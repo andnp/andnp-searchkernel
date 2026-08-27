@@ -166,6 +166,7 @@ def test_persisted_reload_rebuilds_canonical_scalar_eligibility(
     expected = original.search(
         [1.0, 0.0], 10, model_name="model", dim=2, filters=filters
     )
+    assert original.flush_persistence() is True
 
     restored = FAISSLocalVectorStore(backend, index_path=index_path)
     actual = restored.search(

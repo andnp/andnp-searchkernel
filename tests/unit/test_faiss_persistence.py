@@ -33,6 +33,22 @@ def _record(
     )
 
 
+def _publish(
+    backend: LocalRecordBackend,
+    index_path: Path,
+    query: list[float],
+    k: int,
+) -> None:
+    """Publish one generation from a fresh store and wait for it to be on disk.
+
+    Publication runs on a background writer, so a test that reads the artifact
+    has to wait for that writer rather than assume the search wrote it.
+    """
+    store = FAISSLocalVectorStore(backend, index_path=index_path)
+    store.search(query, k, model_name="model", dim=2)
+    assert store.flush_persistence() is True
+
+
 def test_duplicate_persisted_storage_keys_force_a_rebuild(tmp_path: Path) -> None:
     """Reject duplicate generation keys instead of collapsing search hits.
 
@@ -49,6 +65,7 @@ def test_duplicate_persisted_storage_keys_force_a_rebuild(tmp_path: Path) -> Non
         "one",
         "two",
     ]
+    assert store.flush_persistence() is True
 
     manifest_path = index_path.with_suffix(".manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -106,9 +123,7 @@ def test_legacy_inline_artifact_remains_readable(tmp_path: Path) -> None:
         2,
     )
     index_path = tmp_path / "index.faiss"
-    FAISSLocalVectorStore(backend, index_path=index_path).search(
-        [1.0, 0.0], 2, model_name="model", dim=2
-    )
+    _publish(backend, index_path, [1.0, 0.0], 2)
     _promote_split_artifact_to_legacy(index_path)
 
     restored = FAISSLocalVectorStore(backend, index_path=index_path)
@@ -127,9 +142,7 @@ def test_explicit_legacy_migration_publishes_verified_split(tmp_path: Path) -> N
     backend = LocalRecordBackend(tmp_path / "records.db")
     backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
     index_path = tmp_path / "index.faiss"
-    FAISSLocalVectorStore(backend, index_path=index_path).search(
-        [1.0, 0.0], 1, model_name="model", dim=2
-    )
+    _publish(backend, index_path, [1.0, 0.0], 1)
     _promote_split_artifact_to_legacy(index_path)
     legacy_index = index_path.read_bytes()
     legacy_metadata = index_path.with_suffix(".json").read_bytes()
@@ -160,8 +173,9 @@ def test_explicit_migration_reports_already_split_without_republishing(
     index_path = tmp_path / "index.faiss"
     store = FAISSLocalVectorStore(backend, index_path=index_path)
     store.search([1.0, 0.0], 1, model_name="model", dim=2)
+    assert store.flush_persistence() is True
 
-    def fail_publication(state) -> bool:
+    def fail_publication(state, **kwargs) -> bool:
         raise AssertionError("already split state must not republish")
 
     monkeypatch.setattr(store, "_persist_state", fail_publication)
@@ -180,9 +194,7 @@ def test_failed_migration_preserves_legacy_fallback(
     backend = LocalRecordBackend(tmp_path / "records.db")
     backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
     index_path = tmp_path / "index.faiss"
-    FAISSLocalVectorStore(backend, index_path=index_path).search(
-        [1.0, 0.0], 1, model_name="model", dim=2
-    )
+    _publish(backend, index_path, [1.0, 0.0], 1)
     _promote_split_artifact_to_legacy(index_path)
     legacy_index = index_path.read_bytes()
     legacy_metadata = index_path.with_suffix(".json").read_bytes()
@@ -225,9 +237,7 @@ def test_split_sidecar_uses_one_handle_for_filtered_search(
         2,
     )
     index_path = tmp_path / "index.faiss"
-    FAISSLocalVectorStore(backend, index_path=index_path).search(
-        [1.0, 0.0], 3, model_name="model", dim=2
-    )
+    _publish(backend, index_path, [1.0, 0.0], 3)
     opened: list[Path] = []
     original_open = Path.open
 
@@ -295,9 +305,7 @@ def test_split_active_ids_must_be_persisted_subset(tmp_path: Path) -> None:
     backend = LocalRecordBackend(tmp_path / "records.db")
     backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
     index_path = tmp_path / "index.faiss"
-    FAISSLocalVectorStore(backend, index_path=index_path).search(
-        [1.0, 0.0], 1, model_name="model", dim=2
-    )
+    _publish(backend, index_path, [1.0, 0.0], 1)
     manifest_path = index_path.with_suffix(".manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["active_ids"].append(999)
@@ -331,6 +339,7 @@ def test_streamed_sidecar_offsets_round_trip_exact_records(tmp_path: Path) -> No
         [1.0, 0.0], 2, model_name="model", dim=2,
         filters={"metadata_equals": {"project": "a"}},
     )
+    assert store.flush_persistence() is True
     manifest = json.loads(
         index_path.with_suffix(".manifest.json").read_text(encoding="utf-8")
     )
@@ -367,9 +376,7 @@ def test_truncated_split_sidecar_rebuilds_deterministically(tmp_path: Path) -> N
     backend = LocalRecordBackend(tmp_path / "records.db")
     backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
     index_path = tmp_path / "index.faiss"
-    FAISSLocalVectorStore(backend, index_path=index_path).search(
-        [1.0, 0.0], 1, model_name="model", dim=2
-    )
+    _publish(backend, index_path, [1.0, 0.0], 1)
     manifest = json.loads(
         index_path.with_suffix(".manifest.json").read_text(encoding="utf-8")
     )
@@ -409,9 +416,7 @@ def test_split_filtered_selectivity_preserves_backend_parity(tmp_path: Path) -> 
     ]
     backend.upsert(records, "model", 2)
     index_path = tmp_path / "index.faiss"
-    FAISSLocalVectorStore(backend, index_path=index_path).search(
-        [1.0, 0.0], 3, model_name="model", dim=2
-    )
+    _publish(backend, index_path, [1.0, 0.0], 3)
     restored = FAISSLocalVectorStore(backend, index_path=index_path)
     filters = (
         {
@@ -445,9 +450,7 @@ def test_split_manifest_fingerprint_and_offset_mismatch_rebuilds(
     backend = LocalRecordBackend(tmp_path / "records.db")
     backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
     index_path = tmp_path / "index.faiss"
-    FAISSLocalVectorStore(backend, index_path=index_path).search(
-        [1.0, 0.0], 1, model_name="model", dim=2
-    )
+    _publish(backend, index_path, [1.0, 0.0], 1)
     manifest_path = index_path.with_suffix(".manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["build_fingerprint"] = "wrong"
@@ -500,6 +503,7 @@ def _seeded_debounce_store(
         backend, index_path=tmp_path / "index.faiss", clock=clock
     )
     store.search([1.0, 0.0], 3, model_name="model", dim=2)
+    assert store.flush_persistence() is True
     return backend, store
 
 
@@ -564,6 +568,7 @@ def test_an_elapsed_window_persists_the_next_refresh(tmp_path: Path) -> None:
 
     assert store.last_search_diagnostics["persistence"] == "updated"
     assert store.last_search_diagnostics["persistence_written"] is True
+    assert store.flush_persistence() is True
     assert _persisted_generations(index_path) == 2
 
 
@@ -586,6 +591,7 @@ def test_accumulated_changes_persist_before_the_window_elapses(
     store.search([0.0, 1.0], 3, model_name="model", dim=2)
 
     assert store.last_search_diagnostics["persistence_written"] is True
+    assert store.flush_persistence() is True
     assert _persisted_generations(index_path) == 2
 
 
@@ -670,6 +676,7 @@ def _publish_generations(
         clock.advance(faiss_local._PERSIST_INTERVAL_SECONDS)
         store.search([0.0, 1.0], 3, model_name="model", dim=2)
         assert store.last_search_diagnostics["persistence_written"] is True
+        assert store.flush_persistence() is True
 
 
 def test_repeated_publications_bound_the_generations_on_disk(
@@ -736,18 +743,20 @@ def test_a_generation_a_cached_state_reads_is_never_pruned(
         "cached",
         2,
     )
-    backend.upsert([_record("elsewhere", [1.0, 0.0])], "publisher", 2)
     index_path = tmp_path / "index.faiss"
-    FAISSLocalVectorStore(backend, index_path=index_path).search(
-        [1.0, 0.0], 2, model_name="cached", dim=2
-    )
+    seed = FAISSLocalVectorStore(backend, index_path=index_path)
+    seed.search([1.0, 0.0], 2, model_name="cached", dim=2)
+    assert seed.flush_persistence() is True
 
     store = FAISSLocalVectorStore(backend, index_path=index_path)
     store.search([1.0, 0.0], 2, model_name="cached", dim=2)
     assert store.last_search_diagnostics["persistence"] == "loaded"
-    store.search([1.0, 0.0], 1, model_name="publisher", dim=2)
-    for _ in range(faiss_local._RETAINED_GENERATIONS + 1):
-        store.flush_persistence()
+    for index in range(faiss_local._RETAINED_GENERATIONS + 1):
+        backend.upsert(
+            [_record(f"published-{index}", [1.0, 0.0])], "publisher", 2
+        )
+        store.search([1.0, 0.0], 1, model_name="publisher", dim=2)
+        assert store.flush_persistence() is True
 
     hits = store.search(
         [1.0, 0.0],
@@ -826,6 +835,7 @@ def test_a_stale_split_generation_does_not_read_the_legacy_artifact(
     index_path = tmp_path / "index.faiss"
     store = FAISSLocalVectorStore(backend, index_path=index_path)
     store.search([1.0, 0.0], 1, model_name="model", dim=2)
+    assert store.flush_persistence() is True
     _write_legacy_artifact(index_path)
     backend.upsert([_record("two", [0.0, 1.0])], "model", 2)
     read_paths: list[Path] = []

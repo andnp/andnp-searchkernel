@@ -71,6 +71,9 @@ def _seeded_store(
         hnsw_ef_search=EF_SEARCH,
     )
     store.search(_vectors(2, 1)[0], 5, model_name="model", dim=DIM)
+    # Publication runs on a background writer, so the persisted generation a
+    # restart diffs against has to be waited for.
+    assert store.flush_persistence() is True
     return backend, store, records
 
 
