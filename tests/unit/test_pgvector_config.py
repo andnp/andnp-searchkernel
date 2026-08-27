@@ -27,12 +27,18 @@ class _BulkCursor:
         self.connection = None
         self.executed: list[tuple[object, object]] = []
         self.executemany_calls: list[tuple[object, object]] = []
+        self.rowcount = 0
 
     def execute(self, statement: object, params: object = None) -> None:
         self.executed.append((statement, params))
 
-    def executemany(self, statement: object, params: object) -> None:
+    def executemany(
+        self, statement: object, params: object, *, returning: bool = False
+    ) -> None:
         self.executemany_calls.append((statement, params))
+
+    def nextset(self) -> bool:
+        return False
 
     def fetchall(self) -> list[object]:
         return []

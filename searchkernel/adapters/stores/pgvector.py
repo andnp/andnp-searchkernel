@@ -1233,12 +1233,31 @@ class PGVectorStore:
                     updated_at = EXCLUDED.updated_at,
                     metadata = EXCLUDED.metadata,
                     uri = EXCLUDED.uri,
-                    status = EXCLUDED.status;
+                    status = EXCLUDED.status
+                WHERE records.workspace_id IS DISTINCT FROM EXCLUDED.workspace_id
+                   OR records.source_kind IS DISTINCT FROM EXCLUDED.source_kind
+                   OR records.source_id IS DISTINCT FROM EXCLUDED.source_id
+                   OR records.title IS DISTINCT FROM EXCLUDED.title
+                   OR records.body IS DISTINCT FROM EXCLUDED.body
+                   OR records.indexed_text IS DISTINCT FROM EXCLUDED.indexed_text
+                   OR records.created_at IS DISTINCT FROM EXCLUDED.created_at
+                   OR records.updated_at IS DISTINCT FROM EXCLUDED.updated_at
+                   OR records.metadata IS DISTINCT FROM EXCLUDED.metadata
+                   OR records.uri IS DISTINCT FROM EXCLUDED.uri
+                   OR records.status IS DISTINCT FROM EXCLUDED.status
+                RETURNING record_id;
                 """
+            changed_record_ids: set[str] = set()
             if isinstance(self.conn_pool, Psycopg3Connection):
-                cursor.executemany(record_insert_sql, record_rows)
+                cursor.executemany(record_insert_sql, record_rows, returning=True)
+                while True:
+                    changed_record_ids.update(
+                        row[0] for row in (cursor.fetchall() if cursor.rowcount else ())
+                    )
+                    if not cursor.nextset():
+                        break
             else:
-                _require_psycopg2().extras.execute_values(
+                changed_records = _require_psycopg2().extras.execute_values(
                     cursor,
                     record_insert_sql.replace(
                         "VALUES (%s, %s, %s, %s, %s, %s, %s,\n"
@@ -1250,7 +1269,9 @@ class PGVectorStore:
                         "(%s, %s, %s, %s, %s, %s, %s, "
                         "to_tsvector('english', %s), %s, %s, %s, %s, %s)"
                     ),
+                    fetch=True,
                 )
+                changed_record_ids.update(row[0] for row in changed_records)
 
             # Upsert only vector rows whose revision or payload differs.
             vector_rows = []
@@ -1312,9 +1333,11 @@ class PGVectorStore:
                     )
                     changed_vector_ids.update(row[0] for row in changed_rows)
 
+            # Every record written here owns a vector, so a changed stored row
+            # makes vector-lane snapshots stale even when the embedding is not.
             _POSTGRES_EPOCH_LANE.bump(
                 cursor,
-                vector=bool(changed_vector_ids),
+                vector=bool(changed_vector_ids) or bool(changed_record_ids),
             )
 
             conn.commit()
