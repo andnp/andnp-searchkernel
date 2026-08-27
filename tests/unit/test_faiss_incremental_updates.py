@@ -1,5 +1,6 @@
 """Incremental FAISS state updates must match a full rebuild exactly."""
 
+import dataclasses
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -9,7 +10,11 @@ import numpy as np
 import pytest
 
 from searchkernel.domain import Record, RecordHit, RecordStatus
-from searchkernel.indices import FAISSLocalVectorStore, LocalRecordBackend
+from searchkernel.indices import (
+    FAISSLocalVectorStore,
+    LocalRecordBackend,
+    faiss_local,
+)
 
 DIM = 16
 CORPUS = 40
@@ -30,17 +35,20 @@ def _record(
     embedding: list[float],
     *,
     status: RecordStatus = RecordStatus.ACTIVE,
+    metadata: dict[str, object] | None = None,
+    uri: str | None = None,
 ) -> Record:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
     return Record(
         workspace_id="workspace",
+        uri=uri,
         source_kind="note",
         source_id=source_id,
         title=source_id,
         body=body,
         created_at=timestamp,
         updated_at=timestamp,
-        metadata={"name": source_id},
+        metadata={"name": source_id} if metadata is None else metadata,
         status=status,
         embedding=embedding,
     )
@@ -319,3 +327,121 @@ def test_tombstones_ahead_of_the_top_hit_do_not_shrink_recall(
 
     assert store.last_search_diagnostics["persistence"] == "updated"
     assert [hit.storage_key for hit in hits] == [records[9].storage_key]
+
+
+def _edit_metadata_then_force_a_refresh(
+    backend: LocalRecordBackend, edited: Record
+) -> None:
+    """Apply a metadata-only edit plus the vector change that refreshes state.
+
+    A stored revision covers only the embedding inputs, so editing status,
+    workspace or metadata alone leaves the vector epoch untouched and no
+    refresh runs. A continuously indexed corpus interleaves the two, and the
+    added vector is what gives the refresh a chance to miss the edit.
+    """
+    backend.upsert([edited], "model", DIM)
+    backend.upsert(
+        [_record("refresh-trigger", "refresh body", _vectors(11, 1)[0])],
+        "model",
+        DIM,
+    )
+
+
+@pytest.mark.parametrize("strategy", ["exact", "approximate"])
+def test_metadata_only_edit_reaches_a_filtered_search(
+    tmp_path: Path, strategy: str
+) -> None:
+    """A refresh must publish metadata that changed without its embedding."""
+    backend, store, records = _seeded_store(tmp_path, strategy)
+    target = records[0]
+    assert target.embedding is not None
+    _edit_metadata_then_force_a_refresh(
+        backend,
+        _record(
+            target.source_id,
+            target.body,
+            list(target.embedding),
+            metadata={"name": target.source_id, "tier": "gold"},
+        ),
+    )
+
+    hits = store.search(
+        list(target.embedding),
+        CORPUS,
+        model_name="model",
+        dim=DIM,
+        filters={"metadata_equals": {"tier": "gold"}},
+    )
+
+    assert store.last_search_diagnostics["persistence"] == "updated"
+    assert [hit.storage_key for hit in hits] == [target.storage_key]
+
+
+@pytest.mark.parametrize("strategy", ["exact", "approximate"])
+def test_status_only_edit_withdraws_a_record_from_active_results(
+    tmp_path: Path, strategy: str
+) -> None:
+    """Archiving without re-embedding must stop returning the record."""
+    backend, store, records = _seeded_store(tmp_path, strategy)
+    target = records[0]
+    assert target.embedding is not None
+    _edit_metadata_then_force_a_refresh(
+        backend,
+        _record(
+            target.source_id,
+            target.body,
+            list(target.embedding),
+            status=RecordStatus.ARCHIVED,
+        ),
+    )
+    query = list(target.embedding)
+
+    hits = store.search(query, 5, model_name="model", dim=DIM)
+
+    assert store.last_search_diagnostics["persistence"] == "updated"
+    assert target.storage_key not in {hit.storage_key for hit in hits}
+    _assert_matches_rebuild(hits, _rebuilt_hits(backend, strategy, query, 5))
+
+
+@pytest.mark.parametrize("strategy", ["exact", "approximate"])
+def test_uri_only_edit_reaches_a_path_filtered_search(
+    tmp_path: Path, strategy: str
+) -> None:
+    """A relocated record must be findable at its new path after a refresh."""
+    backend, store, records = _seeded_store(tmp_path, strategy)
+    target = records[0]
+    assert target.embedding is not None
+    _edit_metadata_then_force_a_refresh(
+        backend,
+        _record(
+            target.source_id,
+            target.body,
+            list(target.embedding),
+            uri="docs/moved.md",
+        ),
+    )
+
+    hits = store.search(
+        list(target.embedding),
+        CORPUS,
+        model_name="model",
+        dim=DIM,
+        filters={"paths": ["docs/moved.md"]},
+    )
+
+    assert store.last_search_diagnostics["persistence"] == "updated"
+    assert [hit.storage_key for hit in hits] == [target.storage_key]
+
+
+def test_the_refresh_fingerprint_covers_every_candidate_field() -> None:
+    """A candidate field outside the fingerprint would silently go stale.
+
+    A refresh carries an unchanged candidate forward on the strength of its
+    fingerprint alone, so a field the digest omits could change without the
+    candidate being rebuilt, leaving filtered search on stale values. The two
+    are only ever equal by being kept equal.
+    """
+    assert set(faiss_local._CANDIDATE_METADATA_COLUMNS) == {
+        field.name
+        for field in dataclasses.fields(faiss_local._CandidateMetadata)
+    }

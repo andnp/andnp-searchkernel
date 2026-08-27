@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 
 from searchkernel.domain import Record, RecordStatus
-from searchkernel.indices import FAISSLocalVectorStore, LocalRecordBackend
+from searchkernel.indices import (
+    FAISSLocalVectorStore,
+    LocalRecordBackend,
+    faiss_local,
+)
 
 
 def _record(
@@ -362,6 +366,49 @@ def test_a_single_new_vector_does_not_reread_the_whole_corpus(
     hits = store.search([0.0, 1.0], 5, model_name="model", dim=2)
 
     assert backend.embeddings_read == 1
+    expected = FAISSLocalVectorStore(backend).search(
+        [0.0, 1.0], 5, model_name="model", dim=2
+    )
+    assert [hit.storage_key for hit in hits] == [
+        hit.storage_key for hit in expected
+    ]
+
+
+def test_a_refresh_parses_metadata_only_for_changed_records(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Refreshing costs the change set, not a re-parse of the whole corpus.
+
+    Every record's metadata is stored as JSON text, so rebuilding a candidate
+    for each one on every refresh makes query latency scale with the corpus
+    instead of with what changed. An unchanged record must be recognised
+    without being parsed again, while still returning rebuild-equal results.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert(
+        [
+            _record(f"seed-{index}", [1.0 - index / 100.0, index / 100.0])
+            for index in range(40)
+        ],
+        "model",
+        2,
+    )
+    store = FAISSLocalVectorStore(backend, index_path=tmp_path / "index.faiss")
+    store.search([1.0, 0.0], 5, model_name="model", dim=2)
+    backend.upsert([_record("added", [0.0, 1.0])], "model", 2)
+    parsed: list[object] = []
+    parse_metadata = faiss_local.metadata_mapping
+
+    def counting_metadata_mapping(value: object) -> object:
+        parsed.append(value)
+        return parse_metadata(value)
+
+    monkeypatch.setattr(faiss_local, "metadata_mapping", counting_metadata_mapping)
+
+    hits = store.search([0.0, 1.0], 5, model_name="model", dim=2)
+
+    assert store.last_search_diagnostics["persistence"] == "updated"
+    assert len(parsed) == 1
     expected = FAISSLocalVectorStore(backend).search(
         [0.0, 1.0], 5, model_name="model", dim=2
     )

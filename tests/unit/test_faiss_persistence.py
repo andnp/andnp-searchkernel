@@ -62,7 +62,8 @@ def test_duplicate_persisted_storage_keys_force_a_rebuild(tmp_path: Path) -> Non
     assert restored.last_search_diagnostics["persistence"] == "rebuilt"
 
 
-def _promote_split_artifact_to_legacy(index_path: Path) -> None:
+def _write_legacy_artifact(index_path: Path) -> None:
+    """Write the pre-split fixed files beside the published generation."""
     manifest_path = index_path.with_suffix(".manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     generation_index = index_path.with_name(manifest["index_file"])
@@ -85,7 +86,11 @@ def _promote_split_artifact_to_legacy(index_path: Path) -> None:
     ]
     index_path.write_bytes(generation_index.read_bytes())
     index_path.with_suffix(".json").write_text(json.dumps(legacy), encoding="utf-8")
-    manifest_path.unlink()
+
+
+def _promote_split_artifact_to_legacy(index_path: Path) -> None:
+    _write_legacy_artifact(index_path)
+    index_path.with_suffix(".manifest.json").unlink()
 
 
 def test_legacy_inline_artifact_remains_readable(tmp_path: Path) -> None:
@@ -804,3 +809,37 @@ def test_flushing_a_state_loaded_from_disk_reports_success(tmp_path: Path) -> No
     assert restarted.flush_persistence() is True
     assert _persisted_generations(index_path) == published
     _assert_matches_rebuild(hits, backend, [1.0, 0.0], 3)
+
+
+def test_a_stale_split_generation_does_not_read_the_legacy_artifact(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An epoch the split generation cannot serve must not read legacy files.
+
+    Only split generations are ever published and migration reads legacy to
+    publish split, so a legacy artifact beside a manifest is always the older
+    of the two and cannot satisfy an epoch the manifest failed. Reading it
+    anyway costs a full artifact read on every epoch advance.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    backend.upsert([_record("one", [1.0, 0.0])], "model", 2)
+    index_path = tmp_path / "index.faiss"
+    store = FAISSLocalVectorStore(backend, index_path=index_path)
+    store.search([1.0, 0.0], 1, model_name="model", dim=2)
+    _write_legacy_artifact(index_path)
+    backend.upsert([_record("two", [0.0, 1.0])], "model", 2)
+    read_paths: list[Path] = []
+    read_text = Path.read_text
+
+    def counting_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        read_paths.append(Path(self))
+        return read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+    hits = store.search([0.0, 1.0], 2, model_name="model", dim=2)
+
+    assert index_path.with_suffix(".manifest.json") in read_paths
+    assert index_path.with_suffix(".json") not in read_paths
+    assert store.last_search_diagnostics["persistence"] == "updated"
+    assert [hit.source_id for hit in hits] == ["two", "one"]
