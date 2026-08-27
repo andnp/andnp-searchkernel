@@ -739,7 +739,9 @@ class TestVectorStore:
         assert after_vector == {"keyword": 0, "vector": 1, "graph": 0}
         assert vector_store.epoch() == total + 1
 
-        keyword_store.index(fixture_records)
+        keyword_store.index(
+            [replace(record, title="relabeled") for record in fixture_records]
+        )
         after_keyword = keyword_store.epochs()
         assert after_keyword == {"keyword": 1, "vector": 1, "graph": 0}
         assert keyword_store.epoch() == total + 2
@@ -1448,7 +1450,7 @@ class TestKeywordStore:
         vector_store = PGVectorStore(pg_conn)
         keyword_store = PGKeywordStore(pg_conn)
 
-        vector_store.upsert([first, last], model_name="keyword-duplicates", dim=4)
+        vector_store.upsert([first], model_name="keyword-duplicates", dim=4)
         before = keyword_store.keyword_epoch()
         keyword_store.index([first, last])
 

@@ -1174,13 +1174,15 @@ class PGVectorStore:
         The records and vector rows commit together, while the existing
         keyword projection remains owned by :meth:`PGKeywordStore.index`.
 
-        Inserting a row seeds ``tsvector_body`` with an unweighted fallback so
-        a vector-only write is still lexically findable, but updating a row
-        never rewrites it: this store's fallback is strictly weaker than the
-        weighted projection the keyword store builds, so overwriting it would
-        downgrade the row. Editing ``title``/``body``/``indexed_text`` through
-        this method alone therefore leaves the projection matching the previous
-        text until :meth:`PGKeywordStore.index` runs for the same records.
+        Inserting a row seeds ``tsvector_body`` with the same weighted
+        projection the keyword store builds, so a record is fully searchable
+        from birth even when the keyword lane ran before the row existed.
+        Updating a row never rewrites the projection: the keyword lane owns it
+        and owns ``keyword_epoch``, so rewriting it here would move the
+        projection without invalidating keyword readers. Editing
+        ``title``/``body``/``indexed_text`` through this method alone therefore
+        leaves the projection matching the previous text until
+        :meth:`PGKeywordStore.index` runs for the same records.
 
         Args:
             records: Records with embedding set
@@ -1218,8 +1220,6 @@ class PGVectorStore:
             record_rows = []
             for record in records:
                 metadata_json = json.dumps(record.metadata)
-                indexed_text = record.indexed_text or record.body
-                tsvector_text = f"{record.title} {indexed_text}"
                 record_key = record.storage_key
                 record_rows.append(
                     (
@@ -1230,7 +1230,7 @@ class PGVectorStore:
                         record.title,
                         record.body,
                         record.indexed_text,
-                        tsvector_text,
+                        *_keyword_projection_text(record),
                         _utc_timestamp(record.created_at),
                         _utc_timestamp(record.updated_at),
                         metadata_json,
@@ -1239,12 +1239,18 @@ class PGVectorStore:
                     )
                 )
 
-            record_insert_sql = """
+            insert_projection_sql = _WEIGHTED_TSVECTOR_SQL.format(
+                title="%s", body="%s", rest="%s"
+            )
+            record_values_clause = (
+                f"(%s, %s, %s, %s, %s, %s, %s, {insert_projection_sql},"
+                " %s, %s, %s, %s, %s)"
+            )
+            record_insert_sql = f"""
                 INSERT INTO records
                 (record_id, workspace_id, source_kind, source_id, title, body,
                  indexed_text, tsvector_body, created_at, updated_at, metadata, uri, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s,
-                        to_tsvector('english', %s), %s, %s, %s, %s, %s)
+                VALUES {record_values_clause}
                 ON CONFLICT (record_id) DO UPDATE SET
                     workspace_id = EXCLUDED.workspace_id,
                     source_kind = EXCLUDED.source_kind,
@@ -1285,15 +1291,10 @@ class PGVectorStore:
                 changed_records = _require_psycopg2().extras.execute_values(
                     cursor,
                     record_insert_sql.replace(
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s,\n"
-                        "                        to_tsvector('english', %s), %s, %s, %s, %s, %s)",
-                        "VALUES %s",
+                        f"VALUES {record_values_clause}", "VALUES %s"
                     ),
                     record_rows,
-                    template=(
-                        "(%s, %s, %s, %s, %s, %s, %s, "
-                        "to_tsvector('english', %s), %s, %s, %s, %s, %s)"
-                    ),
+                    template=record_values_clause,
                     fetch=True,
                 )
                 changed_record_ids.update(row[0] for row in changed_records)
