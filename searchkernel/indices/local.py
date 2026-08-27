@@ -1710,11 +1710,17 @@ class _KeywordEngine:
                 _keyword_scoring.sanitize_fts_query(token)
                 for token in artifact_tokens
             ]
-            match_query = " OR ".join(
+            narrowed = " OR ".join(
                 f"({artifact_query})"
                 for artifact_query in artifact_queries
                 if artifact_query != '""'
             )
+            # Every token can sanitize away on its own -- the bare "/" that
+            # "the / thing" reads as an identifier leaves nothing quotable --
+            # and narrowing to nothing would hand FTS5 an empty MATCH. The
+            # whole-query match already stands, so keep it.
+            if narrowed:
+                match_query = narrowed
         if needs_artifact_rerank and len(query.strip().split()) == 1:
             match_query = '"' + match_query.replace('"', "") + '"'
         limit = k
