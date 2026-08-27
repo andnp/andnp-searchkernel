@@ -1224,11 +1224,15 @@ class FAISSLocalVectorStore:
         try:
             manifest_path = self._manifest_path(model_name, dim)
             if manifest_path.is_file():
-                split_state = self._load_split_state(
+                # A published manifest supersedes the legacy artifact by
+                # construction: persistence only ever writes split
+                # generations and migration reads legacy to publish split, so
+                # the legacy files are always the older of the two and cannot
+                # satisfy an epoch the split generation failed. Reading them
+                # anyway costs a full artifact read on every epoch advance.
+                return self._load_split_state(
                     model_name, dim, epoch, manifest_path
                 )
-                if split_state is not None:
-                    return split_state
             return self._load_legacy_state(model_name, dim, epoch)
         except Exception as exc:  # noqa: BLE001 - stale or corrupt indexes rebuild
             self._last_search_diagnostics["persistence_reason"] = (

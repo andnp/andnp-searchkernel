@@ -1215,7 +1215,9 @@ def test_snapshot_reload_corruption_and_deletion(tmp_path: Path) -> None:
 def test_optional_faiss_recall_reload_and_corruption_fallback(tmp_path: Path) -> None:
     """FAISS rebuilds from persisted vectors when its artifact is corrupt.
 
-    A fresh store must recover searchable state from the durable vector rows.
+    A fresh store must recover searchable state from the durable vector rows,
+    and republish a generation the next store can load instead of leaving the
+    corrupt one in place.
     """
     pytest.importorskip("faiss")
     backend = LocalRecordBackend(tmp_path / "records.db")
@@ -1241,7 +1243,13 @@ def test_optional_faiss_recall_reload_and_corruption_fallback(tmp_path: Path) ->
     )[0].source_id == "one"
     assert fallback.last_search_diagnostics["fallback"] is False
     assert fallback.last_search_diagnostics["persistence"] == "rebuilt"
-    assert "persistence_reason" in fallback.last_search_diagnostics
+
+    reloaded = FAISSLocalVectorStore(backend, index_path=tmp_path / "faiss")
+    assert [
+        hit.source_id
+        for hit in reloaded.search([1.0, 0.0], 2, model_name="model", dim=2)
+    ] == ["one", "two"]
+    assert reloaded.last_search_diagnostics["persistence"] == "loaded"
 
 
 @pytest.mark.parametrize(
