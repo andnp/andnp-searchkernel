@@ -241,6 +241,83 @@ def test_vector_only_upsert_changes_vector_epoch_without_keyword_churn(
     )[0].source_id == "vector-only"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("status", RecordStatus.ARCHIVED),
+        ("uri", "https://example.test/moved"),
+        ("metadata", {"visibility": "private"}),
+    ],
+)
+def test_record_field_only_upsert_changes_vector_epoch(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    """Record fields outside the embedding still invalidate vector readers.
+
+    Vector readers cache a snapshot of the whole record, so a changed row
+    makes that snapshot stale even when the embedding is byte-identical.
+    """
+    backend, _keyword, vector, _graph = _backend(tmp_path)
+    record = _record("note", "field-only", "stable body")
+    record.embedding = [1.0, 0.0]
+    vector.upsert([record], "test", 2)
+    before = backend.epochs()
+
+    setattr(record, field, value)
+    vector.upsert([record], "test", 2)
+
+    after = backend.epochs()
+    assert after["vector"] == before["vector"] + 1
+    # These fields feed the keyword projection too, so that lane advances as well.
+    assert after["keyword"] == before["keyword"] + 1
+
+
+def test_unchanged_vector_upsert_leaves_vector_epoch_alone(tmp_path: Path) -> None:
+    """A re-upsert of an identical record must not invalidate vector readers.
+
+    Every vector-epoch change forces a full identity rescan, so a write that
+    stores nothing new has to leave both index lanes untouched.
+    """
+    backend, _keyword, vector, _graph = _backend(tmp_path)
+    record = _record("note", "no-op", "stable body", uri="https://example.test/a")
+    record.embedding = [1.0, 0.0]
+    vector.upsert([record], "test", 2)
+    before = backend.epochs()
+
+    vector.upsert([record], "test", 2)
+
+    assert backend.epochs() == before
+
+
+def test_archiving_through_vector_upsert_removes_faiss_result(
+    tmp_path: Path,
+) -> None:
+    """A status-only vector upsert must stop FAISS serving the archived record.
+
+    The embedding is byte-identical across both writes and nothing else is
+    written, so only the changed stored row can refresh the FAISS snapshot.
+    """
+    backend = LocalRecordBackend(tmp_path / "records.db")
+    vector = LocalVectorStore(backend, engine="faiss")
+    kept = _record("note", "kept", "kept body")
+    kept.embedding = [1.0, 0.0]
+    archived = _record("note", "archived-later", "archived body")
+    archived.embedding = [1.0, 0.0]
+    vector.upsert([kept, archived], "test", 2)
+    assert {
+        hit.source_id
+        for hit in vector.search([1.0, 0.0], 10, model_name="test", dim=2)
+    } == {"kept", "archived-later"}
+
+    archived.status = RecordStatus.ARCHIVED
+    vector.upsert([archived], "test", 2)
+
+    assert [
+        hit.source_id
+        for hit in vector.search([1.0, 0.0], 10, model_name="test", dim=2)
+    ] == ["kept"]
+
+
 def test_keyword_only_upsert_changes_keyword_epoch_without_vector_churn(
     tmp_path: Path,
 ) -> None:
