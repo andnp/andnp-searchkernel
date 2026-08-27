@@ -185,6 +185,35 @@ class TestPsycopg3VectorStore:
         assert store.vector_epoch() == vector_epoch
 
 
+    def test_status_only_upsert_advances_vector_epoch(
+        self, pg_conn, fixture_records
+    ):
+        """Archiving a record invalidates vector readers without a new embedding.
+
+        Vector readers may cache a snapshot of the whole record, so a changed
+        stored row must advance the vector lane even when the embedding is not
+        rewritten.
+        """
+        store = PGVectorStore(pg_conn)
+        record = fixture_records[0]
+        model_name = "psycopg3-status-only"
+        store.upsert([record], model_name=model_name, dim=4)
+        before = store.epochs()
+
+        store.upsert(
+            [replace(record, status=RecordStatus.ARCHIVED)],
+            model_name=model_name,
+            dim=4,
+        )
+
+        assert store.epochs()["vector"] == before["vector"] + 1
+        assert pg_conn.execute_one(
+            "SELECT status FROM records WHERE record_id = %s;",
+            (record.storage_key,),
+        ) == ("archived",)
+
+
+
 class TestPsycopg3KeywordStore:
     """Tests for KeywordStore with psycopg3 connection pool."""
 
