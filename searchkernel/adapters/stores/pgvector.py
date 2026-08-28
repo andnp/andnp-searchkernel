@@ -2384,6 +2384,16 @@ class PGGraphStore:
 class PGCacheStore:
     """Postgres implementation of CacheStore port with epoch-based invalidation."""
 
+    @staticmethod
+    def _stored_key(key: str) -> str:
+        """`cache_store.key` is a btree primary key, and Postgres caps an index
+        row at 8191 bytes. Callers pass opaque keys of unbounded length -- the
+        query embedding cache builds one from the whole normalized query -- so
+        the caller's string is stored as a fixed-width digest. The key is only
+        ever matched exactly, never read back or prefix-scanned.
+        """
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
     def __init__(self, conn_pool: _PostgresConnectionLike):
         """Initialize cache store.
 
@@ -2405,7 +2415,9 @@ class PGCacheStore:
         cursor = None
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT value FROM cache_store WHERE key = %s;", (key,))
+            cursor.execute(
+                "SELECT value FROM cache_store WHERE key = %s;", (self._stored_key(key),)
+            )
             result = cursor.fetchone()
             if result:
                 value = result[0]
@@ -2440,7 +2452,7 @@ class PGCacheStore:
                     value = EXCLUDED.value,
                     epoch = EXCLUDED.epoch;
                 """,
-                (key, value_json, epoch),
+                (self._stored_key(key), value_json, epoch),
             )
             conn.commit()
         finally:
