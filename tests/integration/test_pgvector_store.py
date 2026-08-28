@@ -4,6 +4,7 @@ Tests VectorStore, KeywordStore, GraphStore, and CacheStore implementations
 against a live Postgres database with pgvector extension.
 """
 
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
@@ -1965,6 +1966,43 @@ class TestCacheStore:
 
         result = store.get("key1")
         assert result == {"data": "value2"}
+
+    @staticmethod
+    def _high_entropy_key(suffix: str = "") -> str:
+        """A key that stays over the btree limit after compression.
+
+        Postgres compresses btree index tuples, so a long but repetitive key
+        (`"x" * 18000`) is accepted and proves nothing. Real query text is not
+        very compressible, which is why production failed at 8400 bytes. This
+        chains sha256 digests: deterministic, and incompressible enough that
+        its stored size tracks its length.
+        """
+        chain = "".join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(200))
+        return "query_embedding:ns:" + chain + suffix
+
+    def test_key_longer_than_the_btree_index_limit(self, pg_conn):
+        """Postgres caps a btree index row at 8191 bytes. The query embedding
+        cache builds its key from the whole normalized query, so a long query
+        raised ProgramLimitExceeded and the embedding was never cached.
+        """
+        store = PGCacheStore(pg_conn)
+        key = self._high_entropy_key()
+        assert len(key.encode("utf-8")) > 8191
+
+        store.set(key, {"embedding": [0.1, 0.2]}, epoch=0)
+
+        assert store.get(key) == {"embedding": [0.1, 0.2]}
+
+    def test_long_keys_sharing_a_prefix_stay_distinct(self, pg_conn):
+        """A digest must not collapse keys that differ only past the point
+        where a truncating fix would have cut them."""
+        store = PGCacheStore(pg_conn)
+
+        store.set(self._high_entropy_key("alpha"), {"which": "alpha"}, epoch=0)
+        store.set(self._high_entropy_key("beta"), {"which": "beta"}, epoch=0)
+
+        assert store.get(self._high_entropy_key("alpha")) == {"which": "alpha"}
+        assert store.get(self._high_entropy_key("beta")) == {"which": "beta"}
 
 
 class TestRoundTrip:
