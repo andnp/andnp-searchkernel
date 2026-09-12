@@ -5,6 +5,7 @@ from searchkernel.domain import Chunk
 
 if TYPE_CHECKING:
     from searchkernel.chunking.factory import get_chunker
+    from searchkernel.chunking.fixed_window_chunker import FixedWindowChunker
     from searchkernel.chunking.header_chunker import HeaderBasedChunker
 
 
@@ -13,6 +14,10 @@ def __getattr__(name: str) -> Any:
         from searchkernel.chunking.header_chunker import HeaderBasedChunker
 
         return HeaderBasedChunker
+    if name == "FixedWindowChunker":
+        from searchkernel.chunking.fixed_window_chunker import FixedWindowChunker
+
+        return FixedWindowChunker
     if name == "get_chunker":
         from searchkernel.chunking.factory import get_chunker
 
@@ -20,4 +25,10 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["Chunk", "ChunkingStrategy", "HeaderBasedChunker", "get_chunker"]
+__all__ = [
+    "Chunk",
+    "ChunkingStrategy",
+    "FixedWindowChunker",
+    "HeaderBasedChunker",
+    "get_chunker",
+]
