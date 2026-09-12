@@ -98,8 +98,11 @@ class SearchOrchestrator(BaseSearchOrchestrator):
         *,
         limit: int = 10,
         filters: dict[str, Any] | None = None,
+        query_vector: Vector | None = None,
     ) -> RecordSearchOutcome:
-        result = self.record_pipeline.search(query, limit=limit, filters=filters)
+        result = self.record_pipeline.search(
+            query, limit=limit, filters=filters, query_vector=query_vector
+        )
         if inspect.isawaitable(result):
             return await result
         return result

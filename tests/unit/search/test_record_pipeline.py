@@ -296,6 +296,73 @@ async def test_hybrid_search_fuses_keyword_and_vector_rankings() -> None:
     assert outcome.diagnostic_evidence.final_duplicate_count == 0
 
 
+async def test_query_vector_skips_live_embedding_and_reaches_vector_store() -> None:
+    """A caller-supplied embedding drives the vector lane with no live embed.
+
+    Regression coverage for the ``query_vector`` parameter: a caller who
+    already holds a valid embedding for its query (e.g. another record's own
+    stored vector) should never trigger the embedding provider, and the
+    supplied vector -- not one derived from ``query`` -- is what reaches the
+    vector store.
+    """
+    records = {record_id: _record(record_id) for record_id in ("a", "b")}
+    received_vectors: list[Vector] = []
+
+    class RecordingVectorStore:
+        def upsert(self, records: list[Record], model_name: str, dim: int) -> None:
+            pass
+
+        def search(
+            self,
+            query_vector: Vector,
+            k: int,
+            *,
+            model_name: str,
+            dim: int,
+            filters: SearchFilters | None = None,
+        ) -> Sequence[RecordHit]:
+            received_vectors.append(query_vector)
+            assert (model_name, dim) == ("fake-model", 2)
+            return _hits([("a", 0.9)])
+
+        def delete(self, record_ids: list[str]) -> None:
+            pass
+
+        def epoch(self) -> int:
+            return 0
+
+    class EmbedderThatMustNotBeCalled:
+        model_name = "fake-model"
+        dim = 2
+
+        def embed_query(self, query: str) -> list[float]:
+            raise AssertionError("query_vector was supplied; must not re-embed")
+
+    pipeline = RecordSearchPipeline(
+        vector_store=RecordingVectorStore(),
+        embedding_provider=EmbedderThatMustNotBeCalled(),
+        hydrator=_hydrator(records),
+    )
+
+    outcome = await pipeline.async_search(
+        "query", limit=1, query_vector=[0.0, 1.0]
+    )
+
+    assert received_vectors == [[0.0, 1.0]]
+    assert [result.record_id for result in outcome.results] == ["a"]
+
+
+async def test_query_vector_dimension_mismatch_raises() -> None:
+    pipeline = RecordSearchPipeline(
+        vector_store=FakeVectorStore([("a", 0.9)]),
+        embedding_provider=FakeEmbedder(),
+        hydrator=_hydrator({"a": _record("a")}),
+    )
+
+    with pytest.raises(ValueError, match="expected 2"):
+        await pipeline.async_search("query", limit=1, query_vector=[0.0, 1.0, 2.0])
+
+
 async def test_exact_identifier_outranks_nearby_keyword_match() -> None:
     records = {
         "ENG-939": _record("ENG-939"),

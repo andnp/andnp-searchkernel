@@ -271,6 +271,7 @@ class CandidateAcquisition:
                     )
                 )
                 if pipeline._vector_store is not None
+                and execution.precomputed_query_embedding is None
                 else None,
             ]
         )
@@ -279,7 +280,7 @@ class CandidateAcquisition:
         )
         if keyword_result is not None:
             execution.rankings["keyword"] = cast(list[RecordHit], keyword_result)
-        embedding_result = pipeline._consume_stage(
+        embedding_result = execution.precomputed_query_embedding or pipeline._consume_stage(
             _find_stage(stage_results, "vector"), execution.failures
         )
         if embedding_result is not None:
@@ -324,7 +325,7 @@ class CandidateAcquisition:
                     _capture_stage(
                         "vector",
                         lambda: pipeline._candidate_acquirer.vector(
-                            None,
+                            execution.precomputed_query_embedding,
                             plan.vector_candidate_budget,
                             execution.filters,
                             rankings,

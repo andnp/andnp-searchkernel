@@ -248,6 +248,7 @@ class _SearchExecution:
     trace: QueryTrace | None = None
     candidate_key: CandidateCacheKey | None = None
     semantic_only: bool = False
+    precomputed_query_embedding: tuple[Vector, str, int] | None = None
 
     @property
     def routed_plan(self) -> QueryPlan:
@@ -478,21 +479,27 @@ class RecordSearchPipeline:
         *,
         limit: int = 10,
         filters: dict[str, object] | None = None,
+        query_vector: Vector | None = None,
     ) -> RecordSearchOutcome | Awaitable[RecordSearchOutcome]:
         """Search synchronously outside a loop or awaitably inside one."""
         try:
             asyncio.get_running_loop()
         except RuntimeError:
             return asyncio.run(
-                self.async_search(query, limit=limit, filters=filters)
+                self.async_search(
+                    query, limit=limit, filters=filters, query_vector=query_vector
+                )
             )
-        return self.async_search(query, limit=limit, filters=filters)
+        return self.async_search(
+            query, limit=limit, filters=filters, query_vector=query_vector
+        )
 
     def _begin_search(
         self,
         query: str,
         limit: int,
         filters: dict[str, object] | None,
+        query_vector: Vector | None = None,
     ) -> _SearchExecution | None:
         """Validate the request and build its working state, or signal empty.
 
@@ -526,6 +533,11 @@ class RecordSearchPipeline:
             filters=filters,
             limit=limit,
         )
+        precomputed_query_embedding = (
+            self._resolve_precomputed_query_embedding(query_vector)
+            if query_vector is not None
+            else None
+        )
         return _SearchExecution(
             query=query,
             limit=limit,
@@ -539,6 +551,7 @@ class RecordSearchPipeline:
             raw_pre_fusion_overlap=raw_pre_fusion_overlap,
             trace=trace,
             semantic_only=semantic_only,
+            precomputed_query_embedding=precomputed_query_embedding,
         )
 
     def _plan_query(self, execution: _SearchExecution) -> None:
@@ -705,14 +718,22 @@ class RecordSearchPipeline:
         *,
         limit: int = 10,
         filters: dict[str, object] | None = None,
+        query_vector: Vector | None = None,
     ) -> RecordSearchOutcome:
         """Return deterministic hydrated results for ``query``.
 
         ``filters["retrieval_mode"]`` accepts ``"hybrid"`` (the default),
         ``"semantic"``, or ``"semantic_only"``. Semantic-only requests keep
         vector retrieval and disable keyword and graph retrieval.
+
+        ``query_vector``, when supplied, is used directly for the vector
+        lane instead of embedding ``query`` -- for callers that already hold
+        a valid embedding for this query (e.g. another record's stored
+        vector) and would otherwise pay for a redundant, and potentially
+        truncation-losing, re-embed. ``query`` is still required and still
+        drives the keyword/graph lanes and routing.
         """
-        execution = self._begin_search(query, limit, filters)
+        execution = self._begin_search(query, limit, filters, query_vector)
         if execution is None:
             return RecordSearchOutcome()
         self._plan_query(execution)
@@ -1632,11 +1653,7 @@ class RecordSearchPipeline:
             **dict(results[index] for index in range(len(graph_seeds))),
         }
 
-    async def _query_embedding(self, query: str) -> tuple[Vector, str, int]:
-        provider = self._embedding_provider
-        if provider is None:
-            raise ValueError("embedding_provider is required for vector search")
-
+    def _resolve_model_and_dim(self, provider: object) -> tuple[str, int]:
         model_name = self._embedding_model_name or getattr(
             provider, "model_name", None
         )
@@ -1645,6 +1662,31 @@ class RecordSearchPipeline:
             raise ValueError(
                 "vector search requires embedding model name and dimension"
             )
+        return model_name, dim
+
+    def _resolve_precomputed_query_embedding(
+        self, vector: Vector
+    ) -> tuple[Vector, str, int]:
+        """Package a caller-supplied query embedding for the vector lane.
+
+        Skips the embedding provider entirely: the caller already has a
+        valid vector for this query (e.g. another record's own stored
+        embedding), so there is nothing to compute or cache here.
+        """
+        model_name, dim = self._resolve_model_and_dim(self._embedding_provider)
+        if len(vector) != dim:
+            raise ValueError(
+                f"query embedding has dimension {len(vector)}, expected {dim}"
+            )
+        return vector, model_name, dim
+
+    async def _query_embedding(self, query: str) -> tuple[Vector, str, int]:
+        provider = self._embedding_provider
+        if provider is None:
+            raise ValueError("embedding_provider is required for vector search")
+
+        model_name, dim = self._resolve_model_and_dim(provider)
+
         async def compute() -> Vector:
             if hasattr(provider, "embed_query"):
                 return await _call_async(

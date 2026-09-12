@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from searchkernel.domain import Vector
 from searchkernel.ports.search_results import RecordSearchOutcome
 from searchkernel.search.record_pipeline import (
     RecordSearchPipeline,
@@ -26,5 +27,6 @@ class BaseSearchOrchestrator(ABC):
         *,
         limit: int = 10,
         filters: dict[str, Any] | None = None,
+        query_vector: Vector | None = None,
     ) -> RecordSearchOutcome:
         """Search canonical records without mutating backend state."""
