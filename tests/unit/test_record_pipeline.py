@@ -56,7 +56,7 @@ async def test_reranking_bypasses_empty_text_and_preserves_position_and_score() 
         def __init__(self) -> None:
             self.documents: list[str] = []
 
-        def rerank(self, query: str, documents: list[str]) -> list[float]:
+        def rerank(self, query: str, documents: list[str], *, query_vector=None) -> list[float]:
             del query
             self.documents = documents
             return [0.1, 0.9]
@@ -98,12 +98,12 @@ async def test_reranking_prefers_record_reranker_over_plain_text() -> None:
         def __init__(self) -> None:
             self.received: list[Record] = []
 
-        def rerank_records(self, query: str, records: list[Record]) -> list[float]:
+        def rerank_records(self, query: str, records: list[Record], *, query_vector=None) -> list[float]:
             del query
             self.received = records
             return [0.1, 0.9]
 
-        def rerank(self, query: str, documents: list[str]) -> list[float]:
+        def rerank(self, query: str, documents: list[str], *, query_vector=None) -> list[float]:
             del query, documents
             return [0.1, 0.9]
 

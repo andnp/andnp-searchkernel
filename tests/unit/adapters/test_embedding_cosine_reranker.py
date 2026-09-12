@@ -6,6 +6,7 @@ import pytest
 from searchkernel.adapters.rerank.embedding_cosine import EmbeddingCosineReranker
 from searchkernel.domain import Record
 from searchkernel.ports.rerank import RecordReranker, Reranker
+from searchkernel.runtime.query_embedding_cache import QueryEmbeddingCache
 from searchkernel.utils.similarity import cosine_similarity_lists
 
 
@@ -29,8 +30,10 @@ class _FakeEmbeddingProvider:
         self._query_vector = query_vector
         self._document_vectors = document_vectors
         self.embed_calls: list[list[str]] = []
+        self.embed_query_calls: list[str] = []
 
     def embed_query(self, text: str) -> list[float]:
+        self.embed_query_calls.append(text)
         return self._query_vector
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -135,6 +138,60 @@ def test_rerank_records_empty_returns_empty_without_any_lookup_or_embed() -> Non
     assert reranker.rerank_records("query", []) == []
     assert lookup.calls == []
     assert provider.embed_calls == []
+
+
+def test_rerank_reuses_a_supplied_query_vector_and_never_embeds_the_query() -> None:
+    """A caller-supplied query_vector must skip embed_query entirely."""
+    provider = _FakeEmbeddingProvider(
+        query_vector=[0.0, 0.0],  # would score everything 0.5 if actually used
+        document_vectors=[[1.0, 0.0]],
+    )
+    reranker = EmbeddingCosineReranker(provider)
+
+    scores = reranker.rerank("query", ["aligned"], query_vector=[1.0, 0.0])
+
+    assert scores == [1.0]
+    assert provider.embed_query_calls == []
+
+
+def test_rerank_records_reuses_a_supplied_query_vector_and_never_embeds_the_query() -> None:
+    provider = _FakeEmbeddingProvider(
+        query_vector=[0.0, 0.0], document_vectors=[[1.0, 0.0]]
+    )
+    reranker = EmbeddingCosineReranker(provider)
+    records = [_record("a")]
+
+    scores = reranker.rerank_records("query", records, query_vector=[1.0, 0.0])
+
+    assert scores == [1.0]
+    assert provider.embed_query_calls == []
+
+
+def test_rerank_without_a_supplied_vector_still_embeds_the_query() -> None:
+    """Backward-compatible default: no query_vector means embed as before."""
+    provider = _FakeEmbeddingProvider(
+        query_vector=[1.0, 0.0], document_vectors=[[1.0, 0.0]]
+    )
+    reranker = EmbeddingCosineReranker(provider)
+
+    scores = reranker.rerank("query", ["aligned"])
+
+    assert scores == [1.0]
+    assert provider.embed_query_calls == ["query"]
+
+
+def test_rerank_without_a_supplied_vector_uses_the_query_embedding_cache() -> None:
+    """A repeated query reuses the cached embedding instead of re-embedding."""
+    provider = _FakeEmbeddingProvider(
+        query_vector=[1.0, 0.0], document_vectors=[[1.0, 0.0]]
+    )
+    cache = QueryEmbeddingCache()
+    reranker = EmbeddingCosineReranker(provider, query_embedding_cache=cache)
+
+    reranker.rerank("query", ["aligned"])
+    reranker.rerank("query", ["aligned"])
+
+    assert provider.embed_query_calls == ["query"]
 
 
 def test_rerank_matches_scalar_cosine_similarity_lists_for_random_vectors() -> None:

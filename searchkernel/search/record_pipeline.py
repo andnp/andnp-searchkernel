@@ -249,6 +249,10 @@ class _SearchExecution:
     candidate_key: CandidateCacheKey | None = None
     semantic_only: bool = False
     precomputed_query_embedding: tuple[Vector, str, int] | None = None
+    # The embedding actually used for the vector lane once acquisition
+    # resolves one -- caller-supplied or freshly computed -- so reranking
+    # can reuse it instead of embedding the same query a second time.
+    resolved_query_embedding: tuple[Vector, str, int] | None = None
 
     @property
     def routed_plan(self) -> QueryPlan:
@@ -552,6 +556,11 @@ class RecordSearchPipeline:
             trace=trace,
             semantic_only=semantic_only,
             precomputed_query_embedding=precomputed_query_embedding,
+            # Acquisition overwrites this once the vector lane actually
+            # resolves an embedding; seeding it here covers the case where
+            # the vector lane never runs at all (still worth reusing for
+            # reranking if the caller already gave us a vector).
+            resolved_query_embedding=precomputed_query_embedding,
         )
 
     def _plan_query(self, execution: _SearchExecution) -> None:
@@ -677,12 +686,14 @@ class RecordSearchPipeline:
         overrides the reranker rather than the reverse.
         """
         plan = execution.routed_plan
+        resolved_embedding = execution.resolved_query_embedding
         hydrated = await self._rerank_results(
             execution.query,
             execution.hydrated,
             plan,
             execution.failures,
             execution.diagnostics,
+            query_vector=None if resolved_embedding is None else resolved_embedding[0],
         )
         exact_identifier_keys = _exact_identifier_result_keys(
             hydrated, execution.query
@@ -816,6 +827,8 @@ class RecordSearchPipeline:
         plan: QueryPlan,
         failures: list[RecordSearchFailure],
         diagnostics: list[str],
+        *,
+        query_vector: Vector | None = None,
     ) -> list[RecordSearchResult]:
         reranker = self._reranker
         if reranker is None or plan.rerank_budget <= 0 or not results:
@@ -843,10 +856,14 @@ class RecordSearchPipeline:
                     reranker.rerank_records,
                     query,
                     [result.record for _, result, _ in rerankable],
+                    query_vector=query_vector,
                 )
             else:
                 scores = await _call_async(
-                    reranker.rerank, query, [text for _, _, text in rerankable]
+                    reranker.rerank,
+                    query,
+                    [text for _, _, text in rerankable],
+                    query_vector=query_vector,
                 )
             if len(scores) != len(rerankable):
                 raise ValueError(

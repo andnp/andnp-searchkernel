@@ -20,6 +20,8 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
+from searchkernel.domain import Vector
+
 _MARKDOWN_EMPHASIS = "*`"
 _DECIMAL_RATING = re.compile(r"\d+\.\d+")
 _RATING_OF_TEN = re.compile(r"(-?\d{1,3})\s*/\s*10\b")
@@ -50,7 +52,14 @@ class LLMJudgeReranker:
         self.model_name = model_name
         self._max_concurrency = max_concurrency
 
-    def rerank(self, query: str, documents: list[str]) -> list[float]:
+    def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        *,
+        query_vector: Vector | None = None,
+    ) -> list[float]:
+        del query_vector  # an LLM judge scores from text, not embeddings
         if not documents:
             return []
         workers = min(self._max_concurrency, len(documents))

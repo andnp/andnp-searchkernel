@@ -331,7 +331,7 @@ async def test_federation_reranker_is_optional_for_hits_without_text():
         def __init__(self) -> None:
             self.documents: list[str] = []
 
-        def rerank(self, query: str, documents: list[str]) -> list[float]:
+        def rerank(self, query: str, documents: list[str], *, query_vector=None) -> list[float]:
             self.documents = documents
             return list(reversed(range(len(documents))))
 
@@ -363,7 +363,7 @@ async def test_federation_reranker_is_bounded_by_candidates_and_text_length():
         def __init__(self) -> None:
             self.documents: list[str] = []
 
-        def rerank(self, query: str, documents: list[str]) -> list[float]:
+        def rerank(self, query: str, documents: list[str], *, query_vector=None) -> list[float]:
             self.documents = documents
             return [0.0, 1.0]
 

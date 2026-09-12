@@ -13,15 +13,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from searchkernel.domain import Record
+from searchkernel.domain import Record, Vector
 from searchkernel.ports.rerank import RecordReranker, Reranker
 
 
-def _tier_scores(tier: Reranker, query: str, records: list[Record]) -> list[float]:
+def _tier_scores(
+    tier: Reranker,
+    query: str,
+    records: list[Record],
+    *,
+    query_vector: Vector | None,
+) -> list[float]:
     if isinstance(tier, RecordReranker):
-        return tier.rerank_records(query, records)
+        return tier.rerank_records(query, records, query_vector=query_vector)
     documents = [f"{record.title}\n{record.indexed_text or record.body}".strip() for record in records]
-    return tier.rerank(query, documents)
+    return tier.rerank(query, documents, query_vector=query_vector)
 
 
 class CascadingReranker:
@@ -111,29 +117,41 @@ class CascadingReranker:
         self._confidence_gap = confidence_gap
         self.model_name = f"cascade({fast.model_name},{slow.model_name})"
 
-    def rerank(self, query: str, documents: list[str]) -> list[float]:
+    def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        *,
+        query_vector: Vector | None = None,
+    ) -> list[float]:
         if not documents:
             return []
-        fast_scores = self._fast.rerank(query, documents)
+        fast_scores = self._fast.rerank(query, documents, query_vector=query_vector)
         return self._cascade(
             query,
             n=len(documents),
             fast_scores=fast_scores,
             score_slow=lambda indices: self._slow.rerank(
-                query, [documents[i] for i in indices]
+                query, [documents[i] for i in indices], query_vector=query_vector
             ),
         )
 
-    def rerank_records(self, query: str, records: list[Record]) -> list[float]:
+    def rerank_records(
+        self,
+        query: str,
+        records: list[Record],
+        *,
+        query_vector: Vector | None = None,
+    ) -> list[float]:
         if not records:
             return []
-        fast_scores = _tier_scores(self._fast, query, records)
+        fast_scores = _tier_scores(self._fast, query, records, query_vector=query_vector)
         return self._cascade(
             query,
             n=len(records),
             fast_scores=fast_scores,
             score_slow=lambda indices: _tier_scores(
-                self._slow, query, [records[i] for i in indices]
+                self._slow, query, [records[i] for i in indices], query_vector=query_vector
             ),
         )
 

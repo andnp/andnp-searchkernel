@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import ItemsView
 from typing import TYPE_CHECKING, Protocol, Self, TypeGuard
 
+from searchkernel.domain import Vector
+
 if TYPE_CHECKING:
     from torch import Tensor
 
@@ -118,18 +120,27 @@ class HuggingFaceReranker:
         except ImportError:
             return False
 
-    def rerank(self, query: str, documents: list[str]) -> list[float]:
+    def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        *,
+        query_vector: Vector | None = None,
+    ) -> list[float]:
         """
         Score documents for relevance to a query.
 
         Args:
             query: The search query string.
             documents: List of document texts to score.
+            query_vector: Unused -- this reranker judges yes/no relevance
+                from text, not embeddings.
 
         Returns:
             List of relevance scores in [0, 1], one per document, in order.
             Higher = more relevant.
         """
+        del query_vector
         scores = []
 
         # Process in reasonable batches to avoid OOM

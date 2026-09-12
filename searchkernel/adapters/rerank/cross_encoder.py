@@ -8,6 +8,8 @@ from __future__ import annotations
 import functools
 from collections.abc import Callable
 
+from searchkernel.domain import Vector
+
 
 class CrossEncoderReranker:
     """Reranker backed by an injected cross-encoder scoring function.
@@ -26,7 +28,14 @@ class CrossEncoderReranker:
         self._score = score
         self.model_name = model_name
 
-    def rerank(self, query: str, documents: list[str]) -> list[float]:
+    def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        *,
+        query_vector: Vector | None = None,
+    ) -> list[float]:
+        del query_vector  # a cross-encoder scores text pairs directly, no embedding involved
         if not documents:
             return []
         return self._score(query, documents)

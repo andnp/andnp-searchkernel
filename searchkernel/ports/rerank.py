@@ -7,7 +7,7 @@ with higher values indicating greater relevance.
 
 from typing import Protocol, runtime_checkable
 
-from searchkernel.domain import Record
+from searchkernel.domain import Record, Vector
 
 
 @runtime_checkable
@@ -21,13 +21,24 @@ class Reranker(Protocol):
 
     model_name: str
 
-    def rerank(self, query: str, documents: list[str]) -> list[float]:
+    def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        *,
+        query_vector: Vector | None = None,
+    ) -> list[float]:
         """
         Score a list of documents for relevance to a query.
 
         Args:
             query: The search query string.
             documents: List of document texts to score.
+            query_vector: A precomputed embedding for ``query``, when the
+                caller already has one (e.g. from vector-lane acquisition).
+                An embedding-based implementation reuses it instead of
+                embedding ``query`` again; implementations that don't embed
+                the query at all (e.g. a cross-encoder) ignore it.
 
         Returns:
             List of relevance scores, one per input document, in the same order.
@@ -48,13 +59,20 @@ class RecordReranker(Protocol):
     method when it is available, falling back to plain text otherwise.
     """
 
-    def rerank_records(self, query: str, records: list[Record]) -> list[float]:
+    def rerank_records(
+        self,
+        query: str,
+        records: list[Record],
+        *,
+        query_vector: Vector | None = None,
+    ) -> list[float]:
         """
         Score records for relevance to a query.
 
         Args:
             query: The search query string.
             records: Records to score.
+            query_vector: See ``Reranker.rerank``.
 
         Returns:
             List of relevance scores, one per input record, in the same order.

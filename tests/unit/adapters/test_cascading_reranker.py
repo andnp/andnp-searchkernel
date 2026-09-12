@@ -24,9 +24,11 @@ class _FakeReranker:
         self.model_name = model_name
         self._scores = scores
         self.calls: list[list[str]] = []
+        self.query_vectors: list[object] = []
 
-    def rerank(self, query: str, documents: list[str]) -> list[float]:
+    def rerank(self, query: str, documents: list[str], *, query_vector=None) -> list[float]:
         self.calls.append(list(documents))
+        self.query_vectors.append(query_vector)
         return list(self._scores)
 
 
@@ -36,11 +38,11 @@ class _FakeRecordReranker:
         self._scores = scores
         self.calls: list[list[str]] = []
 
-    def rerank_records(self, query: str, records: list[Record]) -> list[float]:
+    def rerank_records(self, query: str, records: list[Record], *, query_vector=None) -> list[float]:
         self.calls.append([record.source_id for record in records])
         return list(self._scores)
 
-    def rerank(self, query: str, documents: list[str]) -> list[float]:
+    def rerank(self, query: str, documents: list[str], *, query_vector=None) -> list[float]:
         del query, documents
         return list(self._scores)
 
@@ -48,7 +50,7 @@ class _FakeRecordReranker:
 class _RaisingReranker:
     model_name = "raising"
 
-    def rerank(self, query: str, documents: list[str]) -> list[float]:
+    def rerank(self, query: str, documents: list[str], *, query_vector=None) -> list[float]:
         raise RuntimeError("slow model is down")
 
 
@@ -115,6 +117,19 @@ def test_escalation_reorders_top_group_by_slow_scores() -> None:
     # Remainder scores are untouched fast scores.
     assert scores[docs.index("c")] == fast_scores[2]
     assert scores[docs.index("d")] == fast_scores[3]
+
+
+def test_query_vector_is_forwarded_to_both_the_fast_and_slow_tiers() -> None:
+    docs = ["a", "b", "c", "d"]
+    fast_scores = [0.80, 0.85, 0.76, 0.10]
+    cascade, fast, slow = _cascade(
+        fast_scores, [0.2, 0.9], escalate_top_n=2, confidence_gap=0.1
+    )
+
+    cascade.rerank("q", docs, query_vector=[1.0, 0.0])
+
+    assert fast.query_vectors == [[1.0, 0.0]]
+    assert slow.query_vectors == [[1.0, 0.0]]
 
 
 def test_returned_scores_are_aligned_to_input_order() -> None:

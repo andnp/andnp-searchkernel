@@ -12,6 +12,7 @@ import numpy as np
 
 from searchkernel.domain import Record, Vector
 from searchkernel.ports.embedding import EmbeddingProvider
+from searchkernel.runtime.query_embedding_cache import QueryEmbeddingCache
 
 
 @runtime_checkable
@@ -54,24 +55,56 @@ class EmbeddingCosineReranker:
         embedding_provider: EmbeddingProvider,
         *,
         stored_vectors: StoredVectorLookup | None = None,
+        query_embedding_cache: QueryEmbeddingCache | None = None,
     ) -> None:
         self._embedding_provider = embedding_provider
         self._stored_vectors = stored_vectors
+        self._query_embedding_cache = query_embedding_cache
         self.model_name = f"cosine({embedding_provider.model_name})"
 
-    def rerank(self, query: str, documents: list[str]) -> list[float]:
+    def _resolve_query_vector(self, query: str, query_vector: Vector | None) -> Vector:
+        """Use a caller-supplied vector, else a cached one, else embed fresh.
+
+        A caller that already resolved this query's embedding for the
+        vector-search lane (the common case) passes it in, so this never
+        embeds twice for one search. The cache only matters for the
+        remaining case -- reranking without an accompanying vector search.
+        """
+        if query_vector is not None:
+            return query_vector
+        if self._query_embedding_cache is None:
+            return self._embedding_provider.embed_query(query)
+        return self._query_embedding_cache.get_or_compute(
+            encoder_namespace=self._embedding_provider.model_name,
+            query=query,
+            compute=lambda: self._embedding_provider.embed_query(query),
+        )
+
+    def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        *,
+        query_vector: Vector | None = None,
+    ) -> list[float]:
         if not documents:
             return []
-        query_vector = self._embedding_provider.embed_query(query)
+        resolved_query_vector = self._resolve_query_vector(query, query_vector)
         document_vectors = self._embedding_provider.embed(documents)
-        return _batched_cosine_scores(query_vector, document_vectors)
+        return _batched_cosine_scores(resolved_query_vector, document_vectors)
 
-    def rerank_records(self, query: str, records: list[Record]) -> list[float]:
+    def rerank_records(
+        self,
+        query: str,
+        records: list[Record],
+        *,
+        query_vector: Vector | None = None,
+    ) -> list[float]:
         if not records:
             return []
-        query_vector = self._embedding_provider.embed_query(query)
+        resolved_query_vector = self._resolve_query_vector(query, query_vector)
         vectors = self._vectors_for(records)
-        return _batched_cosine_scores(query_vector, vectors)
+        return _batched_cosine_scores(resolved_query_vector, vectors)
 
     def _vectors_for(self, records: list[Record]) -> list[Vector]:
         stored: dict[str, Vector] = {}

@@ -75,7 +75,14 @@ class CandidateAcquirer:
         context: RecordSearchQueryContext,
         query: str | None = None,
         plan: QueryPlan | None = None,
-    ) -> list[RecordHit]:
+    ) -> tuple[list[RecordHit], tuple[Vector, str, int]]:
+        """Acquire the vector lane's candidates.
+
+        Returns the resolved embedding alongside the ranking (whichever one
+        was actually used -- caller-supplied or freshly computed here) so
+        a caller that reranks afterwards can reuse it instead of embedding
+        the same query a second time.
+        """
         if embedding is None:
             if query is None:
                 raise ValueError("query is required when embedding is absent")
@@ -98,7 +105,7 @@ class CandidateAcquirer:
             ]
         vector_store = self._vector_store
         if vector_store is None:
-            return []
+            return [], embedding
         vector_ranking = _normalize_hits(
             await _search_vector_store(
                 vector_store,
@@ -118,7 +125,7 @@ class CandidateAcquirer:
                 ),
                 sort=False,
             )
-        return vector_ranking
+        return vector_ranking, embedding
 
 
 class CandidateAcquisition:
@@ -299,9 +306,11 @@ class CandidateAcquisition:
                 vector_result, execution.failures
             )
             if vector_value is not None:
-                execution.rankings["vector"] = cast(
-                    list[RecordHit], vector_value
+                hits, resolved_embedding = cast(
+                    "tuple[list[RecordHit], tuple[Vector, str, int]]", vector_value
                 )
+                execution.rankings["vector"] = hits
+                execution.resolved_query_embedding = resolved_embedding
 
     async def _acquire_parallel_candidates(self, execution: _SearchExecution) -> None:
         pipeline = self._pipeline
@@ -345,7 +354,11 @@ class CandidateAcquisition:
             elif stage == "keyword":
                 rankings["keyword"] = cast(list[RecordHit], value)
             else:
-                rankings["vector"] = cast(list[RecordHit], value)
+                hits, resolved_embedding = cast(
+                    "tuple[list[RecordHit], tuple[Vector, str, int]]", value
+                )
+                rankings["vector"] = hits
+                execution.resolved_query_embedding = resolved_embedding
 
     def _fuse_candidates(
         self,

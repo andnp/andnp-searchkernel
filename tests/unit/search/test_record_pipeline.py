@@ -422,7 +422,7 @@ async def test_exact_identifier_survives_reranker_reordering() -> None:
     class ReverseReranker:
         model_name = "fake-reranker"
 
-        def rerank(self, query: str, documents: list[str]) -> list[float]:
+        def rerank(self, query: str, documents: list[str], *, query_vector=None) -> list[float]:
             return [0.1, 0.9]
 
     exact = _record("ENG-939")
@@ -440,6 +440,44 @@ async def test_exact_identifier_survives_reranker_reordering() -> None:
         exact.source_id,
         nearby.source_id,
     ]
+
+
+async def test_reranker_reuses_the_resolved_vector_lane_embedding() -> None:
+    """The reranker must not re-embed a query the vector lane already embedded.
+
+    Regression coverage: previously the vector lane and the reranker each
+    called embed_query independently, embedding every query twice.
+    """
+    embed_query_calls: list[str] = []
+
+    class CountingEmbedder(FakeEmbedder):
+        def embed_query(self, query: str) -> list[float]:
+            embed_query_calls.append(query)
+            return [1.0, 0.0]
+
+    class RecordingReranker:
+        model_name = "recording-reranker"
+
+        def __init__(self) -> None:
+            self.query_vectors: list[object] = []
+
+        def rerank(self, query: str, documents: list[str], *, query_vector=None) -> list[float]:
+            self.query_vectors.append(query_vector)
+            return [1.0 for _ in documents]
+
+    reranker = RecordingReranker()
+    pipeline = RecordSearchPipeline(
+        vector_store=FakeVectorStore([("a", 0.9)]),
+        embedding_provider=CountingEmbedder(),
+        hydrator=_hydrator({"a": _record("a")}),
+        reranker=reranker,
+        config=RecordSearchConfig(rerank_budget=5),
+    )
+
+    await pipeline.async_search("query", limit=5)
+
+    assert embed_query_calls == ["query"]
+    assert reranker.query_vectors == [[1.0, 0.0]]
 
 
 @pytest.mark.parametrize("retrieval_mode", ["semantic", "semantic_only"])
@@ -2859,7 +2897,7 @@ async def test_rerank_runs_once_with_a_bounded_candidate_set() -> None:
         def __init__(self) -> None:
             self.calls: list[list[str]] = []
 
-        def rerank(self, query: str, documents: list[str]) -> list[float]:
+        def rerank(self, query: str, documents: list[str], *, query_vector=None) -> list[float]:
             self.calls.append(documents)
             return [0.2, 0.9]
 
@@ -2884,7 +2922,7 @@ async def test_rerank_failure_falls_back_deterministically_in_lenient_mode() -> 
     class FailingReranker:
         model_name = "failing-reranker"
 
-        def rerank(self, query: str, documents: list[str]) -> list[float]:
+        def rerank(self, query: str, documents: list[str], *, query_vector=None) -> list[float]:
             raise RuntimeError("reranker unavailable")
 
     records = {record_id: _record(record_id) for record_id in ("a", "b")}
